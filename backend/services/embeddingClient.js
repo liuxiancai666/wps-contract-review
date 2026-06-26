@@ -52,7 +52,7 @@ const embedTexts = async (texts) => {
     try {
         const response = await axios.post(
             embeddingUrl(),
-            { model: EMBEDDING_MODEL, input },
+            { model: EMBEDDING_MODEL, inputs: input },
             { headers: { Authorization: `Bearer ${EMBEDDING_API_KEY}` }, timeout: 60000 },
         );
         const data = response.data?.data || [];

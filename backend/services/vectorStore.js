@@ -730,7 +730,10 @@ const listKnowledgeDocuments = async ({
 const sqliteVectorSearch = async (query, queryVector, { limit, sourceTypes }) => {
     let rowsQuery = db('vector_documents');
     if (sourceTypes.length > 0) rowsQuery = rowsQuery.whereIn('source_type', sourceTypes);
-    const rows = await rowsQuery.select('*').limit(Math.min(limit * 5, 1000));
+    // 小规模数据直接全量扫描，确保所有语义相关行进入候选
+    const total = await db('vector_documents').count({ total: '*' }).first();
+    const scanLimit = Number(total?.total || 0) > 5000 ? Math.min(limit * 40, 5000) : 10000;
+    const rows = await rowsQuery.select('*').limit(scanLimit);
     return rows
         .map((row) => {
             const embedding = JSON.parse(row.embedding || '[]');
