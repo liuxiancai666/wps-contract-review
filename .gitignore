@@ -55,3 +55,7 @@ Thumbs.db
 CLAUDE.md
 
 report.md
+# Database
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

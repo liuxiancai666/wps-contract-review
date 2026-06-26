@@ -189,11 +189,17 @@ export default {
         return apiClient.get('/knowledge/template', { params: { type }, responseType: 'blob' });
     },
 
-    getReviewTemplates() {
-        return apiClient.get('/templates');
+    rebuildKnowledge() {
+        return apiClient.post('/knowledge/rebuild', {}, { timeout: 300000 });
     },
 
-    rebuildKnowledge() {
-        return apiClient.post('/knowledge/rebuild');
+    getVectorStatus() {
+        return apiClient.get('/knowledge/vector-status');
+    },
+
+    getReviewTemplates() {
+        return apiClient.get('/templates');
     }
 };
+
+export { apiClient };
