@@ -4,11 +4,15 @@ const crypto = require('crypto');
 const EMBEDDING_BASE_URL = process.env.EMBEDDING_BASE_URL || process.env.LLM_BASE_URL || '';
 const EMBEDDING_API_KEY = process.env.EMBEDDING_API_KEY || process.env.LLM_API_KEY || '';
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'BAAI/bge-m3';
-const RERANK_BASE_URL = process.env.RERANK_BASE_URL || EMBEDDING_BASE_URL;
+const RERANK_BASE_URL = String(process.env.RERANK_BASE_URL || '').length > 0
+    ? process.env.RERANK_BASE_URL
+    : (String(process.env.ENABLE_RERANK || 'false').toLowerCase() === 'true' ? EMBEDDING_BASE_URL : '');
 const RERANK_API_KEY = process.env.RERANK_API_KEY || EMBEDDING_API_KEY;
 const RERANK_MODEL = process.env.RERANK_MODEL || 'BAAI/bge-reranker-v2-m3';
-const EMBEDDING_DIM = Number(process.env.EMBEDDING_DIM || 1024);
+
 const EMBEDDING_BATCH_SIZE = Math.max(1, Number(process.env.EMBEDDING_BATCH_SIZE || 32));
+const EMBEDDING_DIM = Number(process.env.EMBEDDING_DIM || 1024);
+const EMBEDDING_RETRY_INTERVAL_MS = Number(process.env.EMBEDDING_RETRY_INTERVAL_MS || 300000); // 5 min
 
 const hashFallbackEmbedding = (text) => {
     const vector = new Array(EMBEDDING_DIM).fill(0);
@@ -25,9 +29,17 @@ const hashFallbackEmbedding = (text) => {
     return norm ? vector.map((value) => Number((value / norm).toFixed(6))) : vector;
 };
 
-// 追踪当前是否运行在 hash fallback 模式（与真实 embedding 相对）
+// 追踪当前是否运行在 hash fallback 模式
 let _hashFallbackMode = false;
-const isHashFallback = () => _hashFallbackMode;
+let _lastFallbackTime = 0;
+const isHashFallback = () => {
+    // 定期重试：上次降级超过 RETRY_INTERVAL 后，允许重新尝试真实 embedding
+    if (_hashFallbackMode && Date.now() - _lastFallbackTime > EMBEDDING_RETRY_INTERVAL_MS) {
+        console.log(`[Embedding] ${EMBEDDING_RETRY_INTERVAL_MS / 1000}s passed since fallback. Will retry real embedding.`);
+        _hashFallbackMode = false;
+    }
+    return _hashFallbackMode;
+};
 
 const embeddingUrl = () => `${String(EMBEDDING_BASE_URL || '').replace(/\/$/, '')}/embeddings`;
 
@@ -46,6 +58,7 @@ const embedTexts = async (texts) => {
     if (!EMBEDDING_BASE_URL || !EMBEDDING_API_KEY) {
         console.warn('[Embedding] EMBEDDING_BASE_URL/API_KEY missing. Falling back to local hash vectors.');
         _hashFallbackMode = true;
+        _lastFallbackTime = Date.now();
         return input.map(hashFallbackEmbedding);
     }
 
@@ -59,8 +72,12 @@ const embedTexts = async (texts) => {
         _hashFallbackMode = false;
         return data.map((item) => item.embedding);
     } catch (error) {
-        console.warn(`[Embedding] Online embedding failed: ${error.message}. Falling back to local hash vectors.`);
+        const respInfo = error.response
+            ? `status=${error.response.status} body=${JSON.stringify(error.response.data).slice(0, 200)}`
+            : `code=${error.code} message=${error.message}`;
+        console.warn(`[Embedding] Online embedding failed (${respInfo}). Falling back to local hash vectors.`);
         _hashFallbackMode = true;
+        _lastFallbackTime = Date.now();
         return input.map(hashFallbackEmbedding);
     }
 };
@@ -100,7 +117,10 @@ const rerankDocuments = async (query, documents, topN) => {
             })
             .filter(Boolean);
     } catch (error) {
-        console.warn(`[Rerank] Online rerank failed: ${error.message}. Using vector scores only.`);
+        const respInfo = error.response
+            ? `status=${error.response.status} body=${JSON.stringify(error.response.data).slice(0, 200)}`
+            : `message=${error.message}`;
+        console.warn(`[Rerank] Online rerank failed (${respInfo}). Using vector scores only.`);
         return documents.slice(0, topN || documents.length);
     }
 };
