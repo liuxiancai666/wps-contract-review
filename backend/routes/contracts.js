@@ -1001,6 +1001,203 @@ const annotateKnowledgeUpdates = (items) => items.map((item) => ({
     updateNotice: '当前知识库未标记该依据存在更新；正式出具意见前仍应核对最新法律、司法解释和裁判文书。',
 }));
 
+// ============ 分节链式检索 (Step A) ============
+
+/**
+ * 智能合同分节：将合同文本按条款/章节/编号/自然段落拆分为 N 段
+ * 返回 [{ index, title, content, type }]
+ */
+const splitContractIntoSections = (text) => {
+    if (!text || !String(text).trim()) return [{ index: 0, title: '全文', content: String(text || ''), type: 'full' }];
+
+    const raw = String(text);
+    const lines = raw.split('\n');
+    const sections = [];
+    let current = { index: 0, title: '', content: '', type: 'para' };
+
+    // 识别第X条、第X章、第X节、"X."编号、"X、"编号、或"（X）""【X】"标记
+    const sectionPattern = /^\s*(第[一二三四五六七八九十百千\d]+[条章节])\s*[。\.\s]?(.*)$|^\s*(第[一二三四五六七八九十百千\d]+[条章节])\s*$/;
+    // 段落编号模式: "X." "X、" "X、" "（X）" "【X】"
+    const numberedPattern = /^\s*(\d+)\.\s+(.+)$|^\s*(\d+)[、．]\s*(.+)$|^\s*[（【\(]\s*(\d+)\s*[）】\)]\s*(.+)$/;
+    // 连续自然段落合并阈值
+    const MAX_PARA_LEN = 3000;
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        const sectionMatch = trimmed.match(sectionPattern);
+        const numberedMatch = trimmed.match(numberedPattern);
+
+        let isNewSection = false;
+        let sectionTitle = '';
+        let sectionContent = trimmed;
+
+        if (sectionMatch) {
+            // 匹配到"第X条 标题"或"第X条"
+            sectionTitle = (sectionMatch[1] || sectionMatch[3] || '').trim();
+            const rest = (sectionMatch[2] || '').trim();
+            sectionContent = rest || trimmed;
+            isNewSection = true;
+        } else if (numberedMatch) {
+            // 匹配到 "1. 标题" "2、标题" "（3）标题"
+            const num = numberedMatch[1] || numberedMatch[3] || numberedMatch[5] || '';
+            const title = numberedMatch[2] || numberedMatch[4] || numberedMatch[6] || '';
+            sectionTitle = `${num}. ${title}`;
+            isNewSection = true;
+        } else if (current.content.length > MAX_PARA_LEN) {
+            // 当前段落过长，强制切分
+            isNewSection = true;
+            sectionTitle = `段落${sections.length + 1}`;
+        }
+
+        if (isNewSection && current.content) {
+            sections.push({ ...current });
+            current = {
+                index: sections.length,
+                title: sectionTitle,
+                content: sectionContent,
+                type: sectionMatch ? 'clause' : (numberedMatch ? 'numbered' : 'para'),
+            };
+        } else if (isNewSection) {
+            current.title = sectionTitle;
+            current.content = sectionContent;
+            current.type = sectionMatch ? 'clause' : (numberedMatch ? 'numbered' : 'para');
+        } else {
+            current.content += '\n' + trimmed;
+        }
+    }
+    if (current.content) sections.push(current);
+
+    // 如果分节太少（<=2），退回到按字数大致切分
+    if (sections.length <= 2 && raw.length > 4000) {
+        const roughChunks = [];
+        const chunkSize = Math.ceil(raw.length / Math.ceil(raw.length / 2500));
+        for (let i = 0; i < raw.length; i += chunkSize) {
+            roughChunks.push({
+                index: roughChunks.length,
+                title: `段落${roughChunks.length + 1}`,
+                content: raw.slice(i, i + chunkSize),
+                type: 'para',
+            });
+        }
+        return roughChunks;
+    }
+
+    return sections;
+};
+
+/**
+ * 构造多个检索角度：从当前节内容 + 审查点推断 2~3 个不同查询
+ */
+const buildSectionQueries = (sectionContent, sectionTitle, reviewPoints) => {
+    const queries = [];
+
+    // 1. 从节文本中提取法律关键句（原 extractLegalClauses 逻辑）
+    const legalSentences = extractLegalClauses(sectionContent, 5);
+    if (legalSentences.length > 0) {
+        queries.push(legalSentences.join('\n'));
+    }
+
+    // 2. 当前节标题 + 审查点聚焦
+    const titleQuery = [sectionTitle, ...reviewPoints].filter(Boolean).join(' ');
+    if (titleQuery.trim()) {
+        queries.push(titleQuery);
+    }
+
+    // 3. 合同全文中法律关键词丰富度高的句子（从本节取 top-3 关键词句 + 邻近上下文）
+    const expandedSentences = extractLegalClauses(sectionContent, 8).slice(0, 3);
+    if (expandedSentences.length > 0) {
+        queries.push(expandedSentences.join('\n'));
+    }
+
+    // 去重（简单模糊去重）
+    const deduped = [];
+    const seen = new Set();
+    for (const q of queries) {
+        const sig = q.replace(/\s+/g, '').slice(0, 60);
+        if (!seen.has(sig)) {
+            seen.add(sig);
+            deduped.push(q);
+        }
+    }
+    return deduped;
+};
+
+/**
+ * 逐节 Multi-Query 知识检索 + 合并去重
+ * 替代原来的单次 getRelevantKnowledge 调用
+ */
+const multiSectionKnowledgeRetrieval = async (plainText, options, perSectionLimit = 5, totalLimit = 24) => {
+    const sections = splitContractIntoSections(plainText);
+    const allResults = [];
+
+    // 并行检索每节（控制并发数，避免 API 限流）
+    const CONCURRENCY = 4;
+    for (let i = 0; i < sections.length; i += CONCURRENCY) {
+        const batch = sections.slice(i, i + CONCURRENCY);
+        const batchResults = await Promise.all(batch.map(async (section) => {
+            const sectionQueries = buildSectionQueries(
+                section.content,
+                section.title,
+                options.reviewPoints || [],
+            );
+
+            if (sectionQueries.length === 0) return [];
+
+            // 每条查询独立检索，结果合并
+            const sectionMatches = [];
+            const queriedQueries = sectionQueries.slice(0, 3); // 最多 3 个查询角度
+            for (const query of queriedQueries) {
+                const fullQuery = [
+                    options.contractType || '',
+                    options.perspective ? `${options.perspective} 立场 风险 责任 权利义务` : '',
+                    query,
+                ].filter(Boolean).join('\n');
+
+                try {
+                    const matches = await searchVectorDocuments(fullQuery, {
+                        limit: perSectionLimit,
+                        sourceTypes: ['law', 'case', 'rule', 'guide'],
+                        rerank: true,
+                    });
+                    sectionMatches.push(...matches);
+                } catch (err) {
+                    console.warn(`[Section ${section.index}] Query failed:`, err.message);
+                }
+            }
+            return sectionMatches;
+        }));
+        allResults.push(...batchResults.flat());
+    }
+
+    // 全局按 clause_id 去重（保留 score 最高的）
+    const byClause = new Map();
+    for (const item of allResults) {
+        const sourceKey = `${item.title}@@${item.clause_id || ''}`;
+        const existing = byClause.get(sourceKey);
+        const score = item.rerank_score ?? item.score ?? 0;
+        if (!existing || score > (existing.rerank_score ?? existing.score ?? 0)) {
+            byClause.set(sourceKey, item);
+        }
+    }
+
+    const merged = Array.from(byClause.values());
+    // 按 score 排序
+    merged.sort((a, b) => (b.rerank_score ?? b.score ?? 0) - (a.rerank_score ?? a.score ?? 0));
+
+    return merged.slice(0, totalLimit).map((item) => ({
+        source_type: item.source_type,
+        law: item.title,
+        clause: item.clause_id || item.source_id,
+        content: item.content,
+        score: item.rerank_score ?? item.score,
+        source_name: item.source_name,
+        source_url: item.source_url,
+        metadata: item.metadata || {},
+    }));
+};
+
 const runSealOcr = async (filePath) => {
     const ext = path.extname(filePath).toLowerCase();
     if (!['.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'].includes(ext)) {
@@ -1397,16 +1594,17 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
         const reviewPoints = preAnalysisData.reviewPoints?.length ? preAnalysisData.reviewPoints : template.review_points;
         const corePurposes = preAnalysisData.core_purposes?.length ? preAnalysisData.core_purposes : template.core_purposes;
 
-        // Step 2: 检索法条与案例依据
-        await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'running', message: '正在检索法条与案例依据...' });
-        const relevantKnowledge = await getRelevantKnowledge({
-            text: plainText,
+        // Step 2: 逐节 Multi-Query 知识检索（替代原来单次检索）
+        await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'running', message: '正在按合同结构逐节检索法条与案例依据（分节多角度检索，覆盖率更高）...' });
+        const sections = splitContractIntoSections(plainText);
+        await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'running', message: `合同已分为 ${sections.length} 节，正在进行多角度知识检索...` });
+        const relevantKnowledge = await multiSectionKnowledgeRetrieval(plainText, {
             contractType: preAnalysisData.contract_type,
             reviewPoints,
             corePurposes,
             perspective: userPerspective,
         });
-        await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'completed', message: `法条与案例依据检索已完成（${relevantKnowledge.length} 条）。`, partialResult: { relevant_laws: annotateKnowledgeUpdates(relevantKnowledge) } });
+        await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'completed', message: `逐节 Multi-Query 知识检索已完成（${sections.length} 节 × 多角度查询，合并去重后 ${relevantKnowledge.length} 条依据）。`, partialResult: { relevant_laws: annotateKnowledgeUpdates(relevantKnowledge) } });
 
         // Step 3: 核验合同主体信息
         await emitAnalysisProgress(null, contractId, { step: 'company_search', status: 'running', message: '正在核验合同主体信息...' });
@@ -2156,3 +2354,6 @@ router.get('/', async (req, res) => {
 
 module.exports = router;
 module.exports.setIoInstance = setIoInstance;
+module.exports.splitContractIntoSections = splitContractIntoSections;
+module.exports.buildSectionQueries = buildSectionQueries;
+module.exports.multiSectionKnowledgeRetrieval = multiSectionKnowledgeRetrieval;
