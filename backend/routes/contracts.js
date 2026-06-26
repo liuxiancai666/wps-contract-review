@@ -886,6 +886,52 @@ const compactText = (value, maxLength = 4000) => String(value || '')
     .trim()
     .slice(0, maxLength);
 
+const LEGAL_TRIGGER_TERMS = [
+    '应当', '不得', '有权', '义务', '责任', '赔偿',
+    '解除', '终止', '保密', '管辖', '仲裁', '违约',
+    '保证', '承诺', '担保', '授权', '许可', '限制',
+    '禁止', '必须', '可以', '视为',
+    '违约金', '损害赔偿', '知识产权', '社会保险',
+    '竞业限制', '工资', '报酬', '股权', '期权',
+    '质押', '抵押', '定金', '保证金', '留置',
+    '通知', '送达', '争议', '诉讼', '继承',
+    '罚款', '商标', '专利', '著作权', '商业秘密',
+    '刑事责任', '连带', '免责', '不可抗力',
+    '转让', '分包', '转包', '出租', '出售',
+    '关联方', '披露', '陈述', '保证', '赔偿',
+];
+
+/**
+ * 从合同文本中提取含法律关键词的句子，作为向量检索的聚焦查询
+ * 替代原来的整段合同文本截取的方案，避免查询向量被稀释
+ */
+const extractLegalClauses = (text, maxClauses = 6) => {
+    if (!text || !String(text).trim()) return [];
+    const sentences = String(text)
+        .replace(/\s+/g, ' ')
+        .split(/(?<=[。；！？!?;])/g)
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 15 && s.length <= 600);
+
+    const scored = sentences.map((s) => ({
+        text: s,
+        score: LEGAL_TRIGGER_TERMS.reduce((sum, kw) => sum + (s.includes(kw) ? 1 : 0), 0),
+    }));
+
+    scored.sort((a, b) => b.score - a.score || b.text.length - a.text.length);
+
+    const result = [];
+    const seen = new Set();
+    for (const item of scored) {
+        if (result.length >= maxClauses) break;
+        const key = item.text.slice(0, 30);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(item.text);
+    }
+    return result;
+};
+
 const buildKnowledgeSearchQuery = ({
     text = '',
     contractType = '',
@@ -902,9 +948,16 @@ const buildKnowledgeSearchQuery = ({
         question,
     ].filter(Boolean).join('\n');
 
+    // 从合同中提取含法律关键词的句子作为检索查询，替代原始合同文本截取
+    // 这样每条查询语句都聚焦于一个具体的法律问题，而非整段噪音
+    const legalClauses = extractLegalClauses(text, focusedTerms ? 6 : 10);
+    const searchContext = legalClauses.length > 0
+        ? legalClauses.join('\n')
+        : compactText(text, focusedTerms ? 2000 : 4000);
+
     return [
         focusedTerms,
-        compactText(text, focusedTerms ? 3500 : 6000),
+        searchContext,
     ].filter(Boolean).join('\n');
 };
 
