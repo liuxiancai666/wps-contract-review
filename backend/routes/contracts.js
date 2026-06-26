@@ -1567,6 +1567,99 @@ ${wrapContractContent(plainText)}
     }
 });
 
+// ============ 逐节结果合并工具 (Step B + C) ============
+
+/**
+ * 将两节审查结果合并，按标题去重 + 跨段线索记入附加信息
+ */
+const mergeSectionResults = (acc, current, clues) => {
+    const result = {
+        dispute_points: [...(acc.dispute_points || [])],
+        missing_clauses: [...(acc.missing_clauses || [])],
+        party_review: [...(acc.party_review || [])],
+        modification_suggestions: [...(acc.modification_suggestions || [])],
+        breach_cost_analysis: [...(acc.breach_cost_analysis || [])],
+    };
+
+    // 添加新发现的 dispute_points（按标题去重）
+    for (const dp of (current.dispute_points || [])) {
+        const exists = result.dispute_points.some(
+            (e) => e.title === dp.title || (dp.title && e.title && e.title.includes(dp.title.slice(0, 10))),
+        );
+        if (!exists) result.dispute_points.push(dp);
+    }
+
+    // 添加缺失条款（直接合并，一般不会重复）
+    for (const mc of (current.missing_clauses || [])) {
+        result.missing_clauses.push(mc);
+    }
+
+    // 添加主体审查（去重）
+    for (const pr of (current.party_review || [])) {
+        const exists = result.party_review.some(
+            (e) => e.title === pr.title,
+        );
+        if (!exists) result.party_review.push(pr);
+    }
+
+    // 添加修改建议（按 original_text 去重）
+    for (const ms of (current.modification_suggestions || [])) {
+        const exists = result.modification_suggestions.some(
+            (e) => e.original_text && ms.original_text && e.original_text.slice(0, 30) === ms.original_text.slice(0, 30),
+        );
+        if (!exists) result.modification_suggestions.push(ms);
+    }
+
+    // 添加违约成本分析（按 scenario 去重）
+    for (const bc of (current.breach_cost_analysis || [])) {
+        const exists = result.breach_cost_analysis.some(
+            (e) => e.scenario === bc.scenario,
+        );
+        if (!exists) result.breach_cost_analysis.push(bc);
+    }
+
+    return result;
+};
+
+/**
+ * 全局去重合并 + 风险排序（用于综合会诊前的预清理）
+ */
+const deduplicateSectionResults = (merged) => {
+    const result = {
+        dispute_points: [],
+        missing_clauses: [...(merged.missing_clauses || [])],
+        party_review: [...(merged.party_review || [])],
+        modification_suggestions: [],
+        breach_cost_analysis: [...(merged.breach_cost_analysis || [])],
+    };
+
+    // dispute_points 按标题去重，保留最高 severity
+    const dpMap = new Map();
+    for (const dp of (merged.dispute_points || [])) {
+        const key = (dp.title || '').replace(/\s+/g, '').slice(0, 20);
+        const existing = dpMap.get(key);
+        const severityOrder = { '高': 3, '中': 2, '低': 1 };
+        if (!existing || (severityOrder[dp.severity] || 0) > (severityOrder[existing.severity] || 0)) {
+            dpMap.set(key, dp);
+        }
+    }
+    // 排序：高 → 中 → 低
+    const severityPriority = { '高': 0, '中': 1, '低': 2 };
+    result.dispute_points = Array.from(dpMap.values()).sort(
+        (a, b) => (severityPriority[a.severity] || 99) - (severityPriority[b.severity] || 99),
+    );
+
+    // modification_suggestions 按 original_text 去重
+    const msMap = new Map();
+    for (const ms of (merged.modification_suggestions || [])) {
+        const key = (ms.original_text || '').replace(/\s+/g, '').slice(0, 30);
+        if (!msMap.has(key)) msMap.set(key, ms);
+    }
+    result.modification_suggestions = Array.from(msMap.values());
+
+    return result;
+};
+
 // 后台异步执行合同审查（不阻塞 HTTP 响应）
 const runAnalysisInBackground = async (contractId, userId, userPerspective, preAnalysisData) => {
     const contract = await findOwnedContract(contractId, userId);
@@ -1620,9 +1713,143 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
             return `${index + 1}. ${company.companyName}\n${evidence || '未检索到可用外部证据'}`;
         }).join('\n');
 
-        // Step 4: AI 生成审查结论
-        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', message: 'AI 正在深度审查合同，这是最耗时的步骤，请耐心等待...' });
-        const prompt = `你是一名资深法务专家，请按审查模板对合同进行深度审查，并只输出 JSON。
+        // ========== Step B + C: 逐节链式审查 + 综合会诊 ==========
+        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', message: `AI 正在逐节深度审查 ${sections.length} 个合同章节，每节独立聚焦，避免信息淹没...` });
+
+        // 构造主体审查补充 prompt（供 fallback 使用）
+        const subjectSearchPrompt = `
+
+主体外部检索证据（来自 Bing/Baidu 搜索，已做基础真实性评分；只能把 verified=true 或可信度较高的结果作为主体审查线索，不能当作最终工商登记结论）：
+${companySearchContext || '未识别到可检索的公司主体名称。'}
+
+请额外输出 company_review 字段，结构为 [{"company_name":"公司名称","status":"已检索/未检索到可靠证据","evidence_summary":"基于外部搜索证据的主体核验摘要","authenticity":"真实性检测结论","sources":["URL"]}]。`;
+
+        // 构建标准审查 JSON schema 说明
+        const reviewSchemaDoc = `{
+  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
+  "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
+  "party_review": [{"title":"主体审查项","description":"审查结论","plain_language":"大白话说明"}],
+  "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}],
+  "breach_cost_analysis": [{"scenario":"违约场景","legal_basis":"依据","estimated_cost":"预计成本"}]
+}`;
+
+        const sectionReviewRules = `硬性要求：
+- modification_suggestions 每一项必须包含 original_text 和 suggested_text。
+- original_text 必须尽量逐字摘录合同原文中的完整句子或段落，用于 OnlyOffice 定位、书签和批注锚点。
+- 如果没有检索依据，不得编造法条或案例，只能说明"当前知识库未检索到直接依据"。
+- 不输出自然语言解释，不输出 markdown。
+- 每节审查仅针对当前节展示的合同段落，不要跨段审查。`;
+
+        // 将全库依据按法条分配到各节
+        const sectionKnowledgeMap = new Map();
+        for (const lawItem of relevantKnowledge) {
+            // 找到最匹配的节：法条 clause 或标题中含有关键词
+            const lawTerms = `${lawItem.law} ${lawItem.clause || ''} ${lawItem.content}`;
+            let bestSection = null;
+            let bestScore = 0;
+            for (const sec of sections) {
+                const secText = `${sec.title} ${sec.content}`;
+                let score = 0;
+                // 法条 clause 号匹配节标题（如 第四条 ↔ "第四条"）
+                if (lawItem.clause && secText.includes(lawItem.clause)) score += 3;
+                // 法条标题匹配（如 民法典 ↔ "适用民法典"）
+                if (lawItem.law && secText.includes(lawItem.law.replace(/^中华人民共和国/, '').slice(0, 8))) score += 2;
+                // 关键词命中
+                const termHits = (lawItem.content || '').split('').filter((c, i, arr) => {
+                    if (i > 0) return false;
+                    for (const kw of ['保密', '违约', '赔偿', '管辖', '仲裁', '诉讼', '知识', '产权', '保密', '解除', '时效', '生效']) {
+                        if (secText.includes(kw) && lawItem.content.includes(kw)) return true;
+                    }
+                    return false;
+                }).length;
+                score += termHits;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestSection = sec;
+                }
+            }
+            if (!bestSection) bestSection = sections[0]; // fallback to first section
+            const key = bestSection.index;
+            if (!sectionKnowledgeMap.has(key)) sectionKnowledgeMap.set(key, []);
+            sectionKnowledgeMap.get(key).push(lawItem);
+        }
+
+        // 逐节 LLM 链式审查
+        let chainContext = '';
+        let accumulatedResult = null;
+
+        for (let secIdx = 0; secIdx < sections.length; secIdx += 1) {
+            const section = sections[secIdx];
+            const sectionLaws = sectionKnowledgeMap.get(section.index) || [];
+            // 每节至少保留 2 条法条、最多 5 条
+            const perSectionKnowledge = sectionLaws.length > 5
+                ? sectionLaws.slice(0, 5)
+                : (sectionLaws.length === 0 && relevantKnowledge.length > 0
+                    ? relevantKnowledge.slice(0, 2)
+                    : sectionLaws);
+
+            const sectionLabel = `${section.title || `段落 ${section.index + 1}`}`;
+            await emitAnalysisProgress(null, contractId, {
+                step: 'llm_review', status: 'running',
+                message: `逐节审查: 第 ${secIdx + 1}/${sections.length} 节「${sectionLabel}」...`,
+            });
+
+            const sectionPrompt = `你是一名资深法务专家，请逐节审查合同。当前正在审查第 ${secIdx + 1} 节「${sectionLabel}」。
+
+审查模板：
+- 模板名称：${template.name}
+- 合同类型：${preAnalysisData.contract_type}
+- 用户立场：${userPerspective}
+- 本节审查重点：${reviewPoints.join('；')}
+- 审查目的：${corePurposes.join('；')}
+- 模板规则：${(template.prompt_rules || []).join('；')}
+
+法律法规依据（仅限以下，不得虚构）：
+${perSectionKnowledge.map((item, i) => `[${i + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n') || '未检索到与本节直接相关的法条依据——仅在确认确实有关联时引用知识库已有法条，否则标注"当前知识库未检索到直接依据"。'}
+
+${chainContext ? `前序章节已发现的关联风险（供参考，避免重复）：\n${chainContext}\n` : ''}
+
+本节合同原文：
+---
+${wrapContractContent(section.content)}
+---
+
+输出 JSON 结构（只输出本节相关的审查结论，inter_section_clues 为保留给综合会诊的跨段线索）：
+${reviewSchemaDoc}
+
+JSON 中额外添加 inter_section_clues 字段记录：
+- 跨段引用关系（如本条提到"详见第X条"）
+- 需要与其它条款对比的数值（赔偿上限、违约金比例等）
+- 本节与已有分析潜在冲突点
+
+${sectionReviewRules}`;
+
+            try {
+                const sectionResult = await callJsonLLM(sectionPrompt);
+                const normalized = normalizeAnalysisResult(sectionResult);
+
+                // 收集跨段线索
+                const clues = Array.isArray(sectionResult.inter_section_clues) ? sectionResult.inter_section_clues : [];
+                if (clues.length > 0) {
+                    chainContext += `\n第 ${secIdx + 1} 节「${sectionLabel}」跨段线索：${clues.map((c) => String(c).slice(0, 200)).join('；')}\n`;
+                }
+
+                // 合并到累积结果
+                if (!accumulatedResult) {
+                    accumulatedResult = normalized;
+                } else {
+                    accumulatedResult = mergeSectionResults(accumulatedResult, normalized, clues);
+                }
+            } catch (secError) {
+                console.warn(`[Section ${secIdx}] LLM review failed for "${sectionLabel}":`, secError.message);
+                // 单节失败不阻断整体，继续下一节
+            }
+        }
+
+        // 如果没有成功审查任何节，回退到全篇一次审查
+        if (!accumulatedResult) {
+            console.warn('[Step B] All section reviews failed, falling back to full-text single review');
+            const fallbackPrompt = `你是一名资深法务专家，请按审查模板对合同进行深度审查，并只输出 JSON。
 
 审查模板：
 - 模板名称：${template.name}
@@ -1637,28 +1864,78 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
 ${relevantKnowledge.map((item, index) => `[${index + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n') || '未检索到直接依据。'}
 
 输出 JSON 结构：
-{
-  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
-  "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
-  "party_review": [{"title":"主体审查项","description":"审查结论","plain_language":"大白话说明"}],
-  "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}],
-  "breach_cost_analysis": [{"scenario":"违约场景","legal_basis":"依据","estimated_cost":"预计成本"}]
-}
+${reviewSchemaDoc}
 
-硬性要求：
-- modification_suggestions 每一项必须包含 original_text 和 suggested_text。
-- original_text 必须尽量逐字摘录合同原文中的完整句子或段落，用于 OnlyOffice 定位、书签和批注锚点。
-- 如果没有检索依据，不得编造法条或案例，只能说明"当前知识库未检索到直接依据"。
-- 不输出自然语言解释，不输出 markdown。
+${sectionReviewRules}
 
 合同原文：
 ---
 ${wrapContractContent(plainText)}
 ---`;
+            accumulatedResult = normalizeAnalysisResult(await callJsonLLM(fallbackPrompt + subjectSearchPrompt));
+        }
 
-        const subjectSearchPrompt = `\n\n主体外部检索证据（来自 Bing/Baidu 搜索，已做基础真实性评分；只能把 verified=true 或可信度较高的结果作为主体审查线索，不能当作最终工商登记结论）：\n${companySearchContext || '未识别到可检索的公司主体名称。'}\n\n请额外输出 company_review 字段，结构为 [{"company_name":"公司名称","status":"已检索/未检索到可靠证据","evidence_summary":"基于外部搜索证据的主体核验摘要","authenticity":"真实性检测结论","sources":["URL"]}]。`;
-        const analysisResult = normalizeAnalysisResult(await callJsonLLM(prompt + subjectSearchPrompt));
-        analysisResult.relevant_laws = annotateKnowledgeUpdates(relevantKnowledge);
+        // ========== Step C: 综合会诊 ==========
+        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', message: '正在综合会诊——去重合并、跨段一致性检查、风险排序...' });
+
+        // 去重合并（按标题相似度去重 + 保留最高严重度）
+        const deduplicated = deduplicateSectionResults(accumulatedResult);
+
+        // 跨段一致性检查 — 第三阶段 LLM 综合会诊
+        const crossSectionContext = chainContext || '无明显跨段关注点。';
+        const synthesisPrompt = `你是一名资深法务专家，负责将逐节审查结果做最终的跨段一致性会诊。
+
+审查模板：${template.name}
+合同类型：${preAnalysisData.contract_type}
+用户立场：${userPerspective}
+
+逐节审查汇聚的跨段线索：
+${crossSectionContext}
+
+已发现的全部风险点（${deduplicated.dispute_points.length} 项）：
+${JSON.stringify(deduplicated.dispute_points.slice(0, 20), null, 2)}
+
+缺失条款（${deduplicated.missing_clauses.length} 项）：
+${JSON.stringify(deduplicated.missing_clauses.slice(0, 10), null, 2)}
+
+修改建议（${deduplicated.modification_suggestions.length} 项）：
+${JSON.stringify(deduplicated.modification_suggestions.slice(0, 10), null, 2)}
+
+违约成本分析（${deduplicated.breach_cost_analysis.length} 项）：
+${JSON.stringify(deduplicated.breach_cost_analysis.slice(0, 5), null, 2)}
+
+综合会诊任务：
+1. 检查跨段一致性：不同章节中对同一事项（赔偿比例、管辖、价格等）的规定是否矛盾
+2. 检查交叉引用：合同各条款之间的相互引用是否匹配
+3. 修复优先级：将所有风险按严重程度重新排序，高风险置顶
+4. 补充跨段发现的全局性风险（各节单独审查时无法发现的跨章节矛盾）
+5. 最终输出去重、排序、补充后的完整 JSON
+
+输出 JSON 结构：
+${reviewSchemaDoc}
+
+${sectionReviewRules}
+
+注意：保留原有内容，只做增补、排序和去重。不要丢失任何已有发现。`;
+
+        let finalAnalysis;
+        try {
+            finalAnalysis = normalizeAnalysisResult(await callJsonLLM(synthesisPrompt));
+        } catch (synthError) {
+            console.warn('[Step C] Synthesis LLM call failed, using deduplicated results:', synthError.message);
+            finalAnalysis = deduplicated;
+        }
+
+        // 补充非审查结论字段
+        finalAnalysis.relevant_laws = annotateKnowledgeUpdates(relevantKnowledge);
+        finalAnalysis.template = {
+            id: template.id,
+            name: template.name,
+            report_sections: template.report_sections || [],
+        };
+
+        // 主体审查（同原有逻辑，注入到结果中）
+        const analysisResult = finalAnalysis;
         analysisResult.company_search = companySearchResults;
         if (!analysisResult.company_review.length && companySearchResults.length) {
             analysisResult.company_review = companySearchResults.map((company) => ({
@@ -1669,12 +1946,8 @@ ${wrapContractContent(plainText)}
                 sources: (company.verifiedResults.length ? company.verifiedResults : company.results).slice(0, 3).map((item) => item.url),
             }));
         }
-        analysisResult.template = {
-            id: template.id,
-            name: template.name,
-            report_sections: template.report_sections || [],
-        };
-        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'completed', message: 'AI 审查结论已生成。' });
+
+        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'completed', message: `逐节链式审查完成：${sections.length} 节逐节分析 + 综合会诊。` });
 
         // Step 5: 印章与签章核验
         await emitAnalysisProgress(null, contractId, { step: 'seal_analysis', status: 'running', message: '正在进行印章与签章核验...' });
