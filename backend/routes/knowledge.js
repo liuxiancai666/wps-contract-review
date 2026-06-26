@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { execSync } = require('child_process');
 const mammoth = require('mammoth');
 const pdf = require('pdf-parse');
 const {
@@ -9,6 +10,8 @@ const {
     searchVectorDocuments,
     deleteKnowledgeDocuments,
     listKnowledgeDocuments,
+    seedLawsFromMarkdown,
+    seedCasesFromJson,
 } = require('../services/vectorStore');
 const { parseLegalMarkdown, parseLegalMarkdownFile } = require('../services/legalMarkdownParser');
 
@@ -24,6 +27,7 @@ const upload = multer({
 });
 const legalTemplatePath = path.join(__dirname, '..', 'data', '法律法规模版.md');
 const caseTemplatePath = path.join(__dirname, '..', 'data', '裁判文书模版.json');
+const projectRoot = path.resolve(__dirname, '..', '..');
 
 const extractTextFromFile = async (filePath) => {
     const ext = path.extname(filePath).toLowerCase();
@@ -62,6 +66,84 @@ const normalizeKnowledgeEntries = (incoming) => {
     }
     return normalized;
 };
+
+// 尝试从 git 远程拉取最新的数据文件
+const tryPullGitData = () => {
+    const gitDir = path.join(projectRoot, '.git');
+    if (!fs.existsSync(gitDir)) {
+        console.log('[Knowledge Rebuild] No .git directory found. Skipping git pull.');
+        return false;
+    }
+    try {
+        console.log('[Knowledge Rebuild] Attempting git fetch origin...');
+        execSync('git fetch origin', { cwd: projectRoot, stdio: 'pipe', timeout: 30000 });
+        // 先尝试 origin/v2.0, 再试 origin/main
+        const remoteRef = execSync('git ls-remote origin HEAD', { cwd: projectRoot, stdio: 'pipe', timeout: 10000 })
+            .toString().trim();
+        // 使用 origin/v2.0（含代码和数据的完整分支）
+        for (const branch of ['origin/v2.0', 'origin/main', 'origin/master']) {
+            const checkCmd = `git rev-parse --verify ${branch} --`;
+            try {
+                execSync(checkCmd, { cwd: projectRoot, stdio: 'pipe', timeout: 5000 });
+                console.log(`[Knowledge Rebuild] Checking out data files from ${branch}...`);
+                execSync(`git checkout ${branch} -- backend/data/`, { cwd: projectRoot, stdio: 'pipe', timeout: 30000 });
+                console.log(`[Knowledge Rebuild] Successfully pulled data from ${branch}.`);
+                return true;
+            } catch {
+                continue;
+            }
+        }
+        console.log('[Knowledge Rebuild] No remote branch with data found.');
+        return false;
+    } catch (error) {
+        console.log(`[Knowledge Rebuild] Git pull failed: ${error.message}. Using local data.`);
+        return false;
+    }
+};
+
+// POST /api/knowledge/rebuild — 重建向量数据库
+router.post('/rebuild', async (req, res) => {
+    try {
+        console.log('[Knowledge Rebuild] ===== Starting rebuild... =====');
+
+        // 1. 先尝试从 git 拉取最新数据文件
+        tryPullGitData();
+
+        // 2. 删除全部知识向量
+        const { deleteKnowledgeDocuments } = require('../services/vectorStore');
+        const delResult = await deleteKnowledgeDocuments({ sourceType: 'law' });
+        const delCaseResult = await deleteKnowledgeDocuments({ sourceType: 'case' });
+        const delRuleResult = await deleteKnowledgeDocuments({ sourceType: 'rule' });
+        const delGuideResult = await deleteKnowledgeDocuments({ sourceType: 'guide' });
+        console.log(`[Knowledge Rebuild] Deleted: law=${delResult.deleted}, case=${delCaseResult.deleted}, rule=${delRuleResult.deleted}, guide=${delGuideResult.deleted}`);
+
+        // 3. 设置环境变量强制重建（绕过 seed 函数的已有数据保护检查）
+        process.env.FORCE_RESEED_LAWS = 'true';
+        process.env.FORCE_RESEED_CASES = 'true';
+        const lawResult = await seedLawsFromMarkdown();
+        const caseResult = await seedCasesFromJson();
+        // 清理环境变量
+        delete process.env.FORCE_RESEED_LAWS;
+        delete process.env.FORCE_RESEED_CASES;
+
+        console.log('[Knowledge Rebuild] ===== Rebuild complete. =====');
+        res.json({
+            message: '向量数据库重建完成。',
+            gitPull: fs.existsSync(path.join(projectRoot, '.git')),
+            laws: lawResult,
+            cases: caseResult,
+            deleted: {
+                law: delResult.deleted,
+                case: delCaseResult.deleted,
+                rule: delRuleResult.deleted,
+                guide: delGuideResult.deleted,
+            },
+        });
+    } catch (error) {
+        console.error('[Knowledge Rebuild] Failed:', error);
+        res.status(500).json({ error: `重建向量数据库失败: ${error.message}` });
+    }
+});
 
 router.get('/template', (req, res) => {
     const templateType = String(req.query.type || '').trim().toLowerCase();

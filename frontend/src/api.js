@@ -191,5 +191,9 @@ export default {
 
     getReviewTemplates() {
         return apiClient.get('/templates');
+    },
+
+    rebuildKnowledge() {
+        return apiClient.post('/knowledge/rebuild');
     }
 };

@@ -13,6 +13,9 @@
           <p>分页查看知识切片，用于定位和删除失效文档。</p>
         </div>
         <button class="primary-button" @click="loadKnowledge">刷新</button>
+        <button class="danger-button" :disabled="rebuilding" @click="rebuildKnowledgeIndex">
+          {{ rebuilding ? '重建中...' : '重建向量数据库' }}
+        </button>
       </div>
 
       <div class="toolbar">
@@ -232,6 +235,7 @@ export default {
     const retrievalLimit = ref(6);
     const retrievalResults = ref([]);
     const retrievalLoading = ref(false);
+    const rebuilding = ref(false);
 
     const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)));
     const retrievalModeLabel = computed(() => ({
@@ -249,6 +253,20 @@ export default {
       rule: '审查规则',
       guide: '审查知识',
     }[type] || type || '知识');
+
+    const rebuildKnowledgeIndex = async () => {
+      rebuilding.value = true;
+      try {
+        const response = await api.rebuildKnowledge();
+        const data = response.data;
+        ElMessage.success(data.message || '向量数据库重建完成。');
+        await loadKnowledge();
+      } catch (error) {
+        ElMessage.error(error.response?.data?.error || '重建向量数据库失败。');
+      } finally {
+        rebuilding.value = false;
+      }
+    };
 
     const loadKnowledge = async () => {
       loading.value = true;
@@ -473,6 +491,8 @@ export default {
       handleBatchFileChange,
       handleBatchFileRemove,
       batchImportKnowledge,
+      rebuilding,
+      rebuildKnowledgeIndex,
     };
   },
 };
