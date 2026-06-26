@@ -316,8 +316,8 @@ const upsertRelationalRow = async (row) => {
         await db('vector_documents').where({ id: existing.id }).update(payload);
         return { id: existing.id, deduped: false };
     }
-    const [inserted] = await db('vector_documents').insert(payload);
-    const id = typeof inserted === 'object' ? inserted.id : inserted;
+    const result = await db('vector_documents').insert(payload, 'id');
+    const id = Array.isArray(result) ? (typeof result[0] === 'object' ? result[0].id : result[0]) : result;
     return { id, deduped: false };
 };
 
