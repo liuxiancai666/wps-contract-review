@@ -112,7 +112,7 @@ const sourceHash = (parts) => crypto
 
 const escapeExpr = (value) => String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
-const splitTextIntoChunks = (text, { maxChars = 900, overlap = 120 } = {}) => {
+const splitTextIntoChunks = (text, { maxChars = 400, overlap = 80 } = {}) => {
     const normalized = normalizeText(text);
     if (!normalized) return [];
 

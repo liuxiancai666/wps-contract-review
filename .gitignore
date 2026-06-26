@@ -59,3 +59,14 @@ report.md
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Hermes / Docker compose
+milvus-compose.yml
+services-compose.yml
+.env
+backend/uploads/
+backend/reanalyze.js
+
+# node_modules (symlinked to data disk)
+frontend/node_modules
+backend/node_modules

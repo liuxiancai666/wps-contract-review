@@ -1817,6 +1817,76 @@ ${companySearchContext || '未识别到可检索的公司主体名称。'}
                     ? relevantKnowledge.slice(0, 2)
                     : sectionLaws);
 
+            // ===== 关键词匹配过滤审查点：只为当前节注入相关审查点 =====
+            // 构建节内容的关键词向量（提取关键名词）
+            const sectionTextForFilter = `${section.title} ${section.content}`;
+            const FILTER_KEYWORDS = [
+                '主体','资格','合同期限','固定期限','无固定期限','岗位','职责','地点','试用期',
+                '录用','薪酬','绩效','奖金','工资','加班','工时','社保','社会保险','住房','公积金',
+                '竞业','保密','知识','产权','培训','服务期','违约金','解除','终止','补偿','赔偿',
+                '规章','制度','告知','工作内容','工作地点','休息','休假','劳动报酬','计件','单价',
+                '支付','福利','待遇','劳动保护','职业病','商业秘密','变更','续订','通知','送达',
+                '争议','仲裁','诉讼','管辖','书面','口头',
+            ];
+            const sectionKeywords = new Set(
+                FILTER_KEYWORDS.filter(kw => sectionTextForFilter.includes(kw))
+            );
+            // 每个审查点有关键词匹配才保留
+            const filteredReviewPoints = reviewPoints.filter(rp => {
+                const lower = rp;
+                for (const kw of sectionKeywords) {
+                    if (lower.includes(kw)) return true;
+                }
+                // 如果节有法条匹配，保留所有审查点中含该法条关键词的
+                for (const lawItem of perSectionKnowledge) {
+                    const lawText = `${lawItem.law} ${lawItem.clause || ''} ${lawItem.content}`;
+                    for (const kw of sectionKeywords) {
+                        if (lawText.includes(kw)) return true;
+                    }
+                }
+                return false;
+            });
+            // 至少保留 3 个审查点（fallback：按法条和节内容关键词搜索匹配审查点）
+            const finalReviewPoints = filteredReviewPoints.length >= 3
+                ? filteredReviewPoints
+                : (() => {
+                    // 从法条内容提取关键词
+                    const lawKeywords = new Set();
+                    for (const lawItem of perSectionKnowledge) {
+                        const lawText = `${lawItem.law} ${lawItem.clause || ''} ${lawItem.content}`;
+                        for (const kw of FILTER_KEYWORDS) {
+                            if (lawText.includes(kw)) lawKeywords.add(kw);
+                        }
+                    }
+                    // 用节+法条关键词再过滤
+                    const allKeywords = new Set([...sectionKeywords, ...lawKeywords]);
+                    const extended = reviewPoints.filter(rp => {
+                        for (const kw of allKeywords) {
+                            if (rp.includes(kw)) return true;
+                        }
+                        return false;
+                    });
+                    // 只要有关联的审查点就用关联的，只有0时才fallback取前3个
+                    return extended.length >= 1 ? extended : reviewPoints.slice(0, 3);
+                })();
+
+            // 审查目的同理按关键词过滤
+            const filteredPurposes = corePurposes.filter(cp => {
+                for (const kw of sectionKeywords) {
+                    if (cp.includes(kw)) return true;
+                }
+                for (const lawItem of perSectionKnowledge) {
+                    const lawText = `${lawItem.law} ${lawItem.clause || ''} ${lawItem.content}`;
+                    for (const kw of sectionKeywords) {
+                        if (lawText.includes(kw)) return true;
+                    }
+                }
+                return false;
+            });
+            const finalPurposes = filteredPurposes.length >= 1
+                ? filteredPurposes
+                : corePurposes.slice(0, 1);
+
             const sectionLabel = `${section.title || `段落 ${section.index + 1}`}`;
             await emitAnalysisProgress(null, contractId, {
                 step: 'llm_review', status: 'running',
@@ -1829,8 +1899,8 @@ ${companySearchContext || '未识别到可检索的公司主体名称。'}
 - 模板名称：${template.name}
 - 合同类型：${preAnalysisData.contract_type}
 - 用户立场：${userPerspective}
-- 本节审查重点：${reviewPoints.join('；')}
-- 审查目的：${corePurposes.join('；')}
+- 本节审查重点：${finalReviewPoints.join('；')}
+- 审查目的：${finalPurposes.join('；')}
 - 模板规则：${(template.prompt_rules || []).join('；')}
 
 法律法规依据（仅限以下，不得虚构）：
@@ -2657,5 +2727,6 @@ router.get('/', async (req, res) => {
 module.exports = router;
 module.exports.setIoInstance = setIoInstance;
 module.exports.splitContractIntoSections = splitContractIntoSections;
+module.exports.runAnalysisInBackground = runAnalysisInBackground;
 module.exports.buildSectionQueries = buildSectionQueries;
 module.exports.multiSectionKnowledgeRetrieval = multiSectionKnowledgeRetrieval;
