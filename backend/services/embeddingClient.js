@@ -25,6 +25,10 @@ const hashFallbackEmbedding = (text) => {
     return norm ? vector.map((value) => Number((value / norm).toFixed(6))) : vector;
 };
 
+// 追踪当前是否运行在 hash fallback 模式（与真实 embedding 相对）
+let _hashFallbackMode = false;
+const isHashFallback = () => _hashFallbackMode;
+
 const embeddingUrl = () => `${String(EMBEDDING_BASE_URL || '').replace(/\/$/, '')}/embeddings`;
 
 const rerankUrl = () => `${String(RERANK_BASE_URL || '').replace(/\/$/, '')}/rerank`;
@@ -41,6 +45,7 @@ const embedTexts = async (texts) => {
 
     if (!EMBEDDING_BASE_URL || !EMBEDDING_API_KEY) {
         console.warn('[Embedding] EMBEDDING_BASE_URL/API_KEY missing. Falling back to local hash vectors.');
+        _hashFallbackMode = true;
         return input.map(hashFallbackEmbedding);
     }
 
@@ -51,9 +56,11 @@ const embedTexts = async (texts) => {
             { headers: { Authorization: `Bearer ${EMBEDDING_API_KEY}` }, timeout: 60000 },
         );
         const data = response.data?.data || [];
+        _hashFallbackMode = false;
         return data.map((item) => item.embedding);
     } catch (error) {
         console.warn(`[Embedding] Online embedding failed: ${error.message}. Falling back to local hash vectors.`);
+        _hashFallbackMode = true;
         return input.map(hashFallbackEmbedding);
     }
 };
@@ -106,4 +113,5 @@ module.exports = {
     embedTexts,
     ensureEmbeddingReady,
     rerankDocuments,
+    isHashFallback,
 };

@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const db = require('../database');
-const { EMBEDDING_DIM, embedText, embedTexts, ensureEmbeddingReady, rerankDocuments } = require('./embeddingClient');
+const { EMBEDDING_DIM, embedText, embedTexts, ensureEmbeddingReady, rerankDocuments, isHashFallback } = require('./embeddingClient');
 const { parseLegalMarkdownFile } = require('./legalMarkdownParser');
 const { parseCaseJsonDocument } = require('./caseJsonParser');
 
@@ -785,14 +785,20 @@ const keywordSearch = async (query, { limit, sourceTypes }) => {
         }
     });
 
-    const rows = await rowsQuery.select('*').limit(limit * 8);
+    const rows = await rowsQuery.select('*');
     return rows
         .map((row) => {
             const title = `${row.title || ''} ${row.category || ''} ${row.clause_id || ''} ${row.source_name || ''}`.toLowerCase();
             const content = String(row.content || '').toLowerCase();
             const score = terms.reduce((sum, term) => {
                 const titleHits = title.includes(term) ? 0.15 : 0;
-                const contentHits = content.includes(term) ? 0.05 : 0;
+                // 词频计算：term 在 content 中出现次数越多，score 越高
+                let contentHits = 0;
+                if (content.includes(term)) {
+                    let idx = 0; let count = 0;
+                    while ((idx = content.indexOf(term, idx)) !== -1) { count++; idx += term.length; }
+                    contentHits = Math.min(0.05 + (count - 1) * 0.02, 0.30);
+                }
                 return sum + titleHits + contentHits;
             }, 0);
             return {
@@ -882,10 +888,19 @@ const milvusVectorSearch = async (queryVector, { limit, sourceTypes }) => {
 const searchVectorDocuments = async (query, { limit = 5, sourceTypes = [], rerank = true } = {}) => {
     await ensureVectorStore();
     const cleanQuery = normalizeText(query);
-    const queryVector = await embedText(cleanQuery);
     const candidateLimit = Math.max(limit * 8, limit);
+
+    // 检测 embedding 模式：hash fallback 时跳过向量搜索（hash向量无语义区分度），仅用关键词搜索
+    // 此时增大候选量确保所有匹配行都被召回
+    if (isHashFallback()) {
+        console.log('[Vector Search] Hash fallback mode active — using keyword search only.');
+        const keywordResults = await keywordSearch(cleanQuery, { limit: Math.max(limit * 40, 200), sourceTypes });
+        return keywordResults.slice(0, limit);
+    }
+
+    const queryVector = await embedText(cleanQuery);
     let results = await milvusVectorSearch(queryVector, { limit: candidateLimit, sourceTypes });
-    // Milvus 返回空数组时也回退到关系库（避免 Milvus 无数据但 SQLite 有数据时搜不到）
+    // Milvus 返回空数组时也回退到关系库
     if (!results || results.length === 0) {
         if (results && results.length === 0 && milvusReady) {
             console.log('[Vector Search] Milvus returned 0 results, falling back to relational vectors.');
