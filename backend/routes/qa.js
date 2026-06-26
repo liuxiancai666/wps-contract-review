@@ -103,6 +103,8 @@ const buildQaKnowledgeQuery = (question, contextText, history = []) => {
 const buildSystemPrompt = () => [
     'You are a professional and careful legal contract Q&A assistant.',
     'Answer in the same language as the user unless they ask otherwise.',
+    'If the user has selected/associated a contract, its full text will be appended to the user\'s question below. YOU MUST read and analyze that contract content to answer the user\'s questions about it.',
+    'Do NOT ask the user to provide contract text — it is already provided in the user message when a contract is selected.',
     'Available server-side tools are already executed before you respond: knowledge_base_search and public_web_search.',
     'Do not claim you can execute arbitrary tools, access local files, databases, credentials, private systems, or internal networks.',
     'Use the current conversation history to resolve follow-up questions and pronouns.',
@@ -169,11 +171,19 @@ const buildQaContext = async ({ question, contractId, history = [] }) => {
         toolTrace.push({ name: 'public_web_search', status: 'skipped' });
     }
 
+    // 构建附加上下文的 user message（合同文本放在 user 消息中，LLM 对 user role 更敏感）
+    const contractSection = contextText
+        ? `\n\n以下是所关联合同的内容全文，请基于此合同回答用户的问题：\n---\n${contextText.slice(0, 15000)}\n---`
+        : '';
+    const enrichedQuestion = contractSection
+        ? `${question}\n\n${contractSection}`
+        : question;
+
     const llmMessages = [
         { role: 'system', content: buildSystemPrompt() },
         ...normalizedHistory,
         { role: 'system', content: buildEvidencePrompt({ contextText, knowledgeResults, webResults, toolTrace }) },
-        { role: 'user', content: question },
+        { role: 'user', content: enrichedQuestion },
     ];
 
     return { llmMessages, knowledgeResults, webResults, toolTrace };

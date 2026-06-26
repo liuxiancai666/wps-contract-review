@@ -971,7 +971,19 @@ const getRelevantKnowledge = async (options, limit = 8) => {
         rerank: true,
     });
 
-    return matches.map((item) => ({
+    // 按 clause_id 去重：同一法条同一条号只保留 score 最高的一个
+    // 避免 LLM prompt 中出现 "第XX条...第XX条..." 重复引用
+    const byClause = new Map();
+    for (const item of matches) {
+        const sourceKey = `${item.title}@@${item.clause_id || ''}`;
+        const existing = byClause.get(sourceKey);
+        const score = item.rerank_score ?? item.score ?? 0;
+        if (!existing || score > (existing.rerank_score ?? existing.score ?? 0)) {
+            byClause.set(sourceKey, item);
+        }
+    }
+
+    return Array.from(byClause.values()).map((item) => ({
         source_type: item.source_type,
         law: item.title,
         clause: item.clause_id || item.source_id,

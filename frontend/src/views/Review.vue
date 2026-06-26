@@ -2350,25 +2350,22 @@ export default {
         }
         if (!ensureEditorReady()) return;
 
-        // OnlyOffice CE 版（v9.3.1）不暴露 GetSelectedText API
-        // 改用 Clipboard API：提示用户在 OnlyOffice 中复制文本后读取
+        // 通过 OnlyOffice Editor API 直接获取选中文本
         try {
-            // 先尝试 Clipboard API 读取
-            if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
-                const clipboardText = await navigator.clipboard.readText();
-                if (clipboardText && clipboardText.trim()) {
-                    focusedReviewText.value = clipboardText.trim();
-                    ElMessage.success('已读取剪贴板中的文本（请在 OnlyOffice 中选中后按 Ctrl+C 复制）。');
-                    return;
-                }
+            const selectedText = await executeEditorMethod('GetSelectedText', []);
+            if (selectedText && selectedText.trim()) {
+                focusedReviewText.value = selectedText.trim();
+                ElMessage.success('已读取左侧 OnlyOffice 中选中的文本。');
+                // 自动触发专项审查
+                await nextTick();
+                submitFocusedReview();
+                return;
             }
-        } catch (clipError) {
-            // Clipboard API 可能被浏览器权限阻止，忽略
-            console.warn('Clipboard read failed, fallback to manual paste', clipError);
+        } catch (error) {
+            console.warn('GetSelectedText failed:', error);
         }
 
-        // Clipboard 不可用时，聚焦到输入框让用户手动粘贴
-        ElMessage.info('请在 OnlyOffice 中选中文本后按 Ctrl+C 复制，然后粘贴到下方文本框中审查。');
+        ElMessage.info('未在 OnlyOffice 中选中文本，请先在左侧文档中用鼠标选中需要审查的条款。');
     };
 
     const submitFocusedReview = async () => {
