@@ -1754,15 +1754,44 @@ ${companySearchContext || '未识别到可检索的公司主体名称。'}
                 if (lawItem.clause && secText.includes(lawItem.clause)) score += 3;
                 // 法条标题匹配（如 民法典 ↔ "适用民法典"）
                 if (lawItem.law && secText.includes(lawItem.law.replace(/^中华人民共和国/, '').slice(0, 8))) score += 2;
-                // 关键词命中
-                const termHits = (lawItem.content || '').split('').filter((c, i, arr) => {
-                    if (i > 0) return false;
-                    for (const kw of ['保密', '违约', '赔偿', '管辖', '仲裁', '诉讼', '知识', '产权', '保密', '解除', '时效', '生效']) {
-                        if (secText.includes(kw) && lawItem.content.includes(kw)) return true;
+                // 关键词命中 — 扩展关键词列表，支持劳动法专用词
+                const LABOR_KEYWORDS = [
+                    '保密', '违约', '赔偿', '管辖', '仲裁', '诉讼', '知识产权', '产权',
+                    '解除', '时效', '生效', '社保', '社会保险', '档案', '转移', '书面',
+                    '口头', '加班', '工资', '试用', '竞业', '补偿', '福利', '工时',
+                    '休假', '期限', '终止', '安全', '卫生', '变更', '辞职', '通知',
+                    '送达', '培训', '服务期', '工伤', '职业病', '医疗保险', '住房',
+                    '公积金', '经济补偿', '裁员', '罚款', '违纪', '损失', '连带',
+                ];
+                let termHits = 0;
+                for (const kw of LABOR_KEYWORDS) {
+                    if (secText.includes(kw) && (lawItem.content || '').includes(kw)) {
+                        termHits += 1;
                     }
-                    return false;
-                }).length;
+                }
+                // 互补关键词匹配：合同节和法条中各含一个互补关键词（如合同写"口头"、法条写"书面"）
+                // 当互补对是直接矛盾型（书面↔口头、十五日↔三十日）时权重更高
+                const COMPLEMENTARY_PAIRS = [
+                    { pair: ['书面', '口头'], weight: 5 },    // 法律规定书面，合同写口头 — 直接违法！最高权重
+                    { pair: ['十五日', '三十日'], weight: 5 }, // 法律规定15日，合同写30日 — 直接违法！最高权重
+                    { pair: ['乙方', '甲方'], weight: 2 },
+                    { pair: ['上限', '下限'], weight: 3 },
+                    { pair: ['不低于', '高于'], weight: 3 },
+                    { pair: ['不得低于', '可以低于'], weight: 3 },
+                ];
+                for (const { pair: [a, b], weight } of COMPLEMENTARY_PAIRS) {
+                    if (secText.includes(a) && (lawItem.content || '').includes(b)) termHits += weight;
+                    if (secText.includes(b) && (lawItem.content || '').includes(a)) termHits += weight;
+                }
                 score += termHits;
+                // 节标题与法条内容的语义邻近加权：当节内容中的关键词与法条内容中的关键词重叠>=3个，额外加分
+                let sharedTermBonus = 0;
+                const secKws = LABOR_KEYWORDS.filter(kw => secText.includes(kw));
+                const lawKws = LABOR_KEYWORDS.filter(kw => (lawItem.content || '').includes(kw));
+                const sharedCount = secKws.filter(kw => lawKws.includes(kw)).length;
+                if (sharedCount >= 3) sharedTermBonus = 2;
+                if (sharedCount >= 5) sharedTermBonus = 4;
+                score += sharedTermBonus;
                 if (score > bestScore) {
                     bestScore = score;
                     bestSection = sec;
