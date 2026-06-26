@@ -15,7 +15,9 @@ router.post('/identify', async (req, res) => {
         if (user) {
             res.json({ userId: user.id, isNew: false });
         } else {
-            const [newUserId] = await db('users').insert({ fingerprint_id: fingerprintId });
+            const result = await db('users').insert({ fingerprint_id: fingerprintId }, ['id']);
+            const inserted = Array.isArray(result) ? result[0] : result;
+            const newUserId = typeof inserted === 'object' ? inserted.id : inserted;
             res.status(201).json({ userId: newUserId, isNew: true });
         }
     } catch (error) {

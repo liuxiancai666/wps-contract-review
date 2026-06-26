@@ -199,7 +199,7 @@ export default {
 
     getReviewTemplates() {
         return apiClient.get('/templates');
-    }
+    },
 };
 
 export { apiClient };

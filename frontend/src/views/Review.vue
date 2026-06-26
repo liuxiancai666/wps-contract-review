@@ -2023,7 +2023,7 @@ export default {
           if (settled) return;
           settled = true;
           resolve(null);
-        }, 2500);
+        }, 10000);
         try {
           editor.executeMethod(method, args, (result) => {
             if (settled) return;
@@ -2040,9 +2040,22 @@ export default {
       });
     };
 
+    const normalizeSearchText = (text) => {
+        return String(text || '')
+            .replace(/\s+/g, ' ')      // 统一空白
+            .replace(/[“”]/g, '"')
+            .replace(/[‘’]/g, "'")
+            .replace(/[\u200B-\u200D\uFEFF]/g, '') // 零宽字符
+            .trim();
+    };
+
     const findTextRange = async (text) => {
-        const result = await executeEditorMethod('Search', [text]);
-        if (Array.isArray(result) && result.length > 0) return result[0];
+        const normalized = normalizeSearchText(text);
+        const candidates = [normalized, ...splitCandidateSentences(normalized).filter(s => s.length >= 10)];
+        for (const candidate of candidates) {
+            const result = await executeEditorMethod('Search', [candidate]);
+            if (Array.isArray(result) && result.length > 0) return result[0];
+        }
         return null;
     };
 
@@ -2153,7 +2166,7 @@ export default {
                     // Try the next OnlyOffice build-specific method name.
                 }
             }
-            await executeEditorMethod('AddComment', [`采纳前原文：${originalText}`, 'AI 审查']).catch(() => null);
+            await executeEditorMethod('AddComment', [{ text: `采纳前原文：${originalText}`, author: 'AI 审查' }]).catch(() => null);
         } catch {
             // Highlight/comment support depends on the deployed OnlyOffice build.
         }
@@ -2464,10 +2477,57 @@ export default {
                 return;
             }
             await executeEditorMethod('SelectRange', [range]);
-            const bookmark = `ai_review_${Date.now()}`;
-            await executeEditorMethod('AddBookmark', [bookmark]).catch(() => null);
-            await executeEditorMethod('AddComment', [comment || 'AI 审查建议', 'AI 审查专家']).catch(async () => {
-                await executeEditorMethod('AddComment', [comment || 'AI 审查建议']);
+
+            // 通过 Plugin API callCommand 添加批注（OnlyOffice v9 唯一可靠方式）
+            const editor = getEditor();
+            const asc = window.Asc || (window.Asc = {});
+            asc.scope = asc.scope || {};
+            asc.scope.commentText = comment || 'AI 审查建议';
+            asc.scope.commentAuthor = 'AI 审查专家';
+
+            if (typeof editor.createConnector === 'function') {
+                const connector = editor.createConnector();
+                if (connector?.callCommand) {
+                    await new Promise((resolve) => {
+                        connector.callCommand(function() {
+                            try {
+                                const oDocument = Api.GetDocument();
+                                const oRange = oDocument.GetRangeBySelect?.() || oDocument.GetSelection();
+                                if (!oRange) return;
+                                oRange.AddComment(Asc.scope.commentText, Asc.scope.commentAuthor);
+                            } catch (e) {
+                                console.warn('[addDocComment] callCommand failed:', e);
+                            }
+                        }, true);
+                        setTimeout(resolve, 1000);
+                    });
+                    ElMessage.success('已在文档中添加批注。');
+                    return;
+                }
+            }
+
+            // 降级：window.Asc.plugin.callCommand
+            if (window.Asc?.plugin?.callCommand) {
+                await new Promise((resolve) => {
+                    window.Asc.plugin.callCommand(function() {
+                        try {
+                            const oDocument = Api.GetDocument();
+                            const oRange = oDocument.GetRangeBySelect?.() || oDocument.GetSelection();
+                            if (!oRange) return;
+                            oRange.AddComment(Asc.scope.commentText, Asc.scope.commentAuthor);
+                        } catch (e) {
+                            console.warn('[addDocComment] plugin.callCommand failed:', e);
+                        }
+                    }, true);
+                    setTimeout(resolve, 1000);
+                });
+                ElMessage.success('已在文档中添加批注。');
+                return;
+            }
+
+            // 终极降级：executeMethod 对象参数
+            await executeEditorMethod('AddComment', [{ text: comment || 'AI 审查建议', author: 'AI 审查专家' }]).catch(async () => {
+                await executeEditorMethod('AddComment', [{ text: comment || 'AI 审查建议' }]);
             });
             ElMessage.success('已在文档中添加批注，并尝试写入书签锚点。');
         } catch (error) {
