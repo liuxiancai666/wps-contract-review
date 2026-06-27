@@ -137,6 +137,100 @@ ${wrapContractContent(plainText)}
         res.status(500).json({ error: '预分析失败，请稍后重试。' });
     }
 });
+// 将合同正文按章节拆分为若干组（每组 500-1200 字，约 3-5 个条款）
+const splitContractIntoSections = (plainText) => {
+    if (!plainText || typeof plainText !== 'string') return [];
+    const text = plainText.trim();
+    if (text.length < 200) return [{ index: 0, title: '全文', content: text }];
+    const clausePattern = /((?:^|\n)[ \t]*(?:第[一二三四五六七八九十百零\d]+[条章节款])|(?:^|\n)[ \t]*(?:一\s*[、.。]|二\s*[、.。]|三\s*[、.。]|四\s*[、.。]|五\s*[、.。]|六\s*[、.。]|七\s*[、.。]|八\s*[、.。]))/gm;
+    const matches = [{ offset: 0 }, ...Array.from(text.matchAll(clausePattern)).map(m => ({ offset: m.index, text: m[1] }))];
+    const sections = [];
+    for (let i = 0; i < matches.length; i++) {
+        const start = matches[i].offset;
+        const end = i + 1 < matches.length ? matches[i + 1].offset : text.length;
+        const content = text.slice(start, end).trim();
+        const sectionTitle = matches[i].text ? matches[i].text.replace(/[\n\r\s]+/g, ' ').trim() : `第${i + 1}段`;
+        if (content.length >= 50) sections.push({ index: sections.length, title: sectionTitle, content });
+    }
+    if (sections.length < 3) {
+        const chunkSize = 800, overlap = 100, newSections = [];
+        for (let i = 0; i < text.length; i += chunkSize - overlap) {
+            const content = text.slice(i, Math.min(i + chunkSize, text.length)).trim();
+            if (content.length >= 100) newSections.push({ index: newSections.length, title: `第${newSections.length + 1}部分`, content });
+            if (i + chunkSize >= text.length) break;
+        }
+        return newSections;
+    }
+    const batches = [];
+    let currentBatch = { sections: [], combinedContent: '', startIdx: 0 };
+    let currentSize = 0;
+    const TARGET_SIZE = 1200;
+    for (const section of sections) {
+        if (currentSize + section.content.length > TARGET_SIZE && currentSize > 0) { batches.push(currentBatch); currentBatch = { sections: [], combinedContent: '', startIdx: batches.length }; currentSize = 0; }
+        currentBatch.sections.push(section);
+        currentBatch.combinedContent += (currentBatch.combinedContent ? '\n' : '') + section.content;
+        currentSize += section.content.length;
+    }
+    if (currentBatch.sections.length > 0) batches.push(currentBatch);
+    return batches;
+};
+// 逐组并行审查：每个 batch 并行调用 LLM，聚合所有 dispute_points
+const batchReviewSections = async (batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLMFn) => {
+    const knowledgeContext = relevantKnowledge.length > 0
+        ? relevantKnowledge.map((item, idx) => `[${idx + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n')
+        : '未检索到直接依据。';
+    const buildBatchPrompt = (batchContent, batchIdx, totalBatches) => `你是资深法务专家，请对以下合同章节（第 ${batchIdx + 1}/${totalBatches} 组）进行深度专项审查，并只输出 JSON。
+
+审查模板：${template.name}
+合同类型：${template.name}
+用户立场：${userPerspective}
+审查点：${reviewPoints.join('；')}
+审查目的：${corePurposes.join('；')}
+模板规则：${(template.prompt_rules || []).join('；')}
+
+法律依据（仅引用以下内容，不得虚构）：
+${knowledgeContext}
+
+待审查章节内容：
+---
+${batchContent.slice(0, 3000)}
+---
+
+硬性要求：
+- 必须识别所有类型的风险（违法条款/霸王条款/不公平条款/缺失条款/程序性违规），即使是常见条款也不能跳过。
+- 重点关注：单方解释权、无偿解除、强制加班、限制生育、押金扣押、单方变更权等典型霸王条款。
+- 如果该章节无任何风险，请在 dispute_points 中返回一个空数组 []。
+- modification_suggestions 必须包含 original_text（尽量逐字摘录原文完整句子）和 suggested_text（可直接替换的完整文本）。
+- 只输出 JSON，不输出 markdown 包裹。
+
+输出 JSON 结构：
+{
+  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
+  "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
+  "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}]
+}`;
+    const totalBatches = batches.length;
+    const prompts = batches.map((batch, idx) => buildBatchPrompt(batch.combinedContent, idx, totalBatches));
+    const batchResults = await Promise.all(prompts.map(p => callJsonLLMFn(p)));
+    const allDisputePoints = [], allMissingClauses = [], allModificationSuggestions = [];
+    const seenClauseKeys = new Set();
+    const addIfNotDuplicate = (arr, item, keyField) => {
+        if (!item || typeof item !== 'object') return;
+        const key = (item[keyField] || '').replace(/\s+/g, '').slice(0, 30);
+        if (!key || seenClauseKeys.has(key)) return;
+        const dupKey = `${item.title || ''}_${key}`;
+        if (seenClauseKeys.has(dupKey)) return;
+        seenClauseKeys.add(dupKey); seenClauseKeys.add(key); arr.push(item);
+    };
+    for (const result of batchResults) {
+        if (!result) continue;
+        if (Array.isArray(result.dispute_points)) result.dispute_points.forEach(p => addIfNotDuplicate(allDisputePoints, p, 'original_clause'));
+        if (Array.isArray(result.missing_clauses)) result.missing_clauses.forEach(c => { if (c && typeof c === 'object') allMissingClauses.push(c); });
+        if (Array.isArray(result.modification_suggestions)) result.modification_suggestions.forEach(s => addIfNotDuplicate(allModificationSuggestions, s, 'original_text'));
+    }
+    return { dispute_points: allDisputePoints, missing_clauses: allMissingClauses, modification_suggestions: allModificationSuggestions, batch_count: totalBatches };
+};
+
 // 后台异步执行合同审查（不阻塞 HTTP 响应）
 const runAnalysisInBackground = async (contractId, userId, userPerspective, preAnalysisData) => {
     const contract = await findOwnedContract(contractId, userId);
@@ -190,70 +284,37 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
             return `${index + 1}. ${company.companyName}\n${evidence || '未检索到可用外部证据'}`;
         }).join('\n');
 
-        // Step 4: AI 生成审查结论
-        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', message: 'AI 正在深度审查合同，这是最耗时的步骤，请耐心等待...' });
-        const prompt = `你是一名资深法务专家，请按审查模板对合同进行深度审查，并只输出 JSON。
+        // Step 4: AI 逐组并行审查（替代一次性全篇审查，解决上下文过载导致的漏检问题）
+        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', message: 'AI 正在分章节深度审查合同，请耐心等待...' });
 
-审查模板：
-- 模板名称：${template.name}
-- 合同类型：${preAnalysisData.contract_type}
-- 用户立场：${userPerspective}
-- 审查点：${reviewPoints.join('；')}
-- 审查目的：${corePurposes.join('；')}
-- 模板规则：${(template.prompt_rules || []).join('；')}
-- 报告结构偏好：${(template.report_sections || []).join('；')}
+        // 按章节/条款拆分合同正文为若干 batch，并行审查每个 batch
+        const batches = splitContractIntoSections(plainText);
+        const batchResult = await batchReviewSections(batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLM);
 
-法律与裁判依据（向量 RAG + rerank 检索结果，只能引用以下内容，不得虚构法条、案号或裁判观点）：
-${relevantKnowledge.map((item, index) => `[${index + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n') || '未检索到直接依据。'}
+        // 构造 analysisResult（合并 batch 结果 + 公司主体审查 + 整体摘要）
+        const analysisResult = {
+            ...normalizeAnalysisResult({ dispute_points: batchResult.dispute_points }),
+            missing_clauses: batchResult.missing_clauses || [],
+            modification_suggestions: batchResult.modification_suggestions || [],
+            breach_cost_analysis: [],
+        };
 
-输出 JSON 结构：
-{
-  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
-  "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
-  "party_review": [{"title":"主体审查项","description":"审查结论","plain_language":"大白话说明"}],
-  "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}],
-  "breach_cost_analysis": [{"scenario":"违约场景","legal_basis":"依据","estimated_cost":"预计成本"}]
-}
-
-硬性要求：
-- 必须识别并列出所有类型的风险，包括但不限于：
-  ① 违法条款（违反法律法规强制性规定的条款）
-  ② 格式条款/霸王条款（不合理地限制对方权利、单方赋予己方特权的条款），包括但不限于：
-     - "最终解释权归甲方/本公司所有"等单方解释权条款
-     - "甲方保留随时修改合同权利"等单方变更权条款
-     - "乙方不得/无权/无权要求"等排除劳动者/消费者基本权利的条款
-     - "本合同解释权/执行权归甲方"等类似表述
-     - "乙方同意甲方对本合同的一切解释"等概括性授权条款
-  ③ 不公平条款（权利义务严重不对等的条款）
-  ④ 缺失条款（法律要求但合同中缺少的必要条款）
-  ⑤ 程序性违规（应书面通知但未说明、应协商但未协商等）
-- 即使某条风险已在模板规则或审查点中覆盖，也必须作为 dispute_point 输出。
-- modification_suggestions 每一项必须包含 original_text 和 suggested_text。
-- original_text 必须尽量逐字摘录合同原文中的完整句子或段落，用于 OnlyOffice 定位、书签和批注锚点。
-- 必须逐条比对「法律与裁判依据」中每一条法律条文与合同对应条款，特别关注天数、期限、比例、金额、次数等强制性数字是否一致；合同条款与法律规定不一致的（例如法定 15 日被写成 30 日、试用期超过 6 个月、竞业限制超过 2 年），必须列入 dispute_points 并给出对应的 modification_suggestions，不得遗漏。
-- 如果没有检索依据，不得编造法条或案例，只能说明"当前知识库未检索到直接依据"。
-- 不输出自然语言解释，不输出 markdown。
-
-合同原文：
----
-${wrapContractContent(plainText)}
----`;
-
-        const subjectSearchPrompt = `\n\n主体外部检索证据（来自 Bing/Baidu 搜索，已做基础真实性评分；只能把 verified=true 或可信度较高的结果作为主体审查线索，不能当作最终工商登记结论）：\n${companySearchContext || '未识别到可检索的公司主体名称。'}\n\n请额外输出 company_review 字段，结构为 [{"company_name":"公司名称","status":"已检索/未检索到可靠证据","evidence_summary":"基于外部搜索证据的主体核验摘要","authenticity":"真实性检测结论","sources":["URL"]}]。`;
-        const analysisResult = normalizeAnalysisResult(await callJsonLLM(prompt + subjectSearchPrompt));
-        // 兜底检测：扫描合同原文，补充 LLM 可能遗漏的典型霸王条款
+        // 兜底检测：补充 LLM 可能遗漏的典型霸王条款
         supplementKnownRiskPatterns(analysisResult, plainText);
+
+        // 公司主体审查（来自 Step 3 的外部搜索结果，不依赖 LLM）
+        analysisResult.company_review = companySearchResults.map((company) => ({
+            company_name: company.companyName,
+            status: company.verifiedResults.length ? '已检索到可初步核验的主体线索' : '未检索到足够可靠的主体证据',
+            evidence_summary: company.verifiedResults[0]?.snippet || company.results[0]?.snippet || '外部搜索未返回足够证据。',
+            authenticity: company.verifiedResults.length
+                ? '存在官方或多源交叉线索，仍需以国家企业信用信息公示系统等正式渠道为准。'
+                : '搜索结果未通过基础真实性检测，不能据此下结论。',
+            sources: (company.verifiedResults.length ? company.verifiedResults : company.results).slice(0, 3).map((item) => item.url),
+        }));
+
         analysisResult.relevant_laws = annotateKnowledgeUpdates(relevantKnowledge);
         analysisResult.company_search = companySearchResults;
-        if (!analysisResult.company_review.length && companySearchResults.length) {
-            analysisResult.company_review = companySearchResults.map((company) => ({
-                company_name: company.companyName,
-                status: company.verifiedResults.length ? '已检索到可初步核验的主体线索' : '未检索到足够可靠的主体证据',
-                evidence_summary: company.verifiedResults[0]?.snippet || company.results[0]?.snippet || '外部搜索未返回足够证据。',
-                authenticity: company.verifiedResults.length ? '存在官方或多源交叉线索，仍需以国家企业信用信息公示系统等正式渠道为准。' : '搜索结果未通过基础真实性检测，不能据此下结论。',
-                sources: (company.verifiedResults.length ? company.verifiedResults : company.results).slice(0, 3).map((item) => item.url),
-            }));
-        }
         analysisResult.template = {
             id: template.id,
             name: template.name,

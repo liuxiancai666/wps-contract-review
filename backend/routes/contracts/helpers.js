@@ -1222,3 +1222,144 @@ const normalizeAnalysisResult = (result) => {
         company_review: Array.isArray(raw.company_review) ? raw.company_review : [],
     };
 };
+
+// 将合同正文按章节拆分为若干组（每组 500-1200 字，约 3-5 个条款）
+const splitContractIntoSections = (plainText) => {
+    if (!plainText || typeof plainText !== 'string') return [];
+    const text = plainText.trim();
+    if (text.length < 200) return [{ index: 0, title: '全文', content: text }];
+
+    // 优先按"第X条"拆分（劳动合同/民事合同标准格式）
+    const clausePattern = /((?:^|\n)[ \t]*(?:第[一二三四五六七八九十百零\d]+[条章节款])|(?:^|\n)[ \t]*(?:一\s*[、.。]|二\s*[、.。]|三\s*[、.。]|四\s*[、.。]|五\s*[、.。]|六\s*[、.。]|七\s*[、.。]|八\s*[、.。]))/gm;
+    const matches = [{ offset: 0 }, ...Array.from(text.matchAll(clausePattern)).map(m => ({ offset: m.index, text: m[1] }))];
+
+    const sections = [];
+    for (let i = 0; i < matches.length; i++) {
+        const start = matches[i].offset;
+        const end = i + 1 < matches.length ? matches[i + 1].offset : text.length;
+        const content = text.slice(start, end).trim();
+        const sectionTitle = matches[i].text ? matches[i].text.replace(/[\n\r\s]+/g, ' ').trim() : `第${i + 1}段`;
+        if (content.length >= 50) { // 过滤过短的段
+            sections.push({ index: sections.length, title: sectionTitle, content });
+        }
+    }
+
+    // 如果拆分结果过少（<3段），改为固定字数重叠拆分
+    if (sections.length < 3) {
+        const chunkSize = 800;
+        const overlap = 100;
+        const newSections = [];
+        for (let i = 0; i < text.length; i += chunkSize - overlap) {
+            const content = text.slice(i, Math.min(i + chunkSize, text.length)).trim();
+            if (content.length >= 100) {
+                newSections.push({ index: newSections.length, title: `第${newSections.length + 1}部分`, content });
+            }
+            if (i + chunkSize >= text.length) break;
+        }
+        return newSections;
+    }
+
+    // 将相邻的小段合并为 batch（每 batch 约 1000-1500 字）
+    const batches = [];
+    let currentBatch = { sections: [], combinedContent: '', startIdx: 0 };
+    let currentSize = 0;
+    const TARGET_SIZE = 1200;
+
+    for (const section of sections) {
+        if (currentSize + section.content.length > TARGET_SIZE && currentSize > 0) {
+            batches.push(currentBatch);
+            currentBatch = { sections: [], combinedContent: '', startIdx: batches.length };
+            currentSize = 0;
+        }
+        currentBatch.sections.push(section);
+        currentBatch.combinedContent += (currentBatch.combinedContent ? '\n' : '') + section.content;
+        currentSize += section.content.length;
+    }
+    if (currentBatch.sections.length > 0) batches.push(currentBatch);
+
+    return batches;
+};
+
+// 逐组并行审查：每个 batch 并行调用 LLM，聚合所有 dispute_points
+const batchReviewSections = async (batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLMFn) => {
+    const knowledgeContext = relevantKnowledge.length > 0
+        ? relevantKnowledge.map((item, idx) => `[${idx + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n')
+        : '未检索到直接依据。';
+
+    const buildBatchPrompt = (batchContent, batchIdx, totalBatches) => `你是资深法务专家，请对以下合同章节（第 ${batchIdx + 1}/${totalBatches} 组）进行深度专项审查，并只输出 JSON。
+
+审查模板：${template.name}
+合同类型：${template.name}
+用户立场：${userPerspective}
+审查点：${reviewPoints.join('；')}
+审查目的：${corePurposes.join('；')}
+模板规则：${(template.prompt_rules || []).join('；')}
+
+法律依据（仅引用以下内容，不得虚构）：
+${knowledgeContext}
+
+待审查章节内容：
+---
+${batchContent.slice(0, 3000)}
+---
+
+硬性要求：
+- 必须识别所有类型的风险（违法条款/霸王条款/不公平条款/缺失条款/程序性违规），即使是常见条款也不能跳过。
+- 重点关注：单方解释权、无偿解除、强制加班、限制生育、押金扣押、单方变更权等典型霸王条款。
+- 如果该章节无任何风险，请在 dispute_points 中返回一个空数组 []。
+- modification_suggestions 必须包含 original_text（尽量逐字摘录原文完整句子）和 suggested_text（可直接替换的完整文本）。
+- 只输出 JSON，不输出 markdown 包裹。
+
+输出 JSON 结构：
+{
+  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
+  "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
+  "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}]
+}`;
+
+    const totalBatches = batches.length;
+    const prompts = batches.map((batch, idx) => buildBatchPrompt(batch.combinedContent, idx, totalBatches));
+
+    // 并行调用 LLM（所有 batch 同时请求）
+    const batchResults = await Promise.all(prompts.map(p => callJsonLLMFn(p)));
+
+    // 聚合所有结果
+    const allDisputePoints = [];
+    const allMissingClauses = [];
+    const allModificationSuggestions = [];
+    const seenClauseKeys = new Set();
+
+    const addIfNotDuplicate = (arr, item, keyField) => {
+        if (!item || typeof item !== 'object') return;
+        const key = (item[keyField] || '').replace(/\s+/g, '').slice(0, 30);
+        if (!key || seenClauseKeys.has(key)) return;
+        // 去重：检查 title + original_clause 组合
+        const dupKey = `${item.title || ''}_${key}`;
+        if (seenClauseKeys.has(dupKey)) return;
+        seenClauseKeys.add(dupKey);
+        seenClauseKeys.add(key);
+        arr.push(item);
+    };
+
+    for (const result of batchResults) {
+        if (!result) continue;
+        if (Array.isArray(result.dispute_points)) {
+            result.dispute_points.forEach(p => addIfNotDuplicate(allDisputePoints, p, 'original_clause'));
+        }
+        if (Array.isArray(result.missing_clauses)) {
+            result.missing_clauses.forEach(c => {
+                if (c && typeof c === 'object') allMissingClauses.push(c);
+            });
+        }
+        if (Array.isArray(result.modification_suggestions)) {
+            result.modification_suggestions.forEach(s => addIfNotDuplicate(allModificationSuggestions, s, 'original_text'));
+        }
+    }
+
+    return {
+        dispute_points: allDisputePoints,
+        missing_clauses: allMissingClauses,
+        modification_suggestions: allModificationSuggestions,
+        batch_count: totalBatches,
+    };
+};
