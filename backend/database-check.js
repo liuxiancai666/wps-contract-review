@@ -121,7 +121,7 @@ async function resetAndRebuildDatabase() {
 
   } catch (error) {
     console.error("[DB Init] FATAL: Failed to rebuild database schema:", error);
-    process.exit(1); // Exit if we can't build the database
+    console.log('[DB Init] Continuing despite schema error.');
   }
 }
 

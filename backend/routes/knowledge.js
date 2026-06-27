@@ -300,7 +300,7 @@ router.post('/batch-import', upload.array('files', BATCH_IMPORT_FILE_LIMIT), asy
             deduped: 0,
             files: 0,
             failed: [],
-            vectorStore: 'sqlite-fallback',
+            vectorStore: 'pg-fallback',
         };
         let entries = [];
 

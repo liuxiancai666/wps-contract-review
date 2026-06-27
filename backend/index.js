@@ -13,6 +13,7 @@ const qaRoutes = require('./routes/qa');
 const userRoutes = require('./routes/users');
 const knowledgeRoutes = require('./routes/knowledge');
 const templateRoutes = require('./routes/templates');
+const db = require('./database');
 const resetAndRebuildDatabase = require('./database-check');
 
 const app = express();
@@ -104,6 +105,61 @@ app.use((err, req, res, next) => {
     return res.status(500).json({ error: '服务器处理请求时发生错误。' });
   }
   next();
+});
+
+// 健康检查端点
+app.get('/api/health', async (req, res) => {
+  const checks = {
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    services: {},
+  };
+
+  try {
+    const pgResult = await db.raw('SELECT 1 AS ok');
+    checks.services.postgres = pgResult?.rows?.[0]?.ok === 1 ? 'ok' : 'error';
+  } catch (e) {
+    checks.services.postgres = `error: ${e.message.slice(0, 80)}`;
+    checks.status = 'degraded';
+  }
+
+  try {
+    const { embedText } = require('./services/embeddingClient');
+    const emb = await embedText('健康检查');
+    checks.services.embedding = emb?.length > 0 ? 'ok' : 'no_output';
+  } catch (e) {
+    checks.services.embedding = `error: ${e.message.slice(0, 60)}`;
+    checks.status = 'degraded';
+  }
+
+  try {
+    const { MilvusClient } = require('@zilliz/milvus2-sdk-node');
+    const client = new MilvusClient({ address: process.env.MILVUS_ADDRESS || '127.0.0.1:19530' });
+    const exists = await client.hasCollection({ collection_name: process.env.MILVUS_COLLECTION || 'contract_review_knowledge' });
+    checks.services.milvus = exists?.value === true ? 'connected' : 'no_collection';
+  } catch (e) {
+    checks.services.milvus = `error: ${e.message.slice(0, 60)}`;
+    checks.status = 'degraded';
+  }
+
+  try {
+    const countResult = await db('vector_documents').count({ count: '*' }).first();
+    const totalChunks = Number(countResult?.count || 0);
+    const titlesResult = await db('vector_documents').distinct('title');
+    const totalTitles = titlesResult.length;
+    checks.services.knowledge_chunks = totalChunks;
+    checks.services.knowledge_titles = totalTitles;
+    if (totalTitles < 41) {
+      checks.services.knowledge_warning = `low coverage: ${totalTitles}/41 titles`;
+      checks.status = 'degraded';
+    }
+  } catch (e) {
+    checks.services.knowledge_chunks = 0;
+    checks.services.knowledge_titles = 0;
+  }
+
+  const httpCode = checks.status === 'ok' ? 200 : 503;
+  res.status(httpCode).json(checks);
 });
 
 async function startServer() {

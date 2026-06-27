@@ -148,7 +148,7 @@ const splitTextIntoChunks = (text, { maxChars = 400, overlap = 80 } = {}) => {
 
 const getMilvusClient = async () => {
     const vectorStore = String(process.env.VECTOR_STORE || '').toLowerCase();
-    if (!MilvusClient || ['sqlite', 'postgres', 'relational'].includes(vectorStore)) return null;
+    if (!MilvusClient || ['postgres', 'relational'].includes(vectorStore)) return null;
     if (!process.env.MILVUS_ADDRESS) return null;
     if (!milvusClientPromise) {
         milvusClientPromise = (async () => {
@@ -621,7 +621,7 @@ const deleteMilvusRows = async (rows) => {
         await client.flush({ collection_names: [COLLECTION_NAME] });
         return true;
     } catch (error) {
-        console.warn(`[Milvus] Delete failed: ${error.message}. SQLite metadata has been deleted.`);
+        console.warn(`[Milvus] Delete failed: ${error.message}. PG metadata has been deleted.`);
         return false;
     }
 };
@@ -728,7 +728,7 @@ const listKnowledgeDocuments = async ({
     };
 };
 
-const sqliteVectorSearch = async (query, queryVector, { limit, sourceTypes }) => {
+const pgVectorSearch = async (query, queryVector, { limit, sourceTypes }) => {
     let rowsQuery = db('vector_documents');
     if (sourceTypes.length > 0) rowsQuery = rowsQuery.whereIn('source_type', sourceTypes);
     // 小规模数据直接全量扫描，确保所有语义相关行进入候选
@@ -909,7 +909,7 @@ const searchVectorDocuments = async (query, { limit = 5, sourceTypes = [], reran
         if (results && results.length === 0 && milvusReady) {
             console.log('[Vector Search] Milvus returned 0 results, falling back to relational vectors.');
         }
-        results = await sqliteVectorSearch(cleanQuery, queryVector, { limit: candidateLimit, sourceTypes });
+        results = await pgVectorSearch(cleanQuery, queryVector, { limit: candidateLimit, sourceTypes });
     }
     const keywordResults = await keywordSearch(cleanQuery, { limit: candidateLimit, sourceTypes });
     results = mergeSearchResults(results, keywordResults, candidateLimit);
