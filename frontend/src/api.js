@@ -2,7 +2,7 @@ import axios from 'axios';
 import { getUserId } from './user'; // Assuming user.js is in the same src directory
 
 const apiClient = axios.create({
-    baseURL: (import.meta.env.VITE_APP_BACKEND_API_URL || 'http://localhost:3000') + '/api',
+    baseURL: (import.meta.env.VITE_APP_BACKEND_API_URL || '') + '/api',
     headers: {
         'Content-Type': 'application/json'
     }
@@ -112,7 +112,7 @@ export default {
     },
 
     getHistory() {
-        return apiClient.get('/contracts/history');
+        return apiClient.get('/contracts');
     },
 
     identifyUser(payload) {

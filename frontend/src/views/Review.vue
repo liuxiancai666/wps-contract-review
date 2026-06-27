@@ -116,11 +116,24 @@
 
     <!-- Step 1: Pre-analysis & Settings -->
     <div v-if="activeStep === 1" class="confirm-step w-full max-w-5xl mx-auto py-8">
-      <div v-if="preAnalysisData.contract_type">
+      <!-- 预分析加载状态 -->
+      <div v-if="preAnalyzing" class="text-center py-16">
+        <div class="inline-flex items-center justify-center w-16 h-16 mb-4">
+          <svg class="animate-spin h-10 w-10 text-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+        </div>
+        <h3 class="text-xl font-semibold text-text-dark mb-2">正在分析合同内容…</h3>
+        <p class="text-sm text-text-light">AI 正在识别合同类型、提取条款结构，请稍候</p>
+      </div>
+
+      <!-- 预分析完成 / 用户可确认 -->
+      <div v-else>
         <div class="text-center mb-10">
             <p class="text-lg text-text-main">文件 <span class="font-semibold text-primary">{{ contract.original_filename }}</span> 已上传成功。</p>
             <div class="mt-2 flex items-center justify-center gap-2">
-                <p class="text-md text-text-light">AI初步识别该合同为：</p>
+                <p class="text-md text-text-light">AI 初步识别该合同为：</p>
                 <el-input
                     v-model="preAnalysisData.contract_type"
                     class="contract-type-edit"
@@ -905,6 +918,7 @@ export default {
     const loading = ref(false);
     const loadingMessage = ref('');
     const sessionLoadFailed = ref(false);
+    const preAnalyzing = ref(false);
     const perspective = ref('');
     const activeAiTab = ref('summary');
     const docEditorComponent = ref(null);
@@ -1364,11 +1378,12 @@ export default {
         contract.original_filename = res.editorConfig.document.title;
         setupSocket(contract.id);
 
-        // 立即进入预览步骤（先展示编辑器，预分析后台跑）
-        activeStep.value = 2;
-        loading.value = false;
+        // 先进入确认步骤（Step 1），预分析在后台跑
+        activeStep.value = 1;
+        loading.value = true;
+        preAnalyzing.value = true;
 
-        // 后台异步启动预分析（非阻塞）
+        // 后台异步启动预分析（非阻塞），完成后填充数据、显示确认界面
         api.preAnalyzeContract({ contractId: contract.id }).then(preAnalysisRes => {
             Object.assign(preAnalysisData, preAnalysisRes.data);
             selectedTemplateId.value = preAnalysisData.template_id || selectedTemplateId.value || 'general';
@@ -1381,9 +1396,18 @@ export default {
             } else {
               customPurposes.value = [{ value: '示例：确保权利与义务对等' }];
             }
-            ElMessage.success('AI初步分析已完成，您可以在右侧查看审查类型与审查点。');
+            preAnalyzing.value = false;
+            loading.value = false;
+            ElMessage.success('AI 初步分析完成，请确认审查范围后点击"开始分析"。');
         }).catch(err => {
-            console.warn('后台预分析失败，用户仍可手动确认审查配置：', err);
+            console.warn('预分析失败，用户仍可手动确认审查配置：', err);
+            preAnalyzing.value = false;
+            loading.value = false;
+            // 即使失败也允许用户手动配置
+            selectedTemplateId.value = 'general';
+            selectedReviewPoints.value = [];
+            customPurposes.value = [{ value: '' }];
+            ElMessage.warning('预分析未成功，您仍可手动设置审查范围。');
         });
     };
 
@@ -2532,6 +2556,7 @@ export default {
     return {
       activeStep,
       loading,
+      preAnalyzing,
       loadingMessage,
       sessionLoadFailed,
       retryLoadSession,

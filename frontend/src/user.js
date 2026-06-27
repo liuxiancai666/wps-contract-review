@@ -1,7 +1,21 @@
-import FingerprintJS from '@fingerprintjs/fingerprintjs';
 import api from './api';
 
 const USER_ID_KEY = 'user_id';
+const VISITOR_ID_KEY = 'visitor_id';
+
+/**
+ * Generate or retrieve a persistent visitor ID using crypto.randomUUID.
+ * Stored in localStorage so it persists across sessions.
+ */
+const getVisitorId = () => {
+    let visitorId = localStorage.getItem(VISITOR_ID_KEY);
+    if (!visitorId) {
+        visitorId = crypto.randomUUID();
+        localStorage.setItem(VISITOR_ID_KEY, visitorId);
+        console.log(`[User] Generated new visitor ID: ${visitorId}`);
+    }
+    return visitorId;
+};
 
 let currentUserId = localStorage.getItem(USER_ID_KEY);
 
@@ -20,19 +34,16 @@ export const identifyUser = async () => {
 
     console.log('[User] No User ID found. Identifying browser...');
     try {
-        const fp = await FingerprintJS.load();
-        const result = await fp.get();
-        const visitorId = result.visitorId;
-
+        const visitorId = getVisitorId();
         console.log(`[User] Browser fingerprint generated: ${visitorId}`);
 
         const response = await api.identifyUser({ fingerprintId: visitorId });
-        
+
         currentUserId = response.data.userId;
         localStorage.setItem(USER_ID_KEY, currentUserId);
-        
+
         console.log(`[User] Successfully identified. User ID: ${currentUserId}`);
-        
+
         return currentUserId;
     } catch (error) {
         console.error('[User] Fingerprinting or API identification failed:', error);
@@ -49,4 +60,4 @@ export const identifyUser = async () => {
  */
 export const getUserId = () => {
     return currentUserId ? parseInt(currentUserId, 10) : null;
-}; 
+};
