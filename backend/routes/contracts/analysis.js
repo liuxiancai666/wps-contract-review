@@ -216,6 +216,18 @@ ${relevantKnowledge.map((item, index) => `[${index + 1}] [${item.source_type}] $
 }
 
 硬性要求：
+- 必须识别并列出所有类型的风险，包括但不限于：
+  ① 违法条款（违反法律法规强制性规定的条款）
+  ② 格式条款/霸王条款（不合理地限制对方权利、单方赋予己方特权的条款），包括但不限于：
+     - "最终解释权归甲方/本公司所有"等单方解释权条款
+     - "甲方保留随时修改合同权利"等单方变更权条款
+     - "乙方不得/无权/无权要求"等排除劳动者/消费者基本权利的条款
+     - "本合同解释权/执行权归甲方"等类似表述
+     - "乙方同意甲方对本合同的一切解释"等概括性授权条款
+  ③ 不公平条款（权利义务严重不对等的条款）
+  ④ 缺失条款（法律要求但合同中缺少的必要条款）
+  ⑤ 程序性违规（应书面通知但未说明、应协商但未协商等）
+- 即使某条风险已在模板规则或审查点中覆盖，也必须作为 dispute_point 输出。
 - modification_suggestions 每一项必须包含 original_text 和 suggested_text。
 - original_text 必须尽量逐字摘录合同原文中的完整句子或段落，用于 OnlyOffice 定位、书签和批注锚点。
 - 必须逐条比对「法律与裁判依据」中每一条法律条文与合同对应条款，特别关注天数、期限、比例、金额、次数等强制性数字是否一致；合同条款与法律规定不一致的（例如法定 15 日被写成 30 日、试用期超过 6 个月、竞业限制超过 2 年），必须列入 dispute_points 并给出对应的 modification_suggestions，不得遗漏。
@@ -229,6 +241,8 @@ ${wrapContractContent(plainText)}
 
         const subjectSearchPrompt = `\n\n主体外部检索证据（来自 Bing/Baidu 搜索，已做基础真实性评分；只能把 verified=true 或可信度较高的结果作为主体审查线索，不能当作最终工商登记结论）：\n${companySearchContext || '未识别到可检索的公司主体名称。'}\n\n请额外输出 company_review 字段，结构为 [{"company_name":"公司名称","status":"已检索/未检索到可靠证据","evidence_summary":"基于外部搜索证据的主体核验摘要","authenticity":"真实性检测结论","sources":["URL"]}]。`;
         const analysisResult = normalizeAnalysisResult(await callJsonLLM(prompt + subjectSearchPrompt));
+        // 兜底检测：扫描合同原文，补充 LLM 可能遗漏的典型霸王条款
+        supplementKnownRiskPatterns(analysisResult, plainText);
         analysisResult.relevant_laws = annotateKnowledgeUpdates(relevantKnowledge);
         analysisResult.company_search = companySearchResults;
         if (!analysisResult.company_review.length && companySearchResults.length) {

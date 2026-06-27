@@ -1075,13 +1075,150 @@ const analyzeSealAndSignature = async (contract, plainText) => {
     }
 };
 
-const normalizeAnalysisResult = (result) => ({
-    dispute_points: Array.isArray(result.dispute_points) ? result.dispute_points : [],
-    missing_clauses: Array.isArray(result.missing_clauses) ? result.missing_clauses : [],
-    party_review: Array.isArray(result.party_review) ? result.party_review : [],
-    modification_suggestions: Array.isArray(result.modification_suggestions) ? result.modification_suggestions : [],
-    breach_cost_analysis: Array.isArray(result.breach_cost_analysis) ? result.breach_cost_analysis : [],
-    seal_analysis: Array.isArray(result.seal_analysis) ? result.seal_analysis : [],
-    relevant_laws: Array.isArray(result.relevant_laws) ? result.relevant_laws : [],
-    company_review: Array.isArray(result.company_review) ? result.company_review : [],
-});
+// 兜底检测：扫描合同原文，补充 LLM 可能遗漏的典型霸王条款
+const supplementKnownRiskPatterns = (analysisResult, plainText) => {
+    if (!plainText || typeof plainText !== 'string') return;
+    const points = analysisResult.dispute_points || [];
+
+    // 已有的原文片段（去重）
+    const existingClauses = new Set(
+        points.map(p => (p.original_clause || '').replace(/\s+/g, '').slice(0, 30))
+    );
+
+    // 典型霸王条款规则列表
+    const riskPatterns = [
+        {
+            keywords: ['解释权归', '解释权归甲方', '解释权归公司', '最终解释权'],
+            title: '单方解释权条款（霸王条款）',
+            legal_reference: '《民法典》第六条（公平原则）、第七条（诚信原则）；《中华人民共和国劳动合同法》第三条（公平原则）',
+            dispute_rationale: '"单方解释权"赋予用人单位对合同条款的最终解释权，劳动者无法对条款含义提出异议，违反合同公平原则，属于典型格式霸王条款。',
+            plain_language: '这条款说"最终解释权归公司"，意味着公司可以随便解读合同内容，劳动者说了不算，这是不公平的。',
+            severity: '高',
+        },
+        {
+            keywords: ['无偿解除', '无偿解除合同', '无偿辞退', '不支付任何补偿解除'],
+            title: '无偿违法解除条款',
+            legal_reference: '《中华人民共和国劳动合同法》第四十六条（经济补偿）、第四十八条（违法解除赔偿）',
+            dispute_rationale: '用人单位违法解除或终止劳动合同须支付赔偿金，约定"无偿解除"违反法律规定，该条款无效。',
+            plain_language: '合同写公司可以"无偿开除"你，但法律不允许这样做，被违法开除可以要求2N赔偿金。',
+            severity: '高',
+        },
+        {
+            keywords: ['限制结婚', '限制生育', '不得结婚', '不得生育'],
+            title: '限制结婚生育条款（违法）',
+            legal_reference: '《中华人民共和国劳动合同法》第三条；《就业促进法》第二十七条；《妇女权益保障法》第四十四条',
+            dispute_rationale: '用人单位不得规定女职工在孕产哺乳期解除劳动合同，或限制其结婚生育，此类条款违法且无效。',
+            plain_language: '合同规定不能结婚生孩子，这是违法的，公司不能用这个理由开除你。',
+            severity: '高',
+        },
+        {
+            keywords: ['保管责任', '丢失赔偿', '损坏赔偿', '乙方承担全部责任'],
+            title: '不合理财产保管责任',
+            legal_reference: '《中华人民共和国劳动合同法》第九条（不得扣押证件/要求担保）',
+            dispute_rationale: '要求劳动者对工作场所所有丢失/损坏承担赔偿责任，超出合理范围，属于不公平格式条款。',
+            plain_language: '合同规定丢了东西要全额赔，但如果是工作场所公共区域或者非你直接导致的丢失，不应该全赔。',
+            severity: '中',
+        },
+        {
+            keywords: ['加班必须', '强制加班', '拒绝加班视为', '不服从加班'],
+            title: '强制加班且拒绝即违纪',
+            legal_reference: '《中华人民共和国劳动法》第四十一条（加班上限）、第四十三条（支付加班费）',
+            dispute_rationale: '用人单位不得强制加班，员工有权拒绝超时加班。将拒绝加班列为"严重违纪"是违法条款。',
+            plain_language: '合同说必须无偿加班，不加班就违纪开除，这违反劳动法，加班要给双倍或三倍工资。',
+            severity: '高',
+        },
+        {
+            keywords: ['扣除押金', '扣押工资', '风险抵押', '入职押金'],
+            title: '违法扣押押金/工资条款',
+            legal_reference: '《中华人民共和国劳动合同法》第九条（不得扣押证件财物）、第八十四条（罚款法律责任）',
+            dispute_rationale: '用人单位不得扣押劳动者证件或收取押金，不得以任何名义扣留工资作为"风险抵押"。',
+            plain_language: '公司扣你押金或者扣部分工资当"押金"，这是违法的，离职时必须全额退还。',
+            severity: '高',
+        },
+        {
+            keywords: ['甲方保留随时', '甲方有权随时', '随时调整', '随时变更'],
+            title: '用人单位单方随意变更权',
+            legal_reference: '《中华人民共和国劳动合同法》第三十五条（变更须协商一致）；《民法典》第五百四十三条（合同变更）',
+            dispute_rationale: '劳动合同的变更须双方协商一致，用人单位不得以"甲方保留权利"为由单方变更合同核心条款。',
+            plain_language: '合同说公司可以"随时调整"你的岗位、工资、工作地点，但这些必须双方同意，不能公司单方说了算。',
+            severity: '高',
+        },
+    ];
+
+    for (const pattern of riskPatterns) {
+        // 检查合同原文是否包含该风险关键词
+        const matched = pattern.keywords.some(kw => plainText.includes(kw));
+        if (!matched) continue;
+
+        // 提取包含关键词的那句话作为 original_clause
+        let clauseText = '';
+        for (const kw of pattern.keywords) {
+            const idx = plainText.indexOf(kw);
+            if (idx >= 0) {
+                // 取关键词前后各60字符作为上下文
+                const start = Math.max(0, idx - 60);
+                const end = Math.min(plainText.length, idx + kw.length + 60);
+                clauseText = plainText.slice(start, end).replace(/\s+/g, ' ').trim();
+                break;
+            }
+        }
+        if (!clauseText) continue;
+
+        // 如果已有的 dispute_points 中没有相近的原文，则补充
+        const clauseKey = clauseText.replace(/\s+/g, '').slice(0, 30);
+        const alreadyHas = existingClauses.has(clauseKey) ||
+            points.some(p => (p.original_clause || '').includes(pattern.keywords[0]));
+        if (alreadyHas) continue;
+
+        existingClauses.add(clauseKey);
+        points.push({
+            title: pattern.title,
+            original_clause: clauseText,
+            legal_reference: pattern.legal_reference,
+            dispute_rationale: pattern.dispute_rationale,
+            plain_language: pattern.plain_language,
+            severity: pattern.severity,
+        });
+    }
+
+    analysisResult.dispute_points = points;
+};
+
+const normalizeAnalysisResult = (result) => {
+    const raw = result || {};
+    const highCount = Array.isArray(raw.dispute_points)
+        ? raw.dispute_points.filter(p => String(p.severity || '').includes('高') || String(p.severity || '').includes('high')).length
+        : 0;
+    const medCount = Array.isArray(raw.dispute_points)
+        ? raw.dispute_points.filter(p => String(p.severity || '').includes('中') || String(p.severity || '').includes('medium')).length
+        : 0;
+    const totalCount = Array.isArray(raw.dispute_points) ? raw.dispute_points.length : 0;
+
+    let overall_risk_level = typeof raw.overall_risk_level === 'string' ? raw.overall_risk_level.trim() : '';
+    if (!overall_risk_level || !['高','中','低','high','medium','low'].includes(overall_risk_level)) {
+        if (highCount >= 3) overall_risk_level = '高';
+        else if (highCount >= 1) overall_risk_level = '中';
+        else if (medCount >= 1) overall_risk_level = '中';
+        else overall_risk_level = '低';
+    }
+
+    let overall_summary = typeof raw.overall_summary === 'string' ? raw.overall_summary.trim() : '';
+    if (!overall_summary && totalCount > 0) {
+        const levelMap = { '高': '高风险', '中': '中等风险', '低': '低风险', 'high': '高风险', 'medium': '中等风险', 'low': '低风险' };
+        const levelLabel = levelMap[overall_risk_level] || '风险';
+        overall_summary = `本合同经 AI 深度审查，共识别出 ${totalCount} 项需关注条款，其中高风险 ${highCount} 项、中风险 ${medCount} 项。整体评定为${levelLabel}合同，建议优先处理高风险条款，重点关注试用期工资、合同解除权、竞业限制等核心权益条款。`;
+    }
+
+    return {
+        overall_summary,
+        overall_risk_level,
+        dispute_points: Array.isArray(raw.dispute_points) ? raw.dispute_points : [],
+        missing_clauses: Array.isArray(raw.missing_clauses) ? raw.missing_clauses : [],
+        party_review: Array.isArray(raw.party_review) ? raw.party_review : [],
+        modification_suggestions: Array.isArray(raw.modification_suggestions) ? raw.modification_suggestions : [],
+        breach_cost_analysis: Array.isArray(raw.breach_cost_analysis) ? raw.breach_cost_analysis : [],
+        seal_analysis: Array.isArray(raw.seal_analysis) ? raw.seal_analysis : [],
+        relevant_laws: Array.isArray(raw.relevant_laws) ? raw.relevant_laws : [],
+        company_review: Array.isArray(raw.company_review) ? raw.company_review : [],
+    };
+};
