@@ -1,0 +1,182 @@
+<template>
+  <div class="wps-editor-wrapper w-full h-full relative">
+    <!-- WPS WebOffice iframe 将挂载到此节点 -->
+    <div ref="editorMount" class="wps-editor-mount w-full h-full"></div>
+    <!-- 加载中提示 -->
+    <div v-if="!loaded" class="absolute inset-0 flex items-center justify-center bg-white bg-opacity-80 z-10">
+      <div class="text-center">
+        <svg class="animate-spin h-8 w-8 mx-auto text-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <p class="mt-2 text-sm text-text-light">WPS 文档加载中...</p>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+import { ref, onMounted, onUnmounted, watch, nextTick, defineComponent } from 'vue';
+
+/**
+ * WPS WebOffice 编辑器组件
+ * 
+ * 替代 @onlyoffice/document-editor-vue
+ * 
+ * Props:
+ * - config: WPS SDK init 配置对象（由后端 buildWpsEditorConfig 生成）
+ * 
+ * Events:
+ * - onDocumentReady: 文档就绪
+ * - onDocumentStateChange: 文档状态变化（isDirty）
+ */
+export default defineComponent({
+  name: 'WpsEditor',
+  props: {
+    config: {
+      type: Object,
+      default: null,
+    },
+  },
+  emits: ['onDocumentReady', 'onDocumentStateChange'],
+  setup(props, { emit }) {
+    const editorMount = ref(null);
+    const loaded = ref(false);
+    const sdkError = ref(null);
+    let wpsInstance = null;
+
+    // 加载 SDK
+    const loadSDK = () => {
+      // SDK 已通过 index.html 全局引入（web-office-sdk-solution.umd.js）
+      if (typeof window.WebOfficeSDK === 'undefined') {
+        // 如果尚未加载，动态加载
+        const script = document.createElement('script');
+        script.src = '/wps-sdk/web-office-sdk-solution-v2.0.7.umd.js';
+        script.onload = initEditor;
+        script.onerror = () => {
+          sdkError.value = 'WPS SDK 加载失败';
+        };
+        document.head.appendChild(script);
+      } else {
+        initEditor();
+      }
+    };
+
+    // 初始化编辑器
+    const initEditor = async () => {
+      if (!props.config || !editorMount.value) return;
+
+      // 清理旧实例
+      if (wpsInstance) {
+        try { wpsInstance.destroy(); } catch {}
+        wpsInstance = null;
+      }
+
+      try {
+        const SDK = window.WebOfficeSDK;
+        const initConfig = {
+          ...props.config,
+          mount: editorMount.value,
+          // 事件订阅
+          subscriptions: {
+            ready: () => {
+              loaded.value = true;
+              emit('onDocumentReady');
+            },
+            // 文档状态变化
+            documentStateChange: (event) => {
+              const changed = event?.data;
+              if (typeof changed === 'boolean') {
+                emit('onDocumentStateChange', changed);
+              }
+            },
+          },
+        };
+        wpsInstance = SDK.init(initConfig);
+        if (!wpsInstance) {
+          sdkError.value = 'WPS SDK init 返回空实例';
+        }
+      } catch (error) {
+        console.error('[WPS Editor] Init error:', error);
+        sdkError.value = error.message || 'WPS 编辑器初始化失败';
+      }
+    };
+
+    // 获取 WpsApplication 实例（用于 JSAPI 调用）
+    const getApplication = async () => {
+      if (!wpsInstance) return null;
+      try {
+        const app = wpsInstance.WpsApplication ? await wpsInstance.WpsApplication() : null;
+        return app;
+      } catch {
+        return null;
+      }
+    };
+
+    // 执行保存
+    const save = async () => {
+      if (!wpsInstance || !wpsInstance.save) return null;
+      try {
+        return await wpsInstance.save();
+      } catch (error) {
+        console.warn('[WPS Editor] Save failed:', error);
+        return null;
+      }
+    };
+
+    // 高级 API 就绪
+    const advancedApiReady = async () => {
+      if (!wpsInstance || !wpsInstance.advancedApiReady) return null;
+      try {
+        return await wpsInstance.advancedApiReady();
+      } catch {
+        return null;
+      }
+    };
+
+    // 监听 config 变化
+    watch(
+      () => props.config,
+      (newVal) => {
+        if (newVal && editorMount.value) {
+          loaded.value = false;
+          nextTick(() => initEditor());
+        }
+      },
+      { deep: true }
+    );
+
+    onMounted(() => {
+      nextTick(() => loadSDK());
+    });
+
+    onUnmounted(() => {
+      if (wpsInstance) {
+        try { wpsInstance.destroy(); } catch {}
+        wpsInstance = null;
+      }
+    });
+
+    return {
+      editorMount,
+      loaded,
+      sdkError,
+      getApplication,
+      save,
+      advancedApiReady,
+    };
+  },
+});
+</script>
+
+<style scoped>
+.wps-editor-wrapper {
+  position: relative;
+  overflow: hidden;
+}
+.wps-editor-mount iframe {
+  width: 100% !important;
+  height: 100% !important;
+  border: none;
+}
+</style>

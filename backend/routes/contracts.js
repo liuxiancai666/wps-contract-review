@@ -17,14 +17,14 @@ const { searchVectorDocumentsMulti, splitIntoParagraphGroups } = require('../ser
 const { getTemplateById, matchTemplate } = require('../services/reviewTemplates');
 const { extractCompanyNames, searchCompanyInfo } = require('../services/webSearch');
 const { createChatCompletion } = require('../services/llmClient');
+const { buildWpsEditorConfig } = require('../services/wpsEditor');
 
 // 合同正文段落 chunk 检索上限：0 = 不限；超过部分不再生成子 query，控制长合同的检索成本
 const CONTRACT_CHUNK_MAX = Math.max(0, Number(process.env.CONTRACT_CHUNK_MAX || 30));
 
 const router = express.Router();
 
-const ONLYOFFICE_JWT_SECRET = process.env.ONLYOFFICE_JWT_SECRET;
-const ONLYOFFICE_URL = process.env.ONLYOFFICE_URL || 'http://localhost:8081';
+const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET || '';
 const APP_HOST = process.env.APP_HOST;
 const BACKEND_URL_FOR_DOCKER = process.env.BACKEND_URL_FOR_DOCKER || APP_HOST;
 
@@ -232,77 +232,7 @@ const callJsonLLM = async (prompt) => {
     return cleanJsonResponse(completion.choices[0].message.content);
 };
 
-const buildOnlyOfficeConfig = (contractRecord, ext = 'docx') => {
-    const isPdf = ext === 'pdf';
-    // fileUrl 给 OnlyOffice Document Server 下载原始文档用（Docker 容器需宿主机可达）
-    const fileUrl = `${BACKEND_URL_FOR_DOCKER}/api/uploads/${path.basename(contractRecord.storage_path)}`;
-    // callbackUrl 给 OnlyOffice 服务端回调用（同样容器可达即可）
-    const callbackUrl = `${BACKEND_URL_FOR_DOCKER}/api/contracts/save-callback`;
-    const payload = {
-        document: {
-            fileType: ext,
-            key: contractRecord.document_key,
-            title: contractRecord.original_filename,
-            url: fileUrl,
-            permissions: {
-                comment: !isPdf,
-                download: true,
-                edit: !isPdf,
-                print: true,
-                review: !isPdf,
-            },
-        },
-        documentType: isPdf ? 'pdf' : 'word',
-        editorConfig: {
-            callbackUrl,
-            lang: 'zh-CN',
-            mode: isPdf ? 'view' : 'edit',
-            user: {
-                id: `user-${contractRecord.user_id || 1}`,
-                name: 'Reviewer',
-            },
-            customization: {
-                forcesave: !isPdf,
-                comments: true,
-                compactHeader: true,
-                compactToolbar: true,
-                toolbarHideFileName: true,
-                toolbarNoTabs: true,
-                features: {
-                    tabStyle: 'line',
-                    tabBackground: 'toolbar',
-                    spellcheck: false,
-                },
-                hideRightMenu: true,
-                hideRulers: true,
-                help: false,
-                plugins: false,
-                chat: false,
-                feedback: false,
-                goback: false,
-            },
-        },
-    };
-    return { ...payload, token: jwt.sign(payload, ONLYOFFICE_JWT_SECRET) };
-};
-
-const postOnlyOfficeCommand = async (payload) => {
-    const commandPayload = ONLYOFFICE_JWT_SECRET
-        ? { ...payload, token: jwt.sign(payload, ONLYOFFICE_JWT_SECRET) }
-        : payload;
-
-    const headers = { 'Content-Type': 'application/json' };
-    if (ONLYOFFICE_JWT_SECRET) {
-        headers.Authorization = `Bearer ${commandPayload.token}`;
-    }
-
-    const response = await axios.post(
-        `${ONLYOFFICE_URL.replace(/\/$/, '')}/coauthoring/CommandService.ashx`,
-        commandPayload,
-        { headers, timeout: 10000 },
-    );
-    return response.data;
-};
+// buildWpsEditorConfig is imported from ../services/wpsEditor
 
 const escapeXmlText = (text) => String(text || '')
     .replace(/&/g, '&amp;')
@@ -1149,21 +1079,22 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         res.status(201).json({
             message: '文件已上传，编辑器配置已生成。',
             contractId: contractRecord.id,
-            editorConfig: buildOnlyOfficeConfig(contractRecord, ext),
+            editorConfig: buildWpsEditorConfig(contractRecord, ext),
         });
     } catch (error) {
         if (error.message === 'INVALID_USER_ID') {
             return res.status(400).json({ error: 'Invalid user ID for upload.' });
         }
-        console.error('[ERROR] Error processing upload for OnlyOffice:', error);
+        console.error('[ERROR] Error processing upload for WPS WebOffice:', error);
         res.status(500).json({ error: 'Server error during file upload.' });
     }
 });
 
+// WPS WebOffice v3 协议通过回调自动处理保存，此端点为前端备用
 router.post('/save-callback', async (req, res) => {
     try {
         const body = req.body;
-        console.log('[OnlyOffice] save callback:', {
+        console.log('[WPS WebOffice] save callback:', {
             status: body.status,
             key: body.key,
             hasUrl: Boolean(body.url),
@@ -1180,9 +1111,9 @@ router.post('/save-callback', async (req, res) => {
                     writer.on('error', reject);
                 });
                 await db('contracts').where({ id: contract.id }).update({ updated_at: db.fn.now() });
-                console.log(`[OnlyOffice] saved file for contract ${contract.id} from status ${body.status}`);
+                console.log(`[WPS] saved file for contract ${contract.id} from status ${body.status}`);
             } else {
-                console.warn('[OnlyOffice] save callback skipped: contract or download url missing');
+                console.warn('[WPS] save callback skipped: contract or download url missing');
             }
         }
         res.status(200).json({ error: 0 });
@@ -1886,7 +1817,7 @@ router.post('/:id/replace-text', async (req, res) => {
         res.json({
             replacements,
             version,
-            editorConfig: buildOnlyOfficeConfig(updatedContract, ext),
+            editorConfig: buildWpsEditorConfig(updatedContract, ext),
         });
     } catch (error) {
         if (error.message === 'DOCX_EXACT_TEXT_NOT_FOUND') {
@@ -1959,7 +1890,7 @@ router.post('/:id/batch-replace-text', async (req, res) => {
             succeededCount,
             failedCount,
             results,
-            editorConfig: buildOnlyOfficeConfig({ ...contract, document_key: nextKey }, ext),
+            editorConfig: buildWpsEditorConfig({ ...contract, document_key: nextKey }, ext),
         });
     } catch (error) {
         console.error('[ERROR] Batch DOCX replacement failed:', error);
@@ -2026,7 +1957,7 @@ router.post('/:id/append-clause', async (req, res) => {
             ok: true,
             version,
             message: `已追加条款「${title || '未命名条款'}」到文档末尾。`,
-            editorConfig: buildOnlyOfficeConfig({ ...contract, document_key: nextKey }, ext),
+            editorConfig: buildWpsEditorConfig({ ...contract, document_key: nextKey }, ext),
         });
     } catch (error) {
         console.error('[ERROR] Append clause failed:', error);
@@ -2157,19 +2088,11 @@ router.post('/:id/force-save', async (req, res) => {
         const key = String(documentKey || contract.document_key || '').trim();
         if (!key) return res.status(400).json({ error: 'Document key is required for force-save.' });
 
-        const result = await postOnlyOfficeCommand({
-            c: 'forcesave',
-            key,
-        });
-
-        if (result?.error && result.error !== 0) {
-            return res.status(502).json({ error: `OnlyOffice force-save failed: ${result.error}`, result });
-        }
-
-        res.json({ ok: true, result });
+        // WPS WebOffice 通过 v3 回调协议自动保存，前端仅触发标记
+        res.json({ ok: true, note: 'WPS WebOffice 自动处理保存，无需手动触发 force-save' });
     } catch (error) {
         console.error(`[ERROR] Failed to force-save contract ${req.params.id}:`, error.response?.data || error.message);
-        res.status(500).json({ error: 'Failed to trigger OnlyOffice force-save.' });
+        res.status(500).json({ error: 'Failed to trigger force-save.' });
     }
 });
 
@@ -2184,7 +2107,7 @@ router.get('/:id/editor-config', async (req, res) => {
 
         const ext = path.extname(contractRecord.storage_path).toLowerCase().replace('.', '') || 'docx';
         res.json({
-            editorConfig: buildOnlyOfficeConfig(contractRecord, ext),
+            editorConfig: buildWpsEditorConfig(contractRecord, ext),
         });
     } catch (error) {
         console.error(`[ERROR] Failed to fetch fresh editor config for id ${id}:`, error);
@@ -2210,7 +2133,7 @@ router.get('/:id', async (req, res) => {
             contract: {
                 id: contractRecord.id,
                 original_filename: contractRecord.original_filename,
-                editorConfig: buildOnlyOfficeConfig(contractRecord, ext),
+                editorConfig: buildWpsEditorConfig(contractRecord, ext),
             },
             preAnalysisData,
             reviewData,

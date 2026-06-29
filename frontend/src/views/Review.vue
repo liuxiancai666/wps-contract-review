@@ -248,15 +248,11 @@
                     读取选中文本审查
                 </button>
             </div>
-            <DocumentEditor
+            <WpsEditor
                 v-if="contract.editorConfig"
-                id="docEditorComponent"
-                ref="docEditorComponent"
-                class="flex-grow min-h-0"
-                :documentServerUrl="onlyOfficeUrl"
                 :config="contract.editorConfig"
-                :events_onDocumentReady="onDocumentReady"
-                :events_onDocumentStateChange="onDocumentStateChange"
+                @onDocumentReady="onDocumentReady"
+                @onDocumentStateChange="onDocumentStateChange"
             />
             <div v-if="selectedSuggestionPreview" class="border-t border-border-color bg-white p-3 max-h-44 overflow-y-auto">
                 <div class="flex items-center justify-between">
@@ -900,13 +896,13 @@ import { marked } from 'marked';
 import { v4 as uuidv4 } from 'uuid';
 import api from '../api';
 import { getUserId } from '../user';
-import { DocumentEditor } from "@onlyoffice/document-editor-vue";
+import WpsEditor from '@/components/WpsEditor.vue';
 import { io } from "socket.io-client";
 
 export default {
   name: 'ReviewView',
   components: {
-    DocumentEditor,
+    WpsEditor,
     ElUpload, ElSelect, ElOption, ElCheckboxGroup, ElCheckbox, ElInput, ElAutocomplete, ElSwitch, ElTooltip
   },
   setup() {
@@ -1341,7 +1337,8 @@ export default {
 
     const suggestionReason = (item) => firstText(item.reason, item.rationale);
 
-    const onlyOfficeUrl = import.meta.env.VITE_APP_ONLYOFFICE_URL;
+    // WPS WebOffice 通过 SDK init 自动挂载，无需手动指定 URL
+    const wpsEditorRef = ref(null);
 
     const loadReviewTemplates = async () => {
       try {
@@ -1624,12 +1621,12 @@ export default {
       if (!contract.id || forceSaveInFlight.value) return false;
       forceSaveInFlight.value = true;
       try {
-        const editor = getEditor();
-        if (typeof editor?.serviceCommand === 'function') {
-          editor.serviceCommand('forcesave', {});
+        // WPS WebOffice 使用 SDK save() 方法
+        if (wpsEditorRef.value && typeof wpsEditorRef.value.save === 'function') {
+          await wpsEditorRef.value.save();
         }
         await api.forceSaveContract(contract.id, {
-          documentKey: contract.editorConfig?.document?.key,
+          documentKey: contract.editorConfig?.fileId,
         });
         hasPendingEditorChanges.value = false;
         if (!silent) ElMessage.success('已触发文档保存同步');
@@ -1683,9 +1680,9 @@ export default {
     };
 
     const onDocumentReady = () => {
-      console.log("[INFO] OnlyOffice document is ready.");
+      console.log("[INFO] WPS WebOffice document is ready.");
       setTimeout(() => {
-        isEditorReady.value = Boolean(window?.DocEditor?.instances?.docEditorComponent);
+        isEditorReady.value = true;
         if (isEditorReady.value) startAutoForceSave();
       }, 300);
     };
@@ -2004,43 +2001,21 @@ export default {
         if (socket.value) socket.value.disconnect();
     });
 
-    // --- OnlyOffice Connector Methods ---
+    // --- WPS WebOffice Connector Methods ---
 
-    const getEditor = () => window?.DocEditor?.instances?.docEditorComponent || null;
+    const getWpsApplication = async () => {
+      if (!wpsEditorRef.value || typeof wpsEditorRef.value.getApplication !== 'function') return null;
+      return wpsEditorRef.value.getApplication();
+    };
+
+    const getEditor = () => wpsEditorRef.value || null;
 
     const executeEditorMethod = (method, args = []) => {
-      const editor = getEditor();
-      if (!editor || typeof editor.executeMethod !== 'function') {
-        return Promise.reject(new Error('EDITOR_NOT_READY'));
-      }
-      return new Promise((resolve, reject) => {
-        let settled = false;
-        const timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          resolve(null);
-        }, 2500);
-        try {
-          editor.executeMethod(method, args, (result) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            resolve(result);
-          });
-        } catch (error) {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          reject(error);
-        }
-      });
+      // 通过服务端 DOCX 替换兜底，WPS JSAPI 通过 Application 对象调用
+      return Promise.reject(new Error('EDITOR_NOT_READY_REAL_TIME'));
     };
 
-    const findTextRange = async (text) => {
-        const result = await executeEditorMethod('Search', [text]);
-        if (Array.isArray(result) && result.length > 0) return result[0];
-        return null;
-    };
+    const findTextRange = async (text) => null;
 
     const normalizeCandidate = (text) => String(text || '')
         .replace(/[“”]/g, '"')
@@ -2108,18 +2083,9 @@ export default {
             ElMessage.info('AI 未返回可定位的原文，请在文档中手动核对该建议。');
             return;
         }
-        if (!ensureEditorReady()) return;
-        try {
-            const range = await findTextRange(text);
-            if (!range) {
-                ElMessage.info('未在文档中找到对应条款原文。');
-                return;
-            }
-            await executeEditorMethod('SelectRange', [range]);
-            ElMessage.success('已定位到文档中的对应条款。');
-        } catch (error) {
-            ElMessage.error('文档定位失败，请检查 OnlyOffice 是否已完全加载。');
-        }
+        // WPS 实时定位功能需通过 WpsApplication() JSAPI 实现
+        // 当前通过服务端替换功能兜底
+        ElMessage.info('WPS 实时文档定位功能待集成，建议通过服务端替换功能更新文档。');
     };
 
     const replaceTextOnServer = async (originalText, suggestedText, item = {}) => {
@@ -2192,32 +2158,17 @@ export default {
     };
 
     const refreshEditorDocument = async () => {
-        const editor = getEditor();
-        if (!editor) return false;
-
+        // WPS WebOffice：更新配置后重新 init 来刷新文档
         try {
             const res = await api.getFreshEditorConfig(contract.id);
             const editorConfig = res.data?.editorConfig;
-            if (editorConfig && typeof editor.refreshFile === 'function') {
-                editor.refreshFile(editorConfig.document || editorConfig);
+            if (editorConfig) {
                 contract.editorConfig = editorConfig;
+                // WPS SDK destroy + 重新 init 由 WpsEditor 组件通过 watch config 自动处理
                 return true;
             }
-            if (editorConfig && typeof editor.setConfig === 'function') {
-                editor.setConfig(editorConfig);
-                contract.editorConfig = editorConfig;
-                return true;
-            }
-        } catch {
-            // Some OnlyOffice builds do not allow changing config after init.
-        }
-
-        try {
-            await executeEditorMethod('ForceSave', []);
-            return true;
-        } catch {
-            return false;
-        }
+        } catch {}
+        return false;
     };
 
     const serverFallback = async (originalText, suggestedText, onSuccess, onFailure, item = {}) => {
@@ -2332,19 +2283,8 @@ export default {
 
     const prepareFocusedReviewFromSelection = async () => {
         activeAiTab.value = 'workspace';
-        if (!ensureEditorReady()) return;
-
-        try {
-            const text = await executeEditorMethod('GetSelectedText', []);
-            if (text && String(text).trim()) {
-                focusedReviewText.value = String(text).trim();
-                ElMessage.success('已读取左侧选中文本。');
-            } else {
-                ElMessage.info('未读取到选中文本，可在专项审查框中手动粘贴条款。');
-            }
-        } catch (error) {
-            ElMessage.info('当前 OnlyOffice 版本未暴露选中文本接口，请手动粘贴条款进行专项审查。');
-        }
+        // WPS JSAPI GetSelectedText 待集成，提示用户手动粘贴
+        ElMessage.info('请从左侧 WPS 文档中复制需要审查的文本，粘贴到下方输入框后进行专项审查。');
     };
 
     const submitFocusedReview = async () => {

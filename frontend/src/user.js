@@ -10,7 +10,11 @@ const VISITOR_ID_KEY = 'visitor_id';
 const getVisitorId = () => {
     let visitorId = localStorage.getItem(VISITOR_ID_KEY);
     if (!visitorId) {
-        visitorId = crypto.randomUUID();
+        try {
+            visitorId = crypto.randomUUID();
+        } catch {
+            visitorId = 'v-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+        }
         localStorage.setItem(VISITOR_ID_KEY, visitorId);
         console.log(`[User] Generated new visitor ID: ${visitorId}`);
     }
