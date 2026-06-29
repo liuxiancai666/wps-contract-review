@@ -4,7 +4,9 @@ const crypto = require('crypto');
 const EMBEDDING_BASE_URL = process.env.EMBEDDING_BASE_URL || process.env.LLM_BASE_URL;
 const EMBEDDING_API_KEY = process.env.EMBEDDING_API_KEY || process.env.LLM_API_KEY;
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'BAAI/bge-m3';
-const RERANK_BASE_URL = process.env.RERANK_BASE_URL || EMBEDDING_BASE_URL;
+// RERANK_BASE_URL: only use env value if explicitly set (not empty).
+// Empty string '' means "disable rerank" — do NOT fall back to EMBEDDING_BASE_URL.
+const RERANK_BASE_URL = process.env.RERANK_BASE_URL || undefined;
 const RERANK_API_KEY = process.env.RERANK_API_KEY || EMBEDDING_API_KEY;
 const RERANK_MODEL = process.env.RERANK_MODEL || 'BAAI/bge-reranker-v2-m3';
 const EMBEDDING_DIM = Number(process.env.EMBEDDING_DIM || 1024);
