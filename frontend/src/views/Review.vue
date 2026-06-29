@@ -889,7 +889,7 @@
 </template>
 
 <script>
-import { ref, reactive, watch, toRaw, onMounted, nextTick, onUnmounted, computed } from 'vue';
+import { ref, shallowRef, reactive, watch, toRaw, onMounted, nextTick, onUnmounted, computed, triggerRef } from 'vue';
 import { useRoute, useRouter, onBeforeRouteUpdate } from 'vue-router';
 import { ElMessage, ElUpload, ElSelect, ElOption, ElCheckboxGroup, ElCheckbox, ElInput, ElAutocomplete, ElSwitch, ElTooltip } from 'element-plus';
 import { marked } from 'marked';
@@ -897,7 +897,7 @@ import { v4 as uuidv4 } from 'uuid';
 import api from '../api';
 import { getUserId } from '../user';
 import WpsEditor from '@/components/WpsEditor.vue';
-import { io } from "socket.io-client";
+import { useSocketAnalysis } from '@/composables/useSocketAnalysis';
 
 export default {
   name: 'ReviewView',
@@ -921,7 +921,6 @@ export default {
     const isEditorReady = ref(false);
     const reAnalyzing = ref(false);
     const showPlainLanguage = ref(false);
-    const socket = ref(null);
     const forceSaveTimer = ref(null);
     const forceSaveDebounceTimer = ref(null);
     const forceSaveInFlight = ref(false);
@@ -1372,7 +1371,7 @@ export default {
     const handleUploadSuccess = async (res) => {
         contract.id = res.contractId;
         contract.editorConfig = res.editorConfig;
-        contract.original_filename = res.editorConfig.document.title;
+        contract.original_filename = res.original_filename;
         setupSocket(contract.id);
 
         // 先进入确认步骤（Step 1），预分析在后台跑
@@ -2550,7 +2549,6 @@ export default {
       cameFromHistory,
       goBackSmart,
       goToQnA,
-      onlyOfficeUrl,
       allSuggestedReviewPoints,
       allPotentialParties,
       reviewTemplates,

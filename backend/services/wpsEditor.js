@@ -28,12 +28,12 @@ const buildWpsEditorConfig = (contractRecord, ext = 'docx') => {
   };
   const token = jwt.sign(tokenPayload, WPS_TOKEN_SECRET);
 
-  // officeType 根据文件类型确定
+  // officeType 根据文件类型确定（WPS SDK 使用单字母码）
   let officeType;
   if (isPdf) {
-    officeType = 'pdf'; // WebOfficeSDK.OfficeType.Pdf
+    officeType = 'f'; // WebOfficeSDK.OfficeType.Pdf
   } else {
-    officeType = 'word'; // WebOfficeSDK.OfficeType.Writer
+    officeType = 'w'; // WebOfficeSDK.OfficeType.Writer
   }
 
   return {

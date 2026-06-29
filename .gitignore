@@ -60,3 +60,8 @@ report.md
 *.sqlite-shm
 *.sqlite-wal
 backend/one-api.db
+
+
+# 测试输出
+frontend/test-results/
+frontend/tests/

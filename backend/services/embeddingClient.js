@@ -32,7 +32,7 @@ const embeddingUrl = () => `${String(EMBEDDING_BASE_URL || '').replace(/\/$/, ''
 const rerankUrl = () => `${String(RERANK_BASE_URL || '').replace(/\/$/, '')}/rerank`;
 
 const embedTexts = async (texts) => {
-    const input = Array.isArray(texts) ? texts : [texts];
+    const input = Array.isArray(texts) ? texts.map(t => String(t || '').slice(0, 8000)) : [String(texts || '').slice(0, 8000)];
     if (input.length > EMBEDDING_BATCH_SIZE) {
         const batches = [];
         for (let i = 0; i < input.length; i += EMBEDDING_BATCH_SIZE) {

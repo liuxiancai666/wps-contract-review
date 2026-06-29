@@ -907,11 +907,29 @@ const mergeChannelsWithConfidence = (channelA, channelB, limit) => {
         .slice(0, limit);
 };
 
+// 知识库检索缓存（TTL 600s 避免相同合同类型重复检索）
+const knowledgeCache = new Map();
+const KNOWLEDGE_CACHE_TTL = Number(process.env.KNOWLEDGE_CACHE_TTL || 600000); // 10min
+
+const getCacheKey = (options) => {
+  if (typeof options === 'string') return `s:${options.slice(0, 100)}`;
+  const { text, contractType, reviewPoints, corePurposes, perspective, question, templateId } = options;
+  return `o:${contractType}|${(reviewPoints||[]).sort().join(',')}|${(corePurposes||[]).sort().join(',')}|${perspective||''}|${question||''}|${templateId||''}`;
+};
+
 // 知识库检索：分通道召回 + 配额融合
 //   通道 A「审查维度」法律语言，主力，占 2/3 配额，每条 query 召回 3 条
 //   通道 B「合同内容」捞审查点未覆盖的非常规条款，补充，占 1/3 配额，每条 query 仅 top-1 且强阈值
 // CONTRACT_CHUNK_MAX > 0 时限制通道 B 的 chunk 数，控制长合同检索成本
 const getRelevantKnowledge = async (options, limit = 8) => {
+    // 缓存命中检查
+    const cacheKey = getCacheKey(options);
+    const cached = knowledgeCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < KNOWLEDGE_CACHE_TTL) {
+      console.log(`[Knowledge Cache] HIT for key ${cacheKey.slice(0, 60)}...`);
+      return cached.data;
+    }
+
     const sourceTypes = ['law', 'case', 'rule', 'guide'];
 
     // 字符串入口（纯文本）：单通道，按段落归并检索
@@ -952,7 +970,10 @@ const getRelevantKnowledge = async (options, limit = 8) => {
             : Promise.resolve([]),
     ]);
     
-    return mergeChannelsWithConfidence(channelA, channelB, limit).map(toRelevantKnowledgeItem);
+    const result = mergeChannelsWithConfidence(channelA, channelB, limit).map(toRelevantKnowledgeItem);
+    // 写入缓存
+    knowledgeCache.set(cacheKey, { data: result, timestamp: Date.now() });
+    return result;
 };
 
 const annotateKnowledgeUpdates = (items) => items.map((item) => ({
@@ -1079,6 +1100,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         res.status(201).json({
             message: '文件已上传，编辑器配置已生成。',
             contractId: contractRecord.id,
+            original_filename: contractRecord.original_filename,
             editorConfig: buildWpsEditorConfig(contractRecord, ext),
         });
     } catch (error) {
@@ -1392,17 +1414,32 @@ const splitContractIntoSections = (plainText) => {
         return newSections;
     }
     const batches = [];
-    let currentBatch = { sections: [], combinedContent: '', startIdx: 0 };
+    let currentBatch = { sections: [], combinedContent: '', titles: [], startIdx: 0 };
     let currentSize = 0;
     const TARGET_SIZE = 1200;
     for (const section of sections) {
-        if (currentSize + section.content.length > TARGET_SIZE && currentSize > 0) { batches.push(currentBatch); currentBatch = { sections: [], combinedContent: '', startIdx: batches.length }; currentSize = 0; }
+        if (currentSize + section.content.length > TARGET_SIZE && currentSize > 0) { batches.push(currentBatch); currentBatch = { sections: [], combinedContent: '', titles: [], startIdx: batches.length }; currentSize = 0; }
         currentBatch.sections.push(section);
+        currentBatch.titles.push(section.title);
         currentBatch.combinedContent += (currentBatch.combinedContent ? '\n' : '') + section.content;
         currentSize += section.content.length;
     }
     if (currentBatch.sections.length > 0) batches.push(currentBatch);
     return batches;
+};
+
+// 并发控制：限制同时进行的 LLM 调用数，避免 API 限流
+const LLM_CONCURRENCY = Math.max(1, Number(process.env.LLM_CONCURRENCY || 3));
+const parallelLimit = async (tasks, limit = LLM_CONCURRENCY) => {
+  const results = [];
+  const executing = new Set();
+  for (const [i, task] of tasks.entries()) {
+    const p = task().then(r => { results[i] = r; executing.delete(p); }, e => { results[i] = Promise.reject(e); executing.delete(p); });
+    executing.add(p);
+    if (executing.size >= limit) await Promise.race(executing);
+  }
+  await Promise.all(executing);
+  return results;
 };
 
 // 逐组并行审查：每个 batch 并行调用 LLM，聚合所有 dispute_points
@@ -1441,8 +1478,12 @@ ${batchContent.slice(0, 3000)}
   "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}]
 }`;
     const totalBatches = batches.length;
-    const prompts = batches.map((batch, idx) => buildBatchPrompt(batch.combinedContent, idx, totalBatches));
-    const batchResults = await Promise.all(prompts.map(p => callJsonLLMFn(p)));
+    const prompts = batches.map((batch, idx) => {
+      const content = batch.content || batch.combinedContent || '';
+      const titleContext = batch.titles?.length ? `所属章节：${batch.titles.join('、')}\n\n` : '';
+      return buildBatchPrompt(titleContext + content, idx, totalBatches);
+    });
+    const batchResults = await parallelLimit(prompts.map(p => () => callJsonLLMFn(p)));
     const allDisputePoints = [], allMissingClauses = [], allModificationSuggestions = [];
     const seenClauseKeys = new Set();
     const addIfNotDuplicate = (arr, item, keyField) => {
@@ -1461,6 +1502,33 @@ ${batchContent.slice(0, 3000)}
     }
     return { dispute_points: allDisputePoints, missing_clauses: allMissingClauses, modification_suggestions: allModificationSuggestions, batch_count: totalBatches };
 };
+
+// 轻量内存任务队列：大合同分析不阻塞主事件循环
+class AnalysisTaskQueue {
+  constructor(concurrency = 2) {
+    this.concurrency = concurrency;
+    this.queue = [];
+    this.running = 0;
+  }
+  enqueue(task) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ task, resolve, reject });
+      this.processNext();
+    });
+  }
+  processNext() {
+    if (this.running >= this.concurrency || this.queue.length === 0) return;
+    this.running++;
+    const { task, resolve, reject } = this.queue.shift();
+    Promise.resolve().then(() => task())
+      .then(resolve, reject)
+      .finally(() => {
+        this.running--;
+        this.processNext();
+      });
+  }
+}
+const analysisTaskQueue = new AnalysisTaskQueue(2);
 
 // 后台异步执行合同审查（不阻塞 HTTP 响应）
 const runAnalysisInBackground = async (contractId, userId, userPerspective, preAnalysisData) => {
@@ -1617,8 +1685,10 @@ router.post('/analyze', async (req, res) => {
             estimatedTotalSeconds: TOTAL_EST_SECONDS,
         });
 
-        // 后台异步执行（不 await）
-        runAnalysisInBackground(contractId, userId, userPerspective, preAnalysisData).catch((err) => {
+        // 后台异步执行（通过任务队列，限制并发数，避免大合同阻塞）
+        analysisTaskQueue.enqueue(() =>
+            runAnalysisInBackground(contractId, userId, userPerspective, preAnalysisData)
+        ).catch((err) => {
             console.error('[ANALYSIS] Background task crashed:', err);
         });
     } catch (error) {
