@@ -2185,6 +2185,229 @@ router.get('/:id/editor-config', async (req, res) => {
     }
 });
 
+// ============ 批注交互 (review_comments) API ============
+
+// POST /api/contracts/:id/comments — 添加批注/反馈
+router.post('/:id/comments', async (req, res) => {
+    const userId = requireRequestUserId(req, res);
+    if (!userId) return;
+    const contract = await findOwnedContract(req.params.id, userId);
+    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+
+    const { item_type, item_index, action_type, comment_text } = req.body;
+    if (!item_type || item_index === undefined || !action_type) {
+        return res.status(400).json({ error: 'item_type, item_index, action_type are required.' });
+    }
+    if (action_type === 'comment' && !comment_text) {
+        return res.status(400).json({ error: 'comment_text is required when action_type is comment.' });
+    }
+
+    try {
+        const [id] = await db('review_comments').insert({
+            contract_id: contract.id,
+            user_id: Number(userId),
+            item_type,
+            item_index,
+            action_type,
+            comment_text: comment_text || null,
+            is_resolved: false,
+        }).returning('id');
+        const row = await db('review_comments').where({ id }).first();
+        res.json(row);
+    } catch (error) {
+        console.error('[ERROR] Failed to add review comment:', error);
+        res.status(500).json({ error: 'Failed to add comment.' });
+    }
+});
+
+// GET /api/contracts/:id/comments — 获取所有批注
+router.get('/:id/comments', async (req, res) => {
+    const userId = requireRequestUserId(req, res);
+    if (!userId) return;
+    const contract = await findOwnedContract(req.params.id, userId);
+    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+
+    try {
+        const rows = await db('review_comments')
+            .where({ contract_id: contract.id })
+            .orderBy('created_at', 'asc')
+            .select();
+        // 按 item_type + item_index 分组
+        const grouped = {};
+        rows.forEach((row) => {
+            const key = `${row.item_type}:${row.item_index}`;
+            if (!grouped[key]) grouped[key] = [];
+            grouped[key].push(row);
+        });
+        // 统计各索引的 agree/disagree/comment 数量
+        const summary = {};
+        rows.forEach((row) => {
+            const key = `${row.item_type}:${row.item_index}`;
+            if (!summary[key]) summary[key] = { agree: 0, disagree: 0, comment: 0, resolved: false };
+            if (row.action_type === 'agree') summary[key].agree += 1;
+            else if (row.action_type === 'disagree') summary[key].disagree += 1;
+            else if (row.action_type === 'comment') summary[key].comment += 1;
+            if (row.is_resolved) summary[key].resolved = true;
+        });
+        res.json({ comments: rows, grouped, summary });
+    } catch (error) {
+        console.error('[ERROR] Failed to list review comments:', error);
+        res.status(500).json({ error: 'Failed to list comments.' });
+    }
+});
+
+// PUT /api/contracts/comments/:id — 更新/解决批注
+router.put('/comments/:id', async (req, res) => {
+    const userId = requireRequestUserId(req, res);
+    if (!userId) return;
+    const { comment_text, is_resolved } = req.body;
+
+    try {
+        const comment = await db('review_comments').where({ id: req.params.id, user_id: Number(userId) }).first();
+        if (!comment) return res.status(404).json({ error: 'Comment not found.' });
+
+        const update = {};
+        if (comment_text !== undefined) update.comment_text = comment_text;
+        if (is_resolved !== undefined) update.is_resolved = is_resolved;
+        update.updated_at = db.fn.now();
+
+        await db('review_comments').where({ id: req.params.id }).update(update);
+        const updated = await db('review_comments').where({ id: req.params.id }).first();
+        res.json(updated);
+    } catch (error) {
+        console.error('[ERROR] Failed to update review comment:', error);
+        res.status(500).json({ error: 'Failed to update comment.' });
+    }
+});
+
+// DELETE /api/contracts/comments/:id — 删除批注
+router.delete('/comments/:id', async (req, res) => {
+    const userId = requireRequestUserId(req, res);
+    if (!userId) return;
+    try {
+        const deleted = await db('review_comments').where({ id: req.params.id, user_id: Number(userId) }).del();
+        if (!deleted) return res.status(404).json({ error: 'Comment not found.' });
+        res.json({ ok: true });
+    } catch (error) {
+        console.error('[ERROR] Failed to delete review comment:', error);
+        res.status(500).json({ error: 'Failed to delete comment.' });
+    }
+});
+
+// GET /api/contracts/:id/risk-score — 计算风险评分仪表盘
+router.get('/:id/risk-score', async (req, res) => {
+    const userId = requireRequestUserId(req, res);
+    if (!userId) return;
+    const contract = await findOwnedContract(req.params.id, userId);
+    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+
+    try {
+        const reviewData = contract.analysis_result
+            ? JSON.parse(contract.analysis_result)
+            : parseJsonField(contract.analysis_partial_result, {});
+
+        const disputes = reviewData.dispute_points || [];
+        const missing = reviewData.missing_clauses || [];
+        const suggestions = reviewData.modification_suggestions || [];
+        const breach = reviewData.breach_cost_analysis || [];
+        const party = reviewData.party_review || [];
+        const laws = reviewData.relevant_laws || [];
+
+        // 风险评分算法
+        const severityScore = (severity) => ({ '高': 100, '中': 55, '低': 20 })[String(severity).trim()] || 40;
+
+        // 1. 风险总分 (0-100)
+        const totalItems = disputes.length + missing.length + suggestions.length + breach.length;
+        const rawTotalScore = disputes.reduce((sum, d) => sum + severityScore(d.severity), 0)
+            + missing.length * 50 + breach.reduce((sum, b) => sum + 60, 0);
+        const overallScore = totalItems > 0
+            ? Math.min(100, Math.round(rawTotalScore / totalItems))
+            : 0;
+
+        // 2. 按类别统计
+        const categoryRisk = {
+            dispute_points: { label: '风险争议点', count: disputes.length, avgSeverity: 0, items: [] },
+            missing_clauses: { label: '缺失条款', count: missing.length, avgSeverity: 0, items: [] },
+            breach_cost_analysis: { label: '违约成本', count: breach.length, avgSeverity: 0, items: [] },
+            party_review: { label: '主体审查', count: party.length, avgSeverity: 0, items: [] },
+        };
+
+        // 各风险点的严重程度分布
+        const severityDist = { 高: 0, 中: 0, 低: 0 };
+        disputes.forEach((d) => {
+            const s = String(d.severity || '中').trim();
+            if (severityDist[s] !== undefined) severityDist[s] += 1;
+            else severityDist['中'] += 1;
+        });
+
+        // 类别平均严重度
+        if (disputes.length > 0) {
+            const avg = Math.round(disputes.reduce((sum, d) => sum + severityScore(d.severity), 0) / disputes.length);
+            categoryRisk.dispute_points.avgSeverity = avg;
+            categoryRisk.dispute_points.items = disputes.map((d, i) => ({
+                index: i, title: d.title || d.type || `风险点${i + 1}`,
+                severity: d.severity || '中', score: severityScore(d.severity),
+            }));
+        }
+        if (missing.length > 0) {
+            categoryRisk.missing_clauses.avgSeverity = 50;
+            categoryRisk.missing_clauses.items = missing.map((d, i) => ({
+                index: i, title: d.title || d.clause_type || `缺失条款${i + 1}`,
+                severity: '中', score: 50,
+            }));
+        }
+        if (breach.length > 0) {
+            categoryRisk.breach_cost_analysis.avgSeverity = 60;
+            categoryRisk.breach_cost_analysis.items = breach.map((d, i) => ({
+                index: i, title: d.scenario || `违约场景${i + 1}`,
+                severity: '中', score: 60,
+            }));
+        }
+        if (party.length > 0) {
+            const partyAvg = Math.round(party.reduce((sum) => sum + 20, 0) / party.length);
+            categoryRisk.party_review.avgSeverity = partyAvg;
+        }
+
+        // 3. 整体风险等级
+        let overallLevel = 'low';
+        let overallLabel = '低风险';
+        if (severityDist['高'] > 0 || overallScore >= 70) {
+            overallLevel = 'high'; overallLabel = '高风险';
+        } else if (severityDist['中'] > 0 || overallScore >= 40) {
+            overallLevel = 'medium'; overallLabel = '中风险';
+        }
+
+        // 4. 雷达图数据（五维度）
+        const radarData = [
+            { axis: '法律风险', value: Math.min(100, severityDist['高'] * 100 + severityDist['中'] * 50 + disputes.length * 10) },
+            { axis: '条款完整性', value: Math.max(0, 100 - missing.length * 20) },
+            { axis: '修改建议', value: suggestions.length > 0 ? Math.min(80, suggestions.length * 15) : 0 },
+            { axis: '违约风险', value: breach.length > 0 ? Math.min(100, breach.length * 30 + 20) : 0 },
+            { axis: '主体合规', value: Math.max(10, 100 - party.length * 15) },
+        ];
+
+        res.json({
+            overallScore,
+            overallLevel,
+            overallLabel,
+            severityDist,
+            categoryRisk,
+            radarData,
+            stats: {
+                totalDisputes: disputes.length,
+                totalMissing: missing.length,
+                totalSuggestions: suggestions.length,
+                totalBreach: breach.length,
+                totalParty: party.length,
+                totalLaws: laws.length,
+            },
+        });
+    } catch (error) {
+        console.error('[ERROR] Failed to compute risk score:', error);
+        res.status(500).json({ error: 'Failed to compute risk score.' });
+    }
+});
+
 router.get('/:id', async (req, res) => {
     const { id } = req.params;
     const userId = req.header('X-User-ID');

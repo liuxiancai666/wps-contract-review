@@ -116,6 +116,25 @@ async function resetAndRebuildDatabase() {
         console.log('[DB Init] New `focused_reviews` table created successfully.');
     }
 
+    // review_comments 表 — 批注交互（同意/不同意/文字批注）
+    const hasReviewCommentsTable = await db.schema.hasTable('review_comments');
+    if (!hasReviewCommentsTable) {
+        console.log('[DB Init] Creating new `review_comments` table...');
+        await db.schema.createTable('review_comments', (table) => {
+            table.increments('id').primary();
+            table.integer('contract_id').unsigned().notNullable().references('id').inTable('contracts').onDelete('CASCADE');
+            table.integer('user_id').unsigned().references('id').inTable('users').onDelete('SET NULL');
+            table.string('item_type').notNullable();  // 'dispute_point' | 'missing_clause' | 'suggestion' | 'breach_cost' | 'party_review'
+            table.integer('item_index').notNullable(); // 该类型数组中的索引
+            table.string('action_type').notNullable(); // 'agree' | 'disagree' | 'comment'
+            table.text('comment_text');                 // 文字批注内容（仅 comment 时必填）
+            table.boolean('is_resolved').defaultTo(false);
+            table.timestamps(true, true);
+            table.index(['contract_id', 'item_type', 'item_index']);
+        });
+        console.log('[DB Init] New `review_comments` table created successfully.');
+    }
+
     await ensureVectorStore();
     console.log('[DB Init] Vector store tables created. Vector index will be built from the knowledge base page.');
 

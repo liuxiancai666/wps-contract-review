@@ -199,6 +199,25 @@ export default {
 
     getReviewTemplates() {
         return apiClient.get('/templates');
+    },
+
+    // === 批注交互 API ===
+    getReviewComments(contractId) {
+        return apiClient.get(`/contracts/${contractId}/comments`);
+    },
+    addReviewComment(contractId, payload) {
+        return apiClient.post(`/contracts/${contractId}/comments`, payload);
+    },
+    updateReviewComment(commentId, payload) {
+        return apiClient.put(`/contracts/comments/${commentId}`, payload);
+    },
+    deleteReviewComment(commentId) {
+        return apiClient.delete(`/contracts/comments/${commentId}`);
+    },
+
+    // === 风险评分 API ===
+    getRiskScore(contractId) {
+        return apiClient.get(`/contracts/${contractId}/risk-score`);
     }
 };
 

@@ -309,50 +309,19 @@
 
             <!-- Tab Content -->
             <div class="p-3 overflow-y-auto flex-grow">
-                <!-- 风险仪表盘 -->
-                <div v-if="activeAiTab === 'summary' && riskDashboard.total > 0" class="mb-4 p-4 bg-white rounded-md border border-border-color">
-                    <div class="flex items-center justify-between flex-wrap gap-3">
-                        <div class="flex items-center gap-3">
-                            <span class="text-sm font-semibold text-text-dark">整体风险等级</span>
-                            <span :class="riskDashboard.overallClass" class="px-3 py-1 text-sm font-bold rounded-full border">{{ riskDashboard.overallLabel }}</span>
-                        </div>
-                        <div class="flex items-center gap-4 text-xs">
-                            <div class="flex items-center gap-1">
-                                <span class="w-3 h-3 rounded-full bg-red-500"></span>
-                                <span class="text-text-main">高危 {{ riskDashboard.stats.high }}</span>
-                            </div>
-                            <div class="flex items-center gap-1">
-                                <span class="w-3 h-3 rounded-full bg-amber-500"></span>
-                                <span class="text-text-main">中危 {{ riskDashboard.stats.medium }}</span>
-                            </div>
-                            <div class="flex items-center gap-1">
-                                <span class="w-3 h-3 rounded-full bg-blue-500"></span>
-                                <span class="text-text-main">低危 {{ riskDashboard.stats.low }}</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="mt-3 grid grid-cols-2 md:grid-cols-5 gap-2 text-center">
-                        <div class="p-2 bg-bg-subtle rounded">
-                            <p class="text-lg font-bold text-text-dark">{{ riskDashboard.moduleCounts.disputes }}</p>
-                            <p class="text-xs text-text-light">风险点</p>
-                        </div>
-                        <div class="p-2 bg-bg-subtle rounded">
-                            <p class="text-lg font-bold text-text-dark">{{ riskDashboard.moduleCounts.suggestions }}</p>
-                            <p class="text-xs text-text-light">修改建议</p>
-                        </div>
-                        <div class="p-2 bg-bg-subtle rounded">
-                            <p class="text-lg font-bold text-text-dark">{{ riskDashboard.moduleCounts.missing }}</p>
-                            <p class="text-xs text-text-light">缺失条款</p>
-                        </div>
-                        <div class="p-2 bg-bg-subtle rounded">
-                            <p class="text-lg font-bold text-text-dark">{{ riskDashboard.moduleCounts.breach }}</p>
-                            <p class="text-xs text-text-light">违约场景</p>
-                        </div>
-                        <div class="p-2 bg-bg-subtle rounded">
-                            <p class="text-lg font-bold text-text-dark">{{ riskDashboard.moduleCounts.party }}</p>
-                            <p class="text-xs text-text-light">主体审查</p>
-                        </div>
-                    </div>
+                <!-- 风险仪表盘 (新组件) -->
+                <div v-if="activeAiTab === 'summary' && riskDashboardData">
+                  <RiskDashboard
+                    :overall-score="riskDashboardData.overallScore"
+                    :overall-level="riskDashboardData.overallLevel"
+                    :overall-label="riskDashboardData.overallLabel"
+                    :severity-dist="riskDashboardData.severityDist"
+                    :radar-data="riskDashboardData.radarData"
+                    :stats="riskDashboardData.stats"
+                    :category-risk="riskDashboardData.categoryRisk"
+                    :loading="riskScoreLoading"
+                    @select-tab="(tab) => activeAiTab = tab"
+                  />
                 </div>
                 <!-- Dispute Points -->
                 <div v-if="activeAiTab === 'summary'">
@@ -370,7 +339,17 @@
                             <div v-for="(item, index) in filteredAndSortedDisputePoints" :key="'dp-' + index" :class="['p-4 bg-bg-subtle rounded-md border border-border-color', normalizeSeverity(item.severity) === 'high' ? 'border-l-4 border-l-red-500' : normalizeSeverity(item.severity) === 'medium' ? 'border-l-4 border-l-amber-500' : 'border-l-4 border-l-blue-500']">
                                 <div class="flex justify-between items-start gap-2">
                                     <p class="font-semibold text-text-dark">{{ disputeTitle(item, index) }}</p>
-                                    <span v-if="item.severity" :class="severityClass(item.severity)" class="px-2 py-0.5 text-xs font-bold rounded border whitespace-nowrap">{{ severityLabel(item.severity) }}</span>
+                                    <div class="flex items-center gap-2">
+                                        <ReviewAnnotations
+                                            :contract-id="contract.id"
+                                            item-type="dispute_point"
+                                            :item-index="index"
+                                            :comments="getAnnotations('dispute_point', index)"
+                                            :summary="getAnnotationSummary('dispute_point', index)"
+                                            @add-comment="handleAddAnnotation"
+                                        />
+                                        <span v-if="item.severity" :class="severityClass(item.severity)" class="px-2 py-0.5 text-xs font-bold rounded border whitespace-nowrap">{{ severityLabel(item.severity) }}</span>
+                                    </div>
                                 </div>
                                 <p v-if="!showPlainLanguage" class="mt-2 text-sm text-text-main whitespace-pre-line">{{ disputeDescription(item) }}</p>
                                 <div v-else class="mt-2 p-3 bg-blue-50 text-blue-800 rounded-md border-l-4 border-blue-400">
@@ -448,7 +427,17 @@
                 <div v-if="activeAiTab === 'summary'">
                     <div v-if="reviewData.missing_clauses && reviewData.missing_clauses.length > 0" class="space-y-4">
                         <div v-for="(item, index) in reviewData.missing_clauses" :key="'mc-' + index" class="p-4 bg-bg-subtle rounded-md">
-                            <p class="font-semibold text-text-dark">{{ missingClauseTitle(item, index) }}</p>
+                            <div class="flex items-start justify-between">
+                                <p class="font-semibold text-text-dark">{{ missingClauseTitle(item, index) }}</p>
+                                <ReviewAnnotations
+                                    :contract-id="contract.id"
+                                    item-type="missing_clause"
+                                    :item-index="index"
+                                    :comments="getAnnotations('missing_clause', index)"
+                                    :summary="getAnnotationSummary('missing_clause', index)"
+                                    @add-comment="handleAddAnnotation"
+                                />
+                            </div>
                             <p class="mt-1 text-sm text-text-main">{{ item.description }}</p>
                         </div>
                     </div>
@@ -477,6 +466,14 @@
                             <div class="flex justify-between items-start">
                                 <p class="font-semibold text-text-dark pr-2">{{ suggestionTitle(item, index) }}</p>
                                 <div class="flex space-x-1 flex-shrink-0">
+                                    <ReviewAnnotations
+                                        :contract-id="contract.id"
+                                        item-type="suggestion"
+                                        :item-index="index"
+                                        :comments="getAnnotations('suggestion', index)"
+                                        :summary="getAnnotationSummary('suggestion', index)"
+                                        @add-comment="handleAddAnnotation"
+                                    />
                                     <el-tooltip content="在文档中定位" placement="top">
                                         <button @click="locateText(suggestionOriginal(item))" class="p-1 text-gray-400 hover:text-primary transition-colors">
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
@@ -897,12 +894,16 @@ import { v4 as uuidv4 } from 'uuid';
 import api from '../api';
 import { getUserId } from '../user';
 import WpsEditor from '@/components/WpsEditor.vue';
+import RiskDashboard from '@/components/RiskDashboard.vue';
+import ReviewAnnotations from '@/components/ReviewAnnotations.vue';
 import { useSocketAnalysis } from '@/composables/useSocketAnalysis';
 
 export default {
   name: 'ReviewView',
   components: {
     WpsEditor,
+    RiskDashboard,
+    ReviewAnnotations,
     ElUpload, ElSelect, ElOption, ElCheckboxGroup, ElCheckbox, ElInput, ElAutocomplete, ElSwitch, ElTooltip
   },
   setup() {
@@ -1113,6 +1114,8 @@ export default {
             if (data.perspective) perspective.value = data.perspective;
             loading.value = false;
             activeStep.value = 2;
+            loadRiskScore();
+            loadAnnotations();
         });
 
         socket.value.on('analysis-progress', (data) => {
@@ -1339,6 +1342,69 @@ export default {
     // WPS WebOffice 通过 SDK init 自动挂载，无需手动指定 URL
     const wpsEditorRef = ref(null);
 
+    // === 风险评分仪表盘 ===
+    const riskDashboardData = ref(null);
+    const riskScoreLoading = ref(false);
+    const loadRiskScore = async () => {
+        if (!contract.id) return;
+        riskScoreLoading.value = true;
+        try {
+            const res = await api.getRiskScore(contract.id);
+            riskDashboardData.value = res.data;
+        } catch (err) {
+            console.warn('[RiskScore] Failed to load:', err.message);
+        } finally {
+            riskScoreLoading.value = false;
+        }
+    };
+
+    // === 批注交互 (review_comments) ===
+    const annotationMap = ref({}); // key: "item_type:index", value: { comments: [], summary: {} }
+    const annotationLoading = ref(false);
+
+    const getAnnotationKey = (itemType, itemIndex) => `${itemType}:${itemIndex}`;
+
+    const getAnnotations = (itemType, itemIndex) => {
+        const entry = annotationMap.value[getAnnotationKey(itemType, itemIndex)];
+        return entry ? entry.comments : [];
+    };
+
+    const getAnnotationSummary = (itemType, itemIndex) => {
+        const entry = annotationMap.value[getAnnotationKey(itemType, itemIndex)];
+        return entry ? entry.summary : { agree: 0, disagree: 0, comment: 0, resolved: false };
+    };
+
+    const loadAnnotations = async () => {
+        if (!contract.id) return;
+        annotationLoading.value = true;
+        try {
+            const res = await api.getReviewComments(contract.id);
+            const data = res.data;
+            const map = {};
+            Object.keys(data.summary || {}).forEach((key) => {
+                map[key] = {
+                    comments: data.grouped[key] || [],
+                    summary: data.summary[key] || { agree: 0, disagree: 0, comment: 0, resolved: false },
+                };
+            });
+            annotationMap.value = map;
+        } catch (err) {
+            console.warn('[Annotations] Failed to load:', err.message);
+        } finally {
+            annotationLoading.value = false;
+        }
+    };
+
+    const handleAddAnnotation = async (payload) => {
+        try {
+            await api.addReviewComment(contract.id, payload);
+            ElMessage.success(payload.action_type === 'comment' ? '批注已添加' : '已记录反馈');
+            await loadAnnotations();
+        } catch (err) {
+            ElMessage.error('反馈提交失败，请重试');
+        }
+    };
+
     const loadReviewTemplates = async () => {
       try {
         const response = await api.getReviewTemplates();
@@ -1543,6 +1609,8 @@ export default {
                     activeStep.value = 2;
                     stopStatusPolling();
                     ElMessage.success('审查完成。');
+                    loadRiskScore();
+                    loadAnnotations();
                 } else if (data.status === 'failed') {
                     analysisActive.value = false;
                     loading.value = false;
@@ -1763,6 +1831,10 @@ export default {
 
             // 加载该合同的专项审查历史
             loadFocusedReviewHistory();
+
+            // 加载风险评分和批注
+            loadRiskScore();
+            loadAnnotations();
 
         } catch (error) {
             console.error(`Failed to load contract ${contractId} from server:`, error);
@@ -2589,7 +2661,11 @@ export default {
       severityFilter,
       filteredAndSortedDisputePoints,
       disputeSeverityStats,
-      riskDashboard,
+      riskDashboardData,
+      riskScoreLoading,
+      getAnnotations,
+      getAnnotationSummary,
+      handleAddAnnotation,
       normalizeSeverity,
       severityLabel,
       severityClass,
