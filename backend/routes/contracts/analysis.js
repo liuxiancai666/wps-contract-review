@@ -175,7 +175,7 @@ const splitContractIntoSections = (plainText) => {
     return batches;
 };
 // 逐组并行审查：每个 batch 并行调用 LLM，聚合所有 dispute_points（带进度推送）
-const batchReviewSections = async (batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLMFn, emitProgress) => {
+const batchReviewSections = async (batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLMFn, emitProgress, cid) => {
     const knowledgeContext = relevantKnowledge.length > 0
         ? relevantKnowledge.map((item, idx) => `[${idx + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n')
         : '未检索到直接依据。';
@@ -228,7 +228,7 @@ ${batchContent.slice(0, 3000)}
         // 推送进度：35% → 递增到 85%
         const lPct = Math.round(35 + (idx / totalBatches) * 50);
         if (emitProgress) {
-            await emitProgress(null, contractId || 0, {
+            await emitProgress(null, cid || 0, {
                 step: 'llm_review',
                 status: 'running',
                 message: `AI 正在逐组审查合同（已完成 ${idx}/${totalBatches} 组）...`,
@@ -334,7 +334,7 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
 
         // 按章节/条款拆分合同正文为若干 batch，并行审查每个 batch
         const batches = splitContractIntoSections(plainText);
-        const batchResult = await batchReviewSections(batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLM, emitAnalysisProgress);
+        const batchResult = await batchReviewSections(batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLM, emitAnalysisProgress, contractId);
 
         // 构造 analysisResult（合并 batch 结果 + 公司主体审查 + 整体摘要）
         const analysisResult = {
