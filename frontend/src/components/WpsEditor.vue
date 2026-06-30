@@ -12,6 +12,16 @@
         <p class="mt-2 text-sm text-text-light">WPS 文档加载中...</p>
       </div>
     </div>
+    <!-- SDK 错误提示 -->
+    <div v-if="sdkError" class="absolute inset-0 flex items-center justify-center bg-white bg-opacity-90 z-10">
+      <div class="text-center p-6">
+        <svg class="mx-auto h-10 w-10 text-red-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+        </svg>
+        <p class="mt-2 text-sm text-red-700">WPS 编辑器初始化失败</p>
+        <p class="mt-1 text-xs text-red-500">{{ sdkError }}</p>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -29,6 +39,11 @@ import { ref, onMounted, onUnmounted, watch, nextTick, defineComponent } from 'v
  * Events:
  * - onDocumentReady: 文档就绪
  * - onDocumentStateChange: 文档状态变化（isDirty）
+ * 
+ * Exposed Methods (通过 ref 访问):
+ * - getApplication(): 获取 WpsApplication 实例（用于 JSAPI 调用）
+ * - save(): 主动保存
+ * - advancedApiReady(): 获取高级 API 实例
  */
 export default defineComponent({
   name: 'WpsEditor',
@@ -44,6 +59,7 @@ export default defineComponent({
     const loaded = ref(false);
     const sdkError = ref(null);
     let wpsInstance = null;
+    let wpsApplication = null;  // 缓存 Application 对象
 
     // 加载 SDK
     const loadSDK = () => {
@@ -68,7 +84,10 @@ export default defineComponent({
 
       // 清理旧实例
       if (wpsInstance) {
-        try { wpsInstance.destroy(); } catch {}
+        try { 
+          wpsInstance.destroy(); 
+          wpsApplication = null;
+        } catch {}
         wpsInstance = null;
       }
 
@@ -81,7 +100,22 @@ export default defineComponent({
           subscriptions: {
             ready: () => {
               loaded.value = true;
+              // 当 SDK ready 后，获取 Application 对象供后续 JSAPI 调用
               emit('onDocumentReady');
+              // 尝试预加载 Application
+              wpsInstance.ready().then(app => {
+                wpsApplication = app;
+              }).catch(() => {
+                // 某些 SDK 版本 ready 返回 void，通过 advancedApiReady 获取
+              });
+              // 同时尝试 advancedApiReady
+              if (typeof wpsInstance.advancedApiReady === 'function') {
+                wpsInstance.advancedApiReady().then(adv => {
+                  if (adv && !wpsApplication) {
+                    wpsApplication = adv;
+                  }
+                }).catch(() => {});
+              }
             },
             // 文档状态变化
             documentStateChange: (event) => {
@@ -104,13 +138,41 @@ export default defineComponent({
 
     // 获取 WpsApplication 实例（用于 JSAPI 调用）
     const getApplication = async () => {
+      // 优先使用缓存的 Application
+      if (wpsApplication) return wpsApplication;
+      
       if (!wpsInstance) return null;
+      
+      // 尝试多种方式获取 Application
       try {
-        const app = wpsInstance.WpsApplication ? await wpsInstance.WpsApplication() : null;
-        return app;
-      } catch {
-        return null;
+        // 方式1: WpsApplication() (JSAPI 途径)
+        if (typeof wpsInstance.WpsApplication === 'function') {
+          const app = await wpsInstance.WpsApplication();
+          if (app) {
+            wpsApplication = app;
+            return app;
+          }
+        }
+        // 方式2: ready() 获取
+        if (typeof wpsInstance.ready === 'function') {
+          const app = await wpsInstance.ready();
+          if (app) {
+            wpsApplication = app;
+            return app;
+          }
+        }
+        // 方式3: advancedApiReady()
+        if (typeof wpsInstance.advancedApiReady === 'function') {
+          const app = await wpsInstance.advancedApiReady();
+          if (app) {
+            wpsApplication = app;
+            return app;
+          }
+        }
+      } catch (error) {
+        console.error('[WPS Editor] Failed to get Application:', error);
       }
+      return null;
     };
 
     // 执行保存
@@ -140,6 +202,7 @@ export default defineComponent({
       (newVal) => {
         if (newVal && editorMount.value) {
           loaded.value = false;
+          wpsApplication = null;
           nextTick(() => initEditor());
         }
       },
@@ -154,6 +217,7 @@ export default defineComponent({
       if (wpsInstance) {
         try { wpsInstance.destroy(); } catch {}
         wpsInstance = null;
+        wpsApplication = null;
       }
     });
 
@@ -177,6 +241,5 @@ export default defineComponent({
 .wps-editor-mount iframe {
   width: 100% !important;
   height: 100% !important;
-  border: none;
 }
 </style>

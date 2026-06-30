@@ -2083,12 +2083,78 @@ export default {
 
     const getEditor = () => wpsEditorRef.value || null;
 
-    const executeEditorMethod = (method, args = []) => {
-      // 通过服务端 DOCX 替换兜底，WPS JSAPI 通过 Application 对象调用
-      return Promise.reject(new Error('EDITOR_NOT_READY_REAL_TIME'));
+    const executeEditorMethod = async (method, args = []) => {
+      try {
+        const app = await getWpsApplication();
+        if (!app) throw new Error('Application not ready');
+        
+        // Build a JavaScript expression to evaluate against the WPS Application object
+        // WPS WebOffice JSAPI uses COM-like property/method chains
+        // e.g., app.ActiveDocument.Selection.Find.Execute({Text: 'xxx'})
+        // We build the expression path dynamically
+        const parts = method.split('.');
+        let current = app;
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
+          if (i === parts.length - 1) {
+            // Last part: invoke with args
+            if (typeof current[part] === 'function') {
+              return await current[part](...args);
+            }
+            return current[part];
+          }
+          current = current[part];
+          if (!current) throw new Error(`Cannot resolve ${parts.slice(0, i+1).join('.')}`);
+        }
+        return current;
+      } catch (error) {
+        console.warn('[WPS Connector] executeEditorMethod failed:', method, error.message);
+        throw error;
+      }
     };
 
-    const findTextRange = async (text) => null;
+    const findTextRange = async (text) => {
+      if (!text || text.length < 2) return null;
+      try {
+        const app = await getWpsApplication();
+        if (!app) return null;
+        
+        // Use WPS JSAPI Selection.Find to locate text
+        // WPS Application.Selection.Find supports Execute method
+        const selection = app.ActiveDocument?.Selection;
+        if (!selection) return null;
+        
+        const find = selection.Find;
+        if (!find) return null;
+        
+        // Execute find - this searches for the text and selects it if found
+        const found = await find.Execute({ Text: text });
+        if (found) {
+          // Text was found and selected - return the Range object
+          return selection.Range;
+        }
+        
+        // Try with normalized text
+        const normalized = text.replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/\s+/g, '');
+        if (normalized !== text && normalized.length >= 4) {
+          // Try fuzzy find by searching just the first 30 chars
+          const shortText = text.slice(0, Math.min(30, text.length));
+          const foundShort = await find.Execute({ Text: shortText });
+          if (foundShort) return selection.Range;
+          
+          // Try first sentence
+          const firstSentence = text.split(/[。；;.!?]/)[0];
+          if (firstSentence && firstSentence.length >= 4) {
+            const foundSentence = await find.Execute({ Text: firstSentence.trim() });
+            if (foundSentence) return selection.Range;
+          }
+        }
+        return null;
+      } catch (error) {
+        console.warn('[WPS Connector] findTextRange failed:', error.message);
+        return null;
+      }
+    };
 
     const normalizeCandidate = (text) => String(text || '')
         .replace(/[“”]/g, '"')
@@ -2156,9 +2222,45 @@ export default {
             ElMessage.info('AI 未返回可定位的原文，请在文档中手动核对该建议。');
             return;
         }
-        // WPS 实时定位功能需通过 WpsApplication() JSAPI 实现
-        // 当前通过服务端替换功能兜底
-        ElMessage.info('WPS 实时文档定位功能待集成，建议通过服务端替换功能更新文档。');
+        if (!ensureEditorReady()) return;
+        try {
+            const app = await getWpsApplication();
+            if (!app) {
+                ElMessage.info('WPS 编辑器 JSAPI 尚未就绪，请在文档加载完成后重试。');
+                return;
+            }
+            // WPS JSAPI: 使用 Selection.Find 查找并定位文本
+            const selection = app.ActiveDocument?.Selection;
+            if (!selection?.Find) {
+                ElMessage.info('当前 WPS 版本不支持文档内定位功能。');
+                return;
+            }
+            const found = await selection.Find.Execute({ Text: text });
+            if (found) {
+                // 选中并滚动到可见位置
+                if (typeof selection.ScrollIntoView === 'function') {
+                    await selection.ScrollIntoView();
+                }
+                ElMessage.success(`已定位到原文位置。`);
+            } else {
+                // 尝试逐句定位
+                const sentences = text.split(/[。；;.!?]+/).filter(s => s.trim().length >= 6);
+                for (const sentence of sentences) {
+                    const foundSentence = await selection.Find.Execute({ Text: sentence.trim() });
+                    if (foundSentence) {
+                        if (typeof selection.ScrollIntoView === 'function') {
+                            await selection.ScrollIntoView();
+                        }
+                        ElMessage.success(`已定位到附近原文。`);
+                        return;
+                    }
+                }
+                ElMessage.info('未在文档中找到完全匹配的原文，请在文档中手动定位。');
+            }
+        } catch (error) {
+            console.warn('[locateText] WPS JSAPI error:', error);
+            ElMessage.info('文档定位暂时不可用，请手动在左侧文档中查找。');
+        }
     };
 
     const replaceTextOnServer = async (originalText, suggestedText, item = {}) => {
@@ -2450,20 +2552,43 @@ export default {
         }
         if (!ensureEditorReady()) return;
         try {
+            const app = await getWpsApplication();
+            if (!app) {
+                ElMessage.warning('WPS 编辑器 JSAPI 尚未就绪，请在文档加载完成后重试。');
+                return;
+            }
+            
+            // Step 1: 先用 Find 定位文本并选中
             const range = await findTextRange(text);
             if (!range) {
                 ElMessage.info('定位原文失败，无法添加批注。');
                 return;
             }
-            await executeEditorMethod('SelectRange', [range]);
-            const bookmark = `ai_review_${Date.now()}`;
-            await executeEditorMethod('AddBookmark', [bookmark]).catch(() => null);
-            await executeEditorMethod('AddComment', [comment || 'AI 审查建议', 'AI 审查专家']).catch(async () => {
-                await executeEditorMethod('AddComment', [comment || 'AI 审查建议']);
-            });
-            ElMessage.success('已在文档中添加批注，并尝试写入书签锚点。');
+            
+            // Step 2: 使用 WPS JSAPI Comments 接口添加批注
+            // ActiveDocument.Comments.Add(CommentText, Range) 
+            const doc = app.ActiveDocument;
+            if (!doc || !doc.Comments || typeof doc.Comments.Add !== 'function') {
+                ElMessage.info('当前 WPS 版本不支持批注添加功能。');
+                return;
+            }
+            
+            // 使用 Comments.Add 直接在选中区域添加批注
+            const commentText = comment || 'AI 审查建议';
+            await doc.Comments.Add(commentText, range);
+            ElMessage.success('已在文档中选中位置添加批注。');
         } catch (error) {
-            ElMessage.error('添加批注失败：当前 OnlyOffice 未开放批注接口。');
+            console.warn('[WPS Connector] addDocComment error:', error);
+            // Fallback: 采用传统方法
+            try {
+                const doc = (await getWpsApplication())?.ActiveDocument;
+                if (doc?.Comments?.Add) {
+                    await doc.Comments.Add(comment || 'AI 审查建议', doc.Selection?.Range);
+                    ElMessage.success('已在当前光标位置添加批注。');
+                    return;
+                }
+            } catch {}
+            ElMessage.error('添加批注失败：WPS 批注接口暂时不可用。');
         }
     };
 
