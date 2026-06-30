@@ -111,6 +111,14 @@ export default {
         return apiClient.get(`/contracts/${contractId}/editor-config`);
     },
 
+    enableEdit(contractId) {
+        return apiClient.post(`/contracts/${contractId}/enable-edit`);
+    },
+
+    getFreshWpsConfig(contractId) {
+        return apiClient.get(`/contracts/${contractId}/fresh-editor-config`);
+    },
+
     forceSaveContract(contractId, payload = {}) {
         return apiClient.post(`/contracts/${contractId}/force-save`, payload);
     },

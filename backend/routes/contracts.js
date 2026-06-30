@@ -2642,5 +2642,43 @@ router.get('/', async (req, res) => {
     }
 });
 
+// ========== 开启在线编辑模式 ==========
+// POST /api/contracts/:id/enable-edit
+router.post('/:id/enable-edit', async (req, res) => {
+    try {
+        const contractId = Number(req.params.id);
+        const contract = await db('contracts').where({ id: contractId }).first();
+        if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+
+        await db('contracts').where({ id: contractId }).update({ edit_enabled: true });
+
+        const ext = String(contract.original_filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'docx';
+        const editorConfig = buildWpsEditorConfig(contract, ext);
+
+        res.json({ success: true, editorConfig });
+    } catch (error) {
+        console.error('[ERROR] enable-edit:', error);
+        res.status(500).json({ error: 'Failed to enable edit mode.' });
+    }
+});
+
+// ========== 获取最新编辑器配置（供刷新使用） ==========
+// GET /api/contracts/:id/fresh-editor-config
+router.get('/:id/fresh-editor-config', async (req, res) => {
+    try {
+        const contractId = Number(req.params.id);
+        const contractRecord = await db('contracts').where({ id: contractId }).first();
+        if (!contractRecord) return res.status(404).json({ error: 'Contract not found or you do not have permission to access it.' });
+
+        const ext = String(contractRecord.original_filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'docx';
+        res.json({
+            editorConfig: buildWpsEditorConfig(contractRecord, ext),
+        });
+    } catch (error) {
+        console.error('[ERROR] fresh-editor-config:', error);
+        res.status(500).json({ error: 'Failed to get fresh editor config.' });
+    }
+});
+
 module.exports = router;
 module.exports.setIoInstance = setIoInstance;
