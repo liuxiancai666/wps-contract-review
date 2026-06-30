@@ -1822,7 +1822,11 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
                 body: `【AI审查—缺失条款】${m.title || '缺失条款'}\n说明：${m.description || ''}\n建议补充：${m.suggested_clause || ''}`,
             });
         }
-        if (allAnnotations.length > 0 && !String(contract.original_filename || '').toLowerCase().endsWith('.pdf') && !String(contract.original_filename || '').toLowerCase().endsWith('.doc')) {
+        // 判断文件是否为可批注格式（基于实际存储文件格式，而非原始文件名）
+        // .doc 文件在上传时已转换为 .docx，因此只需排除 PDF 即可
+        const storageExt = String(contract.storage_path || '').toLowerCase();
+        const isPdfStorage = storageExt.endsWith('.pdf');
+        if (allAnnotations.length > 0 && !isPdfStorage) {
             await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'running', message: `正在将 ${allAnnotations.length} 条审查结果以批注形式写入合同文件...（修改建议 ${suggestions.length} 条，风险 ${riskPoints.length} 条，缺失条款 ${missingClauses.length} 条）` });
             try {
                 const { insertReviewComments } = require('../services/docxAnnotator');
@@ -1832,7 +1836,7 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
                     const newDocKey = uuidv4();
                     await db('contracts').where({ id: contractId }).update({ document_key: newDocKey, edit_enabled: true });
                     const ext = String(contract.original_filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'docx';
-                    newEditorConfig = buildWpsEditorConfig({ ...contract, id: contractId, document_key: newDocKey, original_filename: contract.original_filename }, ext, { afterReview: true });
+                    newEditorConfig = buildWpsEditorConfig({ ...contract, id: contractId, document_key: newDocKey, original_filename: contract.original_filename }, ext);
                 }
                 await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'completed', message: `审查批注已完成，共 ${count}/${allAnnotations.length} 条。` });
             } catch (annotateError) {
