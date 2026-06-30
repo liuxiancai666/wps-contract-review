@@ -255,6 +255,29 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
         await emitAnalysisProgress(null, contractId, { step: 'extract_text', status: 'completed', message: `已提取合同正文（${String(plainText).length} 字）。` });
 
         const template = getTemplateById(preAnalysisData.template_id) || matchTemplate(preAnalysisData.contract_type, plainText);
+        // 如果是自定义规则，从数据库补充 prompt_rules（骨架中为空数组）
+        if (template && template.is_custom && template.custom_rule_id) {
+            try {
+                const ruleRecord = await db('review_rules').where({ id: template.custom_rule_id }).first();
+                if (ruleRecord) {
+                    const parsed = parseJsonField(ruleRecord.prompt_rules, []);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                        template.prompt_rules = parsed;
+                    }
+                    // Also fill review_points / core_purposes from DB as fallback
+                    const dbPoints = parseJsonField(ruleRecord.review_points, []);
+                    if (dbPoints.length > 0 && !preAnalysisData.reviewPoints?.length) {
+                        template.review_points = dbPoints;
+                    }
+                    const dbPurposes = parseJsonField(ruleRecord.core_purposes, []);
+                    if (dbPurposes.length > 0 && !preAnalysisData.core_purposes?.length) {
+                        template.core_purposes = dbPurposes;
+                    }
+                }
+            } catch (dbErr) {
+                console.error(`[Analysis] Failed to fetch custom rule ${template.custom_rule_id}:`, dbErr.message);
+            }
+        }
         const reviewPoints = preAnalysisData.reviewPoints?.length ? preAnalysisData.reviewPoints : template.review_points;
         const corePurposes = preAnalysisData.core_purposes?.length ? preAnalysisData.core_purposes : template.core_purposes;
 
@@ -546,6 +569,14 @@ router.delete('/focused-reviews/:reviewId', async (req, res) => {
         res.status(500).json({ error: 'Failed to delete focused review.' });
     }
 });
+
+function parseJsonField(value, fallback = []) {
+    if (!value) return fallback;
+    try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : fallback;
+    } catch { return fallback; }
+}
 
 module.exports = router;
 module.exports.setIoInstance = setIoInstance;
