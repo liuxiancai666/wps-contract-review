@@ -205,10 +205,9 @@ const emitAnalysisProgress = async (reqOrIo, contractId, payload) => {
         event.estimatedRemainingSeconds = Math.max(0, Math.round(dynamicTotal - emitElapsed));
     }
 
-    // 更新内存任务状态 — 使用 effectivePercent 而非 stepPercent
-    // 否则轮询看到的 percent 永远是固定值，前端会卡住
+    // 更新内存任务状态 — 永不回退（防止 batch 进度回调与首次 emit 的时间差导致 65%→35%）
     if (emitJob) {
-        emitJob.percent = event.percent;
+        if (event.percent > emitJob.percent || emitJob.percent === 0) emitJob.percent = event.percent;
         emitJob.currentStep = stepKey;
         emitJob.status = status === 'failed' ? 'failed' : (event.percent >= 100 ? 'completed' : 'running');
         emitJob.elapsedSeconds = Math.round((Date.now() - emitJob.startedAt) / 1000);
@@ -1677,11 +1676,11 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
         const reviewResults = await batchReviewSectionsWithProgress(
             batches, template, userPerspective, relevantKnowledge,
             reviewPoints, corePurposes, callJsonLLM,
-            // 每完成一组 batch 推送一次进度，防止 socket 超时导致前端子65%回退
+            // 每完成一组 batch 推送一次进度，防止 socket 超时导致前端子%回退
             (completed, total) => {
                 const pct = Math.round((completed / total) * 100);
-                // 百分比映射到 llm_review 阶段（占50%权重，在35%~85%之间）
-                const overallPct = 35 + Math.round(pct * 0.5);
+                // 百分比映射到 llm_review 阶段（权重50%），范围=前3步累积(40%)~前3步+llm(90%)
+                const overallPct = 40 + Math.round(pct * 0.5);
                 emitAnalysisProgress(null, contractId, {
                     step: 'llm_review', status: 'running',
                     message: `AI 正在分章节深度审查合同（已完成 ${completed}/${total} 组）...`,
@@ -1741,7 +1740,49 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
 
         updateAnalysisJob(contractId, { status: 'completed', result: analysisResult, percent: 100 });
         await emitAnalysisProgress(null, contractId, { step: 'finalize', status: 'completed', message: '审查结果已保存。', partialResult: analysisResult });
-        if (ioInstance) ioInstance.to(`contract-${contractId}`).emit('analysis-complete', { results: analysisResult, perspective: userPerspective });
+
+        // Step 7: 将识别出的所有风险以批注形式写入 DOCX 文件（不改变 finalize 状态以避免进度回退）
+        const suggestions = analysisResult.modification_suggestions || [];
+        const riskPoints = analysisResult.dispute_points || [];
+        const missingClauses = analysisResult.missing_clauses || [];
+        let newEditorConfig = null;
+        const allAnnotations = [];
+        for (const s of suggestions) {
+            allAnnotations.push({
+                original_text: s.original_text,
+                body: `【AI审查—修改建议】${s.title || '修改建议'}\n建议：${s.suggested_text || ''}\n理由：${s.reason || ''}`,
+            });
+        }
+        for (const r of riskPoints) {
+            allAnnotations.push({
+                original_text: r.original_clause || '',
+                body: `【AI审查—风险】${r.title || '风险'}\n严重程度：${r.severity || '未标明'}\n说明：${r.dispute_rationale || ''}\n法律依据：${r.legal_reference || ''}\n通俗说法：${r.plain_language || ''}`,
+            });
+        }
+        for (const m of missingClauses) {
+            allAnnotations.push({
+                original_text: '',
+                body: `【AI审查—缺失条款】${m.title || '缺失条款'}\n说明：${m.description || ''}\n建议补充：${m.suggested_clause || ''}`,
+            });
+        }
+        if (allAnnotations.length > 0 && !String(contract.original_filename || '').toLowerCase().endsWith('.pdf')) {
+            await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'running', message: `正在将 ${allAnnotations.length} 条审查结果以批注形式写入合同文件...（修改建议 ${suggestions.length} 条，风险 ${riskPoints.length} 条，缺失条款 ${missingClauses.length} 条）` });
+            try {
+                const { insertReviewComments } = require('../services/docxAnnotator');
+                const count = insertReviewComments(contract.storage_path, allAnnotations);
+                if (count > 0) {
+                    console.log(`[ANNOTATE] Inserted ${count}/${allAnnotations.length} comments into ${contract.storage_path}`);
+                    const newDocKey = uuidv4();
+                    await db('contracts').where({ id: contractId }).update({ document_key: newDocKey });
+                    const ext = String(contract.original_filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'docx';
+                    newEditorConfig = buildWpsEditorConfig({ ...contract, id: contractId, document_key: newDocKey, original_filename: contract.original_filename }, ext);
+                }
+            } catch (annotateError) {
+                console.warn('[ANNOTATE] Failed to insert comments:', annotateError.message);
+            }
+        }
+
+        if (ioInstance) ioInstance.to(`contract-${contractId}`).emit('analysis-complete', { results: analysisResult, perspective: userPerspective, newEditorConfig });
     } catch (error) {
         console.error('Error during background AI analysis:', error);
         updateAnalysisJob(contractId, { status: 'failed', error: error.message });
