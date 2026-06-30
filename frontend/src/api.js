@@ -80,6 +80,10 @@ export default {
         return apiClient.get(`/contracts/${contractId}/pdf-annotations`, { responseType: 'blob' });
     },
 
+    exportAnnotatedDocx(contractId) {
+        return apiClient.get(`/contracts/${contractId}/export-annotated-docx`, { responseType: 'blob' });
+    },
+
     createContractGroup(payload) {
         return apiClient.post('/contracts/groups', payload);
     },

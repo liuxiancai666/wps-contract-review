@@ -285,6 +285,7 @@
                     </div>
                 </div>
                 <div>
+                    <button @click="exportAnnotatedDocx" class="mr-3 text-sm font-medium text-green-600 hover:text-green-700">导出带批注Word</button>
                     <button @click="exportReport('pdf')" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出PDF</button>
                     <button @click="exportReport('word')" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出Word</button>
                     <button @click="downloadPdfAnnotations" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">PDF批注</button>
@@ -1137,6 +1138,8 @@ export default {
             activeStep.value = 2;
             loadRiskScore();
             loadAnnotations();
+            // 审查完成后自动插入批注（仅 DOCX 且编辑器就绪）
+            autoInsertAnnotations();
         });
 
         socket.value.on('analysis-progress', (data) => {
@@ -2568,6 +2571,41 @@ export default {
         });
     };
 
+    // 审查完成后，自动将 modification_suggestions 插入为 WPS 批注
+    const autoInsertAnnotations = async () => {
+        if (isPdfContract || !wpsEditorRef.value || !reviewData.modification_suggestions?.length) return;
+        // 等待编辑器完全就绪（最多等 15 秒）
+        for (let i = 0; i < 15; i++) {
+            const app = await getWpsApplication();
+            if (app) break;
+            await new Promise(r => setTimeout(r, 1000));
+        }
+        const app = await getWpsApplication();
+        if (!app || !app.ActiveDocument?.Comments?.Add) return;
+        ElMessage.info(`正在自动插入 ${reviewData.modification_suggestions.length} 条批注到文档...`);
+        let success = 0;
+        for (const item of reviewData.modification_suggestions) {
+            const text = suggestionOriginal(item);
+            if (!text) continue;
+            try {
+                const doc = app.ActiveDocument;
+                const found = await doc.Selection.Find.Execute({ Text: text });
+                if (found) {
+                    const comment = `【AI审查】${item.title || '修改建议'}\n建议：${suggestionText(item)}\n理由：${suggestionReason(item)}`;
+                    await doc.Comments.Add(comment);
+                    success++;
+                }
+            } catch (e) {
+                console.warn('[Auto-Annotate] Failed for:', item.title, e.message);
+            }
+        }
+        if (success > 0) {
+            ElMessage.success(`已在文档中自动插入 ${success}/${reviewData.modification_suggestions.length} 条批注。`);
+        } else {
+            ElMessage.info('批注插入完成，部分原文在文档中未能准确定位。');
+        }
+    };
+
     const addDocComment = async (text, comment) => {
         if (!text) {
             ElMessage.info('AI 未返回可批注定位的原文，请手动添加批注。');
@@ -2716,6 +2754,19 @@ export default {
         }
     };
 
+    const exportAnnotatedDocx = async () => {
+        try {
+            const response = await api.exportAnnotatedDocx(contract.id);
+            const filename = response.headers['content-disposition']
+                ? decodeURIComponent(response.headers['content-disposition'].split('filename=')[1]?.replace(/"/g, '') || '批注版.docx')
+                : '批注版.docx';
+            downloadBlob(response.data, filename);
+            ElMessage.success('带批注的 Word 文档已导出。');
+        } catch (error) {
+            ElMessage.error(error.response?.data?.error || '导出带批注 Word 失败。');
+        }
+    };
+
     return {
       activeStep,
       loading,
@@ -2832,6 +2883,8 @@ export default {
       loadLatestDiff,
       exportReport,
       downloadPdfAnnotations,
+      exportAnnotatedDocx,
+      autoInsertAnnotations,
       wpsEditorRef
     };
   }

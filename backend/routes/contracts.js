@@ -2121,6 +2121,29 @@ router.get('/:id/export-report', async (req, res) => {
     res.send(html);
 });
 
+router.get('/:id/export-annotated-docx', async (req, res) => {
+    const userId = requireRequestUserId(req, res);
+    if (!userId) return;
+    const contract = await findOwnedContract(req.params.id, userId);
+    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+
+    // WPS 三阶段保存已将批注保存到 storage_path 的 docx 文件中
+    // 直接从存储路径返回带批注的最新 docx
+    if (!contract.storage_path || !fs.existsSync(contract.storage_path)) {
+        return res.status(404).json({ error: 'Contract file not found on disk.' });
+    }
+
+    const ext = path.extname(contract.storage_path).toLowerCase();
+    if (ext !== '.docx') {
+        return res.status(400).json({ error: 'Only DOCX files support annotated export.' });
+    }
+
+    const basename = path.basename(contract.original_filename, ext).replace(/[^a-zA-Z0-9._-]/g, '_') || 'contract';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${basename}-批注版.docx"`);
+    res.sendFile(contract.storage_path);
+});
+
 router.get('/:id/pdf-annotations', async (req, res) => {
     const userId = requireRequestUserId(req, res);
     if (!userId) return;
