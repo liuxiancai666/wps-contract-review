@@ -174,8 +174,8 @@ const splitContractIntoSections = (plainText) => {
     if (currentBatch.sections.length > 0) batches.push(currentBatch);
     return batches;
 };
-// 逐组并行审查：每个 batch 并行调用 LLM，聚合所有 dispute_points
-const batchReviewSections = async (batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLMFn) => {
+// 逐组并行审查：每个 batch 并行调用 LLM，聚合所有 dispute_points（带进度推送）
+const batchReviewSections = async (batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLMFn, emitProgress) => {
     const knowledgeContext = relevantKnowledge.length > 0
         ? relevantKnowledge.map((item, idx) => `[${idx + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n')
         : '未检索到直接依据。';
@@ -211,7 +211,6 @@ ${batchContent.slice(0, 3000)}
 }`;
     const totalBatches = batches.length;
     const prompts = batches.map((batch, idx) => buildBatchPrompt(batch.combinedContent, idx, totalBatches));
-    const batchResults = await Promise.all(prompts.map(p => callJsonLLMFn(p)));
     const allDisputePoints = [], allMissingClauses = [], allModificationSuggestions = [];
     const seenClauseKeys = new Set();
     const addIfNotDuplicate = (arr, item, keyField) => {
@@ -222,6 +221,29 @@ ${batchContent.slice(0, 3000)}
         if (seenClauseKeys.has(dupKey)) return;
         seenClauseKeys.add(dupKey); seenClauseKeys.add(key); arr.push(item);
     };
+
+    // 顺序执行每个 batch，每完成一组推送进度（替代 Promise.all 全并行，解决 llm_review 阶段 60-120 秒无进度问题）
+    const batchResults = [];
+    for (let idx = 0; idx < totalBatches; idx++) {
+        // 推送进度：35% → 递增到 85%
+        const lPct = Math.round(35 + (idx / totalBatches) * 50);
+        if (emitProgress) {
+            await emitProgress(null, contractId || 0, {
+                step: 'llm_review',
+                status: 'running',
+                message: `AI 正在逐组审查合同（已完成 ${idx}/${totalBatches} 组）...`,
+                percent: lPct,
+            });
+        }
+        let result;
+        try {
+            result = await callJsonLLMFn(prompts[idx]);
+        } catch (err) {
+            console.warn(`[batchReview] batch ${idx + 1}/${totalBatches} failed:`, err.message);
+            continue;
+        }
+        batchResults.push(result);
+    }
     for (const result of batchResults) {
         if (!result) continue;
         if (Array.isArray(result.dispute_points)) result.dispute_points.forEach(p => addIfNotDuplicate(allDisputePoints, p, 'original_clause'));
@@ -312,7 +334,7 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
 
         // 按章节/条款拆分合同正文为若干 batch，并行审查每个 batch
         const batches = splitContractIntoSections(plainText);
-        const batchResult = await batchReviewSections(batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLM);
+        const batchResult = await batchReviewSections(batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLM, emitAnalysisProgress);
 
         // 构造 analysisResult（合并 batch 结果 + 公司主体审查 + 整体摘要）
         const analysisResult = {

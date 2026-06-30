@@ -177,7 +177,12 @@ const updateAnalysisJob = (contractId, updates) => {
 const emitAnalysisProgress = async (reqOrIo, contractId, payload) => {
     const stepKey = payload.step;
     const status = payload.status;
-    const { percent, stepIndex, totalSteps } = getStepProgress(stepKey, status);
+
+    // 如果 payload 中显式传了 percent，优先使用；否则从步骤权重计算
+    const stepProgress = payload.percent !== undefined
+        ? { percent: payload.percent, stepIndex: 0, totalSteps: 0 }
+        : getStepProgress(stepKey, status);
+    const { percent, stepIndex, totalSteps } = stepProgress;
 
     // 基于实际已耗时和当前进度的动态 ETA 估算
     // 避免使用固定 TOTAL_EST_SECONDS 导致的偏差（LLM 审查阶段实际耗时远超预设值）
