@@ -390,11 +390,11 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
         updateAnalysisJob(contractId, { status: 'completed', result: analysisResult, percent: 100 });
         await emitAnalysisProgress(null, contractId, { step: 'finalize', status: 'completed', message: '审查结果已保存。', partialResult: analysisResult });
 
-        // Step 7: 自动将修改建议以批注形式写入 DOCX 文件
+        // Step 7: 自动将修改建议以批注形式写入 DOCX 文件（不改变 finalize 状态以避免进度回退）
         const suggestions = analysisResult.modification_suggestions || [];
         let newEditorConfig = null;
         if (suggestions.length > 0 && !String(contract.original_filename || '').toLowerCase().endsWith('.pdf')) {
-            await emitAnalysisProgress(null, contractId, { step: 'finalize', status: 'running', message: `正在将 ${suggestions.length} 条审查建议以批注形式写入合同文件...` });
+            await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'running', message: `正在将 ${suggestions.length} 条审查建议以批注形式写入合同文件...` });
             try {
                 const count = insertReviewComments(contract.storage_path, suggestions);
                 if (count > 0) {

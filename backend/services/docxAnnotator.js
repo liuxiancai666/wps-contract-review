@@ -1,7 +1,8 @@
 /**
- * DOCX 批注插入服务 v3 — 直接操作底层 XML
+ * DOCX 批注插入服务 v4 — 修复归一化位置映射 bug
  *
- * 高效：一次性扫描 body XML → run 列表 → 匹配原文 → 反向插入
+ * 核心修复：searchPos 归一化匹配到位置后，映射回原始 displayText 中的位置
+ *           确保 run 查找时的偏移正确
  */
 const AdmZip = require('adm-zip');
 const fs = require('fs');
@@ -12,9 +13,6 @@ const NS_DECL = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/200
 const COMMENT_REL_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments';
 const COMMENT_CT = 'application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml';
 
-/**
- * 从 bodyXml 提取所有 run，每个 run 带 text + start/end offset + full XML
- */
 function parseRuns(bodyXml) {
   const runs = [];
   const re = /(<w:r[^>]*>[\s\S]*?<\/w:r>)/g;
@@ -24,28 +22,38 @@ function parseRuns(bodyXml) {
     const t = xml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/);
     runs.push({ text: t ? t[1] : '', full: xml, start: m.index, end: m.lastIndex });
   }
-  const displayText = runs.map(r => r.text).join('');
-  return { runs, displayText };
+  return { runs, displayText: runs.map(r => r.text).join('') };
 }
 
-/** 归一化：去空白 */
-const n = s => String(s).replace(/\s+/g, '');
+/** 将归一化文本位置 N 映射回原始 displayText 中的字符位置 */
+function normPosToRaw(displayText, normPos) {
+  let nonWs = 0;
+  for (let i = 0; i < displayText.length; i++) {
+    if (/\s/.test(displayText[i])) continue;
+    if (nonWs === normPos) return i;
+    nonWs++;
+  }
+  return -1;
+}
 
-/** 查找位置：精确→归一化→按行拆分 */
+/** 在原始 displayText 中查找搜索文本，始终返回原始显示文本中的位置 */
 function searchPos(displayText, searchText) {
-  const dt = displayText;
-  let p = dt.indexOf(searchText);
+  // 1. 精确匹配
+  let p = displayText.indexOf(searchText);
   if (p >= 0) return p;
-  const ndt = n(dt);
-  const nst = n(searchText);
-  p = ndt.indexOf(nst);
-  if (p >= 0) return p;
-  // 换行分割
+  // 2. 归一化匹配（去空白+全半角统一）
+  const norm = s => String(s).replace(/\s+/g, '').replace(/[“”]/g, '"').replace(/[：]/g, ':').replace(/[，]/g, ',');
+  const ndt = norm(displayText);
+  const nst = norm(searchText);
+  let np = ndt.indexOf(nst);
+  if (np >= 0) return normPosToRaw(displayText, np);
+  // 3. 按换行拆分，取第一段有效行匹配
   for (const line of searchText.split('\n')) {
     const t = line.trim();
     if (t.length > 3) {
-      p = ndt.indexOf(n(t));
-      if (p >= 0) return p;
+      const nl = norm(t);
+      np = ndt.indexOf(nl);
+      if (np >= 0) return normPosToRaw(displayText, np);
     }
   }
   return -1;
@@ -63,7 +71,6 @@ function insertReviewComments(docxPath, suggestions, outputPath) {
 
   const { runs, displayText } = parseRuns(bodyXml);
 
-  // 最大已有批注 ID
   let cid = 0;
   const xst = docXml.match(/w:id="(\d+)"/g);
   if (xst) cid = Math.max(...xst.map(s => parseInt(s.match(/\d+/)[0]))) + 1;
@@ -74,6 +81,7 @@ function insertReviewComments(docxPath, suggestions, outputPath) {
     if (!s.original_text) continue;
     const pos = searchPos(displayText, s.original_text);
     if (pos === -1) {
+      // 回退：在文档开头插入
       ins.push({ cid: cid++, fallback: true,
         commentBody: `【AI审查】${s.title||'修改建议'}\n建议：${s.suggested_text||''}\n理由：${s.reason||''}`,
         author: 'AI审查', date: new Date().toISOString().replace(/T/,' ').replace(/\..+/,'') });
@@ -84,7 +92,11 @@ function insertReviewComments(docxPath, suggestions, outputPath) {
       if (acc + runs[i].text.length > pos) { ri = i; off = pos - acc; break; }
       acc += runs[i].text.length;
     }
-    if (ri === -1) continue;
+    if (ri === -1) { /* 回退插入 */ ins.push({ cid: cid++, fallback: true,
+      commentBody: `【AI审查】${s.title||'修改建议'}\n建议：${s.suggested_text||''}\n理由：${s.reason||''}`,
+      author: 'AI审查', date: new Date().toISOString().replace(/T/,' ').replace(/\..+/,'') });
+      continue;
+    }
     ins.push({ cid: cid++, runIdx: ri, runOffset: off,
       commentBody: `【AI审查】${s.title||'修改建议'}\n建议：${s.suggested_text||''}\n理由：${s.reason||''}`,
       author: 'AI审查', date: new Date().toISOString().replace(/T/,' ').replace(/\..+/,'') });
@@ -92,7 +104,6 @@ function insertReviewComments(docxPath, suggestions, outputPath) {
 
   if (!ins.length) return 0;
 
-  // 反向替换 bodyXml
   let newBody = bodyXml;
   for (const i of [...ins].reverse()) {
     if (i.fallback) {
@@ -112,10 +123,8 @@ function insertReviewComments(docxPath, suggestions, outputPath) {
     newBody = newBody.slice(0, r.start) + replaced + newBody.slice(r.end);
   }
 
-  // 写 document.xml
   zip.updateFile('word/document.xml', Buffer.from(docXml.replace(bm[0], `<w:body>${newBody}</w:body>`), 'utf8'));
 
-  // comments.xml
   const ce = ins.map(i => `
     <w:comment w:id="${i.cid}" w:author="${escapeXml(i.author)}" w:date="${i.date}">
       <w:p><w:pPr><w:pStyle w:val="CommentText"/></w:pPr>
@@ -126,7 +135,6 @@ function insertReviewComments(docxPath, suggestions, outputPath) {
   if (zip.getEntry('word/comments.xml')) zip.updateFile('word/comments.xml', Buffer.from(newCx, 'utf8'));
   else zip.addFile('word/comments.xml', Buffer.from(newCx, 'utf8'));
 
-  // [Content_Types].xml
   const ct = zip.getEntry('[Content_Types].xml');
   if (ct) {
     let s = ct.getData().toString('utf8');
@@ -136,7 +144,6 @@ function insertReviewComments(docxPath, suggestions, outputPath) {
     }
   }
 
-  // rels
   const rels = zip.getEntry('word/_rels/document.xml.rels');
   if (rels) {
     let s = rels.getData().toString('utf8');
