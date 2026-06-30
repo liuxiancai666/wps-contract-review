@@ -2238,8 +2238,10 @@ router.get('/:id/export-annotated-docx', async (req, res) => {
     }
 
     const basename = path.basename(contract.original_filename, ext).replace(/[^a-zA-Z0-9._-]/g, '_') || 'contract';
+    const filenameAscii = basename + '-annotated.docx';
+    const filenameUtf8 = encodeURIComponent(basename + '-批注版.docx');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    res.setHeader('Content-Disposition', `attachment; filename="${basename}-批注版.docx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${filenameAscii}"; filename*=UTF-8''${filenameUtf8}`);
     res.sendFile(contract.storage_path);
 });
 
