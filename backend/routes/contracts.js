@@ -1393,7 +1393,7 @@ ${wrapContractContent(plainText)}
 const splitContractIntoSections = (plainText) => {
     if (!plainText || typeof plainText !== 'string') return [];
     const text = plainText.trim();
-    if (text.length < 200) return [{ index: 0, title: '全文', content: text }];
+    if (text.length < 200) return [{ index: 0, title: '全文', content: text, combinedContent: text }];
     const clausePattern = /((?:^|\n)[ \t]*(?:第[一二三四五六七八九十百零\d]+[条章节款])|(?:^|\n)[ \t]*(?:一\s*[、.。]|二\s*[、.。]|三\s*[、.。]|四\s*[、.。]|五\s*[、.。]|六\s*[、.。]|七\s*[、.。]|八\s*[、.。]))/gm;
     const matches = [{ offset: 0 }, ...Array.from(text.matchAll(clausePattern)).map(m => ({ offset: m.index, text: m[1] }))];
     const sections = [];
@@ -1405,13 +1405,13 @@ const splitContractIntoSections = (plainText) => {
         if (content.length >= 50) sections.push({ index: sections.length, title: sectionTitle, content });
     }
     if (sections.length < 3) {
-        const chunkSize = 800, overlap = 100, newSections = [];
+        const chunkSize = 800, overlap = 100, batches = [];
         for (let i = 0; i < text.length; i += chunkSize - overlap) {
             const content = text.slice(i, Math.min(i + chunkSize, text.length)).trim();
-            if (content.length >= 100) newSections.push({ index: newSections.length, title: `第${newSections.length + 1}部分`, content });
+            if (content.length >= 100) batches.push({ index: batches.length, title: `第${batches.length + 1}部分`, content, combinedContent: content });
             if (i + chunkSize >= text.length) break;
         }
-        return newSections;
+        return batches;
     }
     const batches = [];
     let currentBatch = { sections: [], combinedContent: '', titles: [], startIdx: 0 };
