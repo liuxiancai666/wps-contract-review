@@ -92,17 +92,19 @@ router.get('/v3/3rd/files/:file_id/download', verifyWpsSignature, async (req, re
     // 返回一个直链（raw endpoint 在下方实现）
     const rawUrl = `${WPS_CALLBACK_BASE}/v3/3rd/files/${req.params.file_id}/download/raw`;
 
-    // 计算文件校验和
+    // 计算文件校验和（WPS 仅支持 md5 或 sha1）
     let digest = '';
+    let digestType = '';
     try {
       const fileBuffer = fs.readFileSync(contract.storage_path);
-      digest = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+      digest = crypto.createHash('sha1').update(fileBuffer).digest('hex');
+      digestType = 'sha1';
     } catch {}
 
     res.json(ok({
       url: rawUrl,
       digest: digest || undefined,
-      digest_type: digest ? 'sha256' : undefined,
+      digest_type: digestType || undefined,
     }));
   } catch (error) {
     console.error('[WPS-CALLBACK] Download error:', error);
