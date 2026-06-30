@@ -51,7 +51,7 @@ async function resetAndRebuildDatabase() {
     await ensureColumn('contracts', 'analysis_partial_result', (table) => table.text('analysis_partial_result'));
     await ensureColumn('contracts', 'analysis_status', (table) => table.string('analysis_status'));
     await ensureColumn('contracts', 'group_id', (table) => table.integer('group_id').unsigned());
-    await ensureColumn('contracts', 'edit_enabled', (table) => table.boolean('edit_enabled').defaultTo(false));
+    await ensureColumn('contracts', 'edit_enabled', (table) => table.boolean('edit_enabled').defaultTo(true));
 
     const hasContractVersionsTable = await db.schema.hasTable('contract_versions');
     if (!hasContractVersionsTable) {

@@ -242,25 +242,13 @@
         <div class="w-2/3 bg-white rounded-lg shadow-md overflow-hidden h-full flex flex-col">
             <div class="px-3 py-2 border-b border-border-color bg-bg-subtle flex items-center justify-between gap-3">
                 <div class="flex items-center gap-2 text-sm text-text-main">
-                    <span v-if="editEnabled" class="inline-flex items-center gap-1 text-green-700 font-medium">
+                    <span v-if="isEditorReady" class="inline-flex items-center gap-1 text-green-700 font-medium">
                         <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
-                        编辑模式
-                    </span>
-                    <span v-else-if="isEditorReady" class="inline-flex items-center gap-1 text-blue-600 font-medium">
-                        <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
-                        只读预览
+                        可在线编辑
                     </span>
                     <span v-else class="text-text-light">编辑器加载中...</span>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button v-if="!editEnabled && isEditorReady && !isPdfContract"
-                        @click="handleEnableEdit"
-                        :disabled="editSwitching"
-                        class="px-3 py-1.5 text-xs font-medium text-white bg-green-600 rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1">
-                        <svg v-if="editSwitching" class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                        <svg v-else class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
-                        {{ editSwitching ? '开启中...' : '开启在线编辑' }}
-                    </button>
                     <button @click="prepareFocusedReviewFromSelection" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark">
                         读取选中文本审查
                     </button>
@@ -941,8 +929,6 @@ export default {
     const activeAiTab = ref('summary');
     const docEditorComponent = ref(null);
     const isEditorReady = ref(false);
-    const editEnabled = ref(false);
-    const editSwitching = ref(false);
     const socket = ref(null);
     const reAnalyzing = ref(false);
     const showPlainLanguage = ref(false);
@@ -1795,22 +1781,6 @@ export default {
         isEditorReady.value = true;
         if (isEditorReady.value) startAutoForceSave();
       }, 300);
-    };
-
-    const handleEnableEdit = async () => {
-      if (!contract.id) return;
-      editSwitching.value = true;
-      try {
-        const res = await api.enableEdit(contract.id);
-        editEnabled.value = true;
-        contract.editorConfig = res.data.editorConfig;
-        // WpsEditor 组件通过 watch config 自动触发 destroy + re-init
-        ElMessage.success('在线编辑模式已开启，文档将在编辑器重新加载后变为可编辑。');
-      } catch (err) {
-        ElMessage.error(err.response?.data?.error || '开启编辑模式失败，请稍后重试');
-      } finally {
-        editSwitching.value = false;
-      }
     };
 
     const startReAnalysis = async () => {

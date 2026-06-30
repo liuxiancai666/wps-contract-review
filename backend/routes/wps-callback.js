@@ -145,7 +145,7 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
       // 权限位：1=可读 2=可下载 4=可编辑 8=可打印 16=可评论 32=可分享
       read: 1,
       download: 1,
-      edit: (isPdf || !contract.edit_enabled) ? 0 : 1,
+      edit: isPdf ? 0 : 1,
       print: 1,
       comment: isPdf ? 0 : 1,
       rename: 0,
