@@ -42,8 +42,9 @@ const fail = (message, code = 1) => ({ code, data: null, message });
 
 // ========== 辅助：查询合同记录 ==========
 const findContract = async (fileId) => {
-  const id = String(fileId).replace(/^contract-/, '');
-  return db('contracts').where({ id: Number(id) }).first();
+  // fileId format: "contract-77" — strip prefix to get numeric ID
+  const numericId = String(fileId).replace(/^contract-/, '');
+  return db('contracts').where({ id: Number(numericId) }).first();
 };
 
 const getFileStat = (storagePath) => {
@@ -64,7 +65,7 @@ router.get('/v3/3rd/files/:file_id', verifyWpsSignature, async (req, res) => {
       return res.status(404).json(fail('File not found'));
     }
     res.json(ok({
-      id: String(contract.id),
+      id: req.params.file_id, // Return full fileId (e.g. "contract-77") to match SDK
       name: contract.original_filename || '未命名文档',
       version: 1,
       size: getFileStat(contract.storage_path),
@@ -89,7 +90,7 @@ router.get('/v3/3rd/files/:file_id/download', verifyWpsSignature, async (req, re
     }
 
     // 返回一个直链（raw endpoint 在下方实现）
-    const rawUrl = `${WPS_CALLBACK_BASE}/v3/3rd/files/${contract.id}/download/raw`;
+    const rawUrl = `${WPS_CALLBACK_BASE}/v3/3rd/files/${req.params.file_id}/download/raw`;
 
     // 计算文件校验和
     let digest = '';
@@ -147,7 +148,7 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
       comment: isPdf ? 0 : 1,
       rename: 0,
       copy: 1,
-      history: 1,
+      history: 0, // 暂不提供版本历史回调
     }));
   } catch (error) {
     console.error('[WPS-CALLBACK] Permission error:', error);

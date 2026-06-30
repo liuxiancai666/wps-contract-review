@@ -891,6 +891,7 @@ import { useRoute, useRouter, onBeforeRouteUpdate } from 'vue-router';
 import { ElMessage, ElUpload, ElSelect, ElOption, ElCheckboxGroup, ElCheckbox, ElInput, ElAutocomplete, ElSwitch, ElTooltip } from 'element-plus';
 import { marked } from 'marked';
 import { v4 as uuidv4 } from 'uuid';
+import { io } from 'socket.io-client';
 import api from '../api';
 import { getUserId } from '../user';
 import WpsEditor from '@/components/WpsEditor.vue';
@@ -920,6 +921,7 @@ export default {
     const activeAiTab = ref('summary');
     const docEditorComponent = ref(null);
     const isEditorReady = ref(false);
+    const socket = ref(null);
     const reAnalyzing = ref(false);
     const showPlainLanguage = ref(false);
     const forceSaveTimer = ref(null);
