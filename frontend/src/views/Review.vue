@@ -260,6 +260,7 @@
                 :config="contract.editorConfig"
                 @onDocumentReady="onDocumentReady"
                 @onDocumentStateChange="onDocumentStateChange"
+                @onButtonAction="handleWpsButtonAction"
             />
             <div v-if="selectedSuggestionPreview" class="border-t border-border-color bg-white p-3 max-h-44 overflow-y-auto">
                 <div class="flex items-center justify-between">
@@ -905,7 +906,6 @@ import { getUserId } from '../user';
 import WpsEditor from '@/components/WpsEditor.vue';
 import RiskDashboard from '@/components/RiskDashboard.vue';
 import ReviewAnnotations from '@/components/ReviewAnnotations.vue';
-import { useSocketAnalysis } from '@/composables/useSocketAnalysis';
 
 export default {
   name: 'ReviewView',
@@ -1147,7 +1147,7 @@ export default {
             // 如果后端返回了新配置（批注已写入文件），刷新编辑器
             if (data.newEditorConfig) {
                 contract.editorConfig = { ...data.newEditorConfig };
-                ElMessage.success('批注已嵌入文档，编辑器正在重新加载...');
+                ElMessage.success('批注已嵌入文档，正在重新加载简化编辑界面...');
             }
         });
 
@@ -2105,6 +2105,28 @@ export default {
         stopElapsedTimer();
         if (socket.value) socket.value.disconnect();
     });
+
+    // --- WPS WebOffice 自定义按钮回调 ---
+    const handleWpsButtonAction = (payload) => {
+      console.log('[WPS Button] Action:', payload.action);
+      switch (payload.action) {
+        case 'back':
+          goBackSmart();
+          break;
+        case 'export-annotated':
+          exportAnnotatedDocx();
+          break;
+        case 'show-review':
+          activeAiTab.value = 'summary';
+          break;
+        case 'back-to-list':
+          forceSaveCurrentDocument(true);
+          router.push('/');
+          break;
+        default:
+          console.log('[WPS Button] Unknown action:', payload.action);
+      }
+    };
 
     // --- WPS WebOffice Connector Methods ---
 

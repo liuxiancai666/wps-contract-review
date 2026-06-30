@@ -136,6 +136,7 @@ const ANALYSIS_STEPS = [
     { key: 'llm_review', label: 'AI 生成审查结论', weight: 50, estSeconds: 60 },
     { key: 'seal_analysis', label: '印章与签章核验', weight: 7, estSeconds: 8 },
     { key: 'finalize', label: '保存审查结果', weight: 3, estSeconds: 2 },
+    { key: 'batch_annotations', label: '写入审查批注', weight: 0, estSeconds: 2 },
 ];
 const TOTAL_EST_SECONDS = ANALYSIS_STEPS.reduce((sum, s) => sum + s.estSeconds, 0);
 
@@ -1773,12 +1774,14 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
                 if (count > 0) {
                     console.log(`[ANNOTATE] Inserted ${count}/${allAnnotations.length} comments into ${contract.storage_path}`);
                     const newDocKey = uuidv4();
-                    await db('contracts').where({ id: contractId }).update({ document_key: newDocKey });
+                    await db('contracts').where({ id: contractId }).update({ document_key: newDocKey, edit_enabled: true });
                     const ext = String(contract.original_filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'docx';
-                    newEditorConfig = buildWpsEditorConfig({ ...contract, id: contractId, document_key: newDocKey, original_filename: contract.original_filename }, ext);
+                    newEditorConfig = buildWpsEditorConfig({ ...contract, id: contractId, document_key: newDocKey, original_filename: contract.original_filename }, ext, { afterReview: true });
                 }
+                await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'completed', message: `审查批注已完成，共 ${count}/${allAnnotations.length} 条。` });
             } catch (annotateError) {
                 console.warn('[ANNOTATE] Failed to insert comments:', annotateError.message);
+                await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'failed', message: `批注写入失败：${annotateError.message}` });
             }
         }
 

@@ -30,10 +30,52 @@ if (!fs.existsSync(UPLOAD_TEMP_DIR)) {
 
 // ========== WPS-2 签名验证中间件 ==========
 const verifyWpsSignature = (req, res, next) => {
-  // TODO: 正式上线后启用 WPS-2 签名验证
   // 签名算法：SHA1(AppSecret + Content-Md5 + Content-Type + Date)
-  // Authorization: WPS-2:AppId:SHA1值
-  next();
+  // 请求头格式：Authorization: WPS-2:AppId:SHA1值
+  try {
+    const auth = req.headers['authorization'] || '';
+    if (!auth.startsWith('WPS-2:')) {
+      // 开发环境跳过验证
+      if (process.env.NODE_ENV !== 'production') return next();
+      return res.status(401).json(fail('Missing or invalid WPS-2 authorization header'));
+    }
+
+    const parts = auth.split(':');
+    if (parts.length < 3) {
+      if (process.env.NODE_ENV !== 'production') return next();
+      return res.status(401).json(fail('Invalid WPS-2 authorization format'));
+    }
+
+    const appId = parts[1];
+    const signature = parts.slice(2).join(':');
+    if (appId !== WPS_APP_ID) {
+      return res.status(401).json(fail('AppId mismatch'));
+    }
+
+    const contentMd5 = req.headers['content-md5'] || '';
+    const contentType = req.headers['content-type'] || '';
+    const date = req.headers['date'] || '';
+    const payload = WPS_APP_SECRET + contentMd5 + contentType + date;
+    const expectedSig = crypto.createHash('sha1').update(payload).digest('hex').toLowerCase();
+
+    // 时间戳偏差容忍 5 分钟
+    if (date) {
+      const reqTime = new Date(date).getTime();
+      const now = Date.now();
+      if (!isNaN(reqTime) && Math.abs(now - reqTime) > 300000) {
+        return res.status(401).json(fail('Request timestamp expired'));
+      }
+    }
+
+    if (signature.toLowerCase() !== expectedSig) {
+      return res.status(401).json(fail('WPS-2 signature verification failed'));
+    }
+
+    next();
+  } catch (error) {
+    console.error('[WPS-CALLBACK] Signature verification error:', error.message);
+    res.status(500).json(fail('Signature verification error'));
+  }
 };
 
 // ========== 统一响应格式 ==========
@@ -64,10 +106,15 @@ router.get('/v3/3rd/files/:file_id', verifyWpsSignature, async (req, res) => {
     if (!contract) {
       return res.status(404).json(fail('File not found'));
     }
+    // 从 document_key 的版本计算版本号（每次 document_key 更新视为新版本）
+    // 用 updated_at 的时间戳除以 1000 作为版本号，保证单调递增
+    const versionTs = contract.updated_at
+      ? Math.floor(new Date(contract.updated_at).getTime() / 1000)
+      : Math.floor(new Date(contract.created_at || Date.now()).getTime() / 1000);
     res.json(ok({
       id: req.params.file_id, // Return full fileId (e.g. "contract-77") to match SDK
       name: contract.original_filename || '未命名文档',
-      version: 1,
+      version: versionTs,
       size: getFileStat(contract.storage_path),
       create_time: Math.floor(new Date(contract.created_at || Date.now()).getTime() / 1000),
       modify_time: Math.floor(new Date(contract.updated_at || Date.now()).getTime() / 1000),
@@ -140,14 +187,15 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
 
     const ext = String(contract.original_filename || '').toLowerCase();
     const isPdf = ext.endsWith('.pdf');
+    const editEnabled = !isPdf && contract.edit_enabled !== false;
 
     res.json(ok({
       // 权限位：1=可读 2=可下载 4=可编辑 8=可打印 16=可评论 32=可分享
       read: 1,
       download: 1,
-      edit: isPdf ? 0 : 1,
+      edit: editEnabled ? 1 : 0,
       print: 1,
-      comment: isPdf ? 0 : 1,
+      comment: editEnabled ? 1 : 0,
       rename: 0,
       copy: 1,
       history: 0, // 暂不提供版本历史回调
@@ -224,6 +272,18 @@ router.put('/v3/3rd/files/:file_id/upload/raw', async (req, res) => {
     }
 
     // 保存上传的文件流到合同存储路径
+    // 先备份旧文件到 versions/ 目录
+    const versionsDir = path.join(UPLOADS_DIR, 'versions');
+    if (!fs.existsSync(versionsDir)) fs.mkdirSync(versionsDir, { recursive: true });
+    const versionFile = path.join(versionsDir, `${contract.id}-v${Date.now()}.bak.docx`);
+    try {
+      if (fs.existsSync(contract.storage_path)) {
+        fs.copyFileSync(contract.storage_path, versionFile);
+      }
+    } catch (backupErr) {
+      console.warn('[WPS-CALLBACK] Backup failed (non-fatal):', backupErr.message);
+    }
+
     const writeStream = fs.createWriteStream(contract.storage_path);
     await new Promise((resolve, reject) => {
       req.pipe(writeStream);
