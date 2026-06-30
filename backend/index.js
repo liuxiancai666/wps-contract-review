@@ -10,6 +10,7 @@ const qaRoutes = require('./routes/qa');
 const userRoutes = require('./routes/users');
 const knowledgeRoutes = require('./routes/knowledge');
 const templateRoutes = require('./routes/templates');
+const rulesRoutes = require('./routes/rules');
 const wpsCallbackRoutes = require('./routes/wps-callback');
 const db = require('./database');
 const resetAndRebuildDatabase = require('./database-check');
@@ -104,6 +105,7 @@ app.use('/api/qa', qaRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/knowledge', knowledgeRoutes);
 app.use('/api/templates', templateRoutes);
+app.use('/api/rules', rulesRoutes);
 
 // WPS WebOffice v3 回调路由（必须是公网可达）
 app.use(wpsCallbackRoutes);

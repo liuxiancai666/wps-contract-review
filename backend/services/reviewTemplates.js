@@ -10,7 +10,33 @@ const loadTemplates = () => {
 
 const getAllTemplates = () => loadTemplates();
 
-const getTemplateById = (id) => loadTemplates().find((template) => template.id === id);
+// getTemplateById handles preset IDs ("labor", "lease") and custom rule IDs ("custom-123")
+// For custom rules, it returns a template-like shape with is_custom=true so callers can
+// look up the actual rule from the database when needed.
+const getTemplateById = (id) => {
+    if (!id) return null;
+    // Try preset templates first
+    const presets = loadTemplates();
+    const preset = presets.find((t) => t.id === id);
+    if (preset) return preset;
+    // Custom rule format: "custom-<number>"
+    if (String(id).startsWith('custom-')) {
+        const numericId = Number(String(id).replace('custom-', ''));
+        if (Number.isInteger(numericId) && numericId > 0) {
+            return {
+                id: String(id),
+                is_custom: true,
+                custom_rule_id: numericId,
+                name: `自定义规则 #${numericId}`,
+                review_points: [],
+                core_purposes: [],
+                prompt_rules: [],
+                report_sections: ['risk_summary', 'modification_suggestions', 'breach_cost_analysis', 'missing_clauses', 'citations'],
+            };
+        }
+    }
+    return null;
+};
 
 const matchTemplate = (contractType = '', text = '') => {
     const templates = loadTemplates();

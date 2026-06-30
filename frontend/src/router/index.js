@@ -4,6 +4,7 @@ const Home = () => import('../views/Home.vue')
 const Review = () => import('../views/Review.vue')
 const QnA = () => import('../views/QnA.vue')
 const Settings = () => import('../views/Settings.vue')
+const Rules = () => import('../views/Rules.vue')
 
 const routes = [
   {
@@ -29,6 +30,11 @@ const routes = [
     path: '/settings',
     name: 'Settings',
     component: Settings
+  },
+  {
+    path: '/rules',
+    name: 'Rules',
+    component: Rules
   }
 ]
 

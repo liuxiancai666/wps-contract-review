@@ -135,6 +135,25 @@ async function resetAndRebuildDatabase() {
         console.log('[DB Init] New `review_comments` table created successfully.');
     }
 
+    const hasReviewRulesTable = await db.schema.hasTable('review_rules');
+    if (!hasReviewRulesTable) {
+        console.log('[DB Init] Creating new `review_rules` table...');
+        await db.schema.createTable('review_rules', (table) => {
+            table.increments('id').primary();
+            table.integer('user_id').unsigned().references('id').inTable('users').onDelete('CASCADE');
+            table.string('name').notNullable();
+            table.string('contract_type_keywords').defaultTo('');
+            table.text('review_points').defaultTo('[]'); // JSON array of strings
+            table.text('core_purposes').defaultTo('[]'); // JSON array of strings
+            table.text('prompt_rules').defaultTo('[]');  // JSON array of strings
+            table.boolean('is_enabled').defaultTo(true);
+            table.timestamps(true, true);
+            table.index('user_id');
+            table.index('name');
+        });
+        console.log('[DB Init] New `review_rules` table created successfully.');
+    }
+
     await ensureVectorStore();
     console.log('[DB Init] Vector store tables created. Vector index will be built from the knowledge base page.');
 
