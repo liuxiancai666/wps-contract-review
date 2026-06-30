@@ -5,7 +5,10 @@
         <p class="eyebrow">系统管理</p>
         <h2>用户管理</h2>
       </div>
-      <button class="secondary-button" @click="fetchUsers">刷新</button>
+      <div class="header-actions">
+        <button class="secondary-button" @click="showCreateDialog = true">+ 新增用户</button>
+        <button class="secondary-button" @click="fetchUsers">刷新</button>
+      </div>
     </div>
 
     <div v-if="loading" class="empty-block">加载中...</div>
@@ -75,19 +78,43 @@
         </tbody>
       </table>
     </div>
+
+    <!-- 新增用户对话框 -->
+    <el-dialog v-model="showCreateDialog" title="新增用户" width="420px" :close-on-click-modal="false">
+      <el-form :model="createForm" label-width="80px" @submit.prevent="handleCreateUser">
+        <el-form-item label="用户名" required>
+          <el-input v-model="createForm.username" placeholder="输入用户名" />
+        </el-form-item>
+        <el-form-item label="密码" required>
+          <el-input v-model="createForm.password" type="password" placeholder="至少6位" show-password />
+        </el-form-item>
+        <el-form-item label="角色">
+          <el-select v-model="createForm.role" style="width:100%">
+            <el-option label="普通用户" value="user" />
+            <el-option label="管理员" value="admin" />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <div class="dialog-actions">
+            <el-button @click="showCreateDialog = false">取消</el-button>
+            <el-button type="primary" native-type="submit" :loading="creating">创建</el-button>
+          </div>
+        </el-form-item>
+      </el-form>
+    </el-dialog>
   </div>
 </template>
 
 <script>
 import { ref, computed, onMounted } from 'vue';
-import { ElPopconfirm, ElMessage } from 'element-plus';
+import { ElPopconfirm, ElMessage, ElDialog, ElForm, ElFormItem, ElInput, ElSelect, ElOption, ElButton } from 'element-plus';
 import { useAuth } from '../composables/useAuth';
 
 const API_BASE = import.meta.env.VITE_APP_BACKEND_API_URL || '';
 
 export default {
   name: 'AdminView',
-  components: { ElPopconfirm },
+  components: { ElPopconfirm, ElDialog, ElForm, ElFormItem, ElInput, ElSelect, ElOption, ElButton },
   setup() {
     const { authUser, getAuthHeaders } = useAuth();
     const users = ref([]);
@@ -96,6 +123,11 @@ export default {
     const editingId = ref(null);
     const editForm = ref({ username: '', role: '' });
     const currentUserId = computed(() => authUser.value?.id);
+
+    // 新增用户
+    const showCreateDialog = ref(false);
+    const creating = ref(false);
+    const createForm = ref({ username: '', password: '', role: 'user' });
 
     const fetchUsers = async () => {
       loading.value = true;
@@ -182,6 +214,37 @@ export default {
       }
     };
 
+    const handleCreateUser = async () => {
+      if (!createForm.value.username || !createForm.value.password) {
+        ElMessage.warning('用户名和密码不能为空');
+        return;
+      }
+      if (createForm.value.password.length < 6) {
+        ElMessage.warning('密码至少6位');
+        return;
+      }
+      creating.value = true;
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/users`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+          body: JSON.stringify(createForm.value),
+        });
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || '创建失败');
+        }
+        ElMessage.success('用户创建成功');
+        showCreateDialog.value = false;
+        createForm.value = { username: '', password: '', role: 'user' };
+        await fetchUsers();
+      } catch (err) {
+        ElMessage.error(err.message);
+      } finally {
+        creating.value = false;
+      }
+    };
+
     onMounted(fetchUsers);
 
     return {
@@ -189,6 +252,7 @@ export default {
       editingId, editForm, currentUserId,
       fetchUsers, formatDate,
       startEdit, cancelEdit, saveEdit, deleteUser,
+      showCreateDialog, creating, createForm, handleCreateUser,
     };
   },
 };
@@ -220,6 +284,11 @@ export default {
   font-weight: 800;
 }
 
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .secondary-button {
   min-height: 34px;
   padding: 0 13px;
@@ -228,6 +297,11 @@ export default {
   background: #fff;
   font-weight: 800;
   cursor: pointer;
+  transition: background 0.12s;
+}
+
+.secondary-button:hover {
+  background: #f5f5f5;
 }
 
 .empty-block {
@@ -359,5 +433,12 @@ export default {
 .text-button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
 }
 </style>

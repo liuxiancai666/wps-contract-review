@@ -151,6 +151,39 @@ router.post('/link-fingerprint', authMiddleware, async (req, res) => {
 // 以下路由需要 admin 权限
 // ═══════════════════════════════════════════════════════════════
 
+// ─── POST /api/auth/users (admin — 创建用户) ────────────────────
+router.post('/users', authMiddleware, adminMiddleware, async (req, res) => {
+  const { username, password, role } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: '用户名和密码不能为空' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: '密码至少6位' });
+  }
+
+  try {
+    const existing = await db('users').where({ username }).first();
+    if (existing) {
+      return res.status(409).json({ error: '用户名已存在' });
+    }
+
+    const password_hash = await bcrypt.hash(password, 10);
+    const finalRole = role && Object.values(ROLES).includes(role) ? role : ROLES.USER;
+    const [id] = await db('users')
+      .insert({ username, password_hash, role: finalRole, fingerprint_id: `admin-created-${Date.now()}` })
+      .returning('id');
+
+    res.status(201).json({
+      id: typeof id === 'object' ? id.id : id,
+      username,
+      role: finalRole,
+    });
+  } catch (err) {
+    console.error('[Auth] Admin create user error:', err);
+    res.status(500).json({ error: '创建用户失败' });
+  }
+});
+
 // ─── GET /api/auth/users (admin) ───────────────────────────────
 router.get('/users', authMiddleware, adminMiddleware, async (req, res) => {
   try {
