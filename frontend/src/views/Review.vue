@@ -48,7 +48,7 @@
               <span class="font-semibold text-primary">点击上传</span>
               <p class="pl-1">或将文件拖到此处</p>
             </div>
-            <p class="text-xs leading-5 text-gray-500">支持 .docx 和 .pdf 格式（PDF 需为可复制的文字版，不支持扫描件）</p>
+            <p class="text-xs leading-5 text-gray-500">支持 .docx、.doc 和 .pdf 格式（PDF 需为可复制的文字版，不支持扫描件）</p>
           </div>
         </el-upload>
       </div>
@@ -64,7 +64,7 @@
             ref="linkedFileInput"
             type="file"
             multiple
-            accept=".docx,.pdf"
+            accept=".docx,.doc,.pdf"
             @change="handleLinkedFilesChange"
             class="linked-analysis-panel__native-input"
           />
@@ -1456,7 +1456,7 @@ export default {
 
     const handleBeforeUpload = (file) => {
         const ext = file.name.split('.').pop().toLowerCase();
-        const isValid = ['docx', 'pdf'].includes(ext);
+        const isValid = ['docx', 'doc', 'pdf'].includes(ext);
         if (!isValid) {
             ElMessage.error('只能上传 DOCX 或 PDF 格式的文件！');
             return false;

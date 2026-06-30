@@ -14,16 +14,16 @@ favicon.href = logoUrl;
 document.head.appendChild(favicon);
 
 async function main() {
+  // 尝试识别用户（指纹），即使失败也不阻塞应用——未登录用户会看到登录页
   try {
     await identifyUser();
-
-    const app = createApp(App);
-    app.use(router);
-    app.mount('#app');
   } catch (error) {
-    console.error('Failed to initialize the application:', error);
-    document.body.innerHTML = '<div style="text-align: center; margin-top: 50px;"><h1>应用加载失败</h1><p>请检查网络连接或联系管理员。</p></div>';
+    console.warn('[App] User identification skipped:', error.message);
   }
+
+  const app = createApp(App);
+  app.use(router);
+  app.mount('#app');
 }
 
 main();

@@ -12,6 +12,7 @@ const knowledgeRoutes = require('./routes/knowledge');
 const templateRoutes = require('./routes/templates');
 const rulesRoutes = require('./routes/rules');
 const wpsCallbackRoutes = require('./routes/wps-callback');
+const authRoutes = require('./routes/auth');
 const db = require('./database');
 const resetAndRebuildDatabase = require('./database-check');
 
@@ -107,6 +108,9 @@ app.use('/api/knowledge', knowledgeRoutes);
 app.use('/api/templates', templateRoutes);
 app.use('/api/rules', rulesRoutes);
 
+// Auth 路由（登录/注册/用户管理）
+app.use('/api/auth', authRoutes);
+
 // WPS WebOffice v3 回调路由（必须是公网可达）
 app.use(wpsCallbackRoutes);
 
@@ -121,7 +125,7 @@ app.use((err, req, res, next) => {
       return res.status(413).json({ error: '文件大小超过 50MB 限制，请压缩或拆分后上传。', code: 'FILE_TOO_LARGE' });
     }
     if (err.message && err.message.startsWith('UNSUPPORTED_FILE_TYPE')) {
-      return res.status(400).json({ error: '仅支持 .docx 和 .pdf 格式的文件。', code: 'UNSUPPORTED_FILE_TYPE' });
+      return res.status(400).json({ error: '仅支持 .docx、.doc 和 .pdf 格式的文件。', code: 'UNSUPPORTED_FILE_TYPE' });
     }
     console.error('[ERROR] Unhandled middleware error:', err);
     return res.status(500).json({ error: '服务器处理请求时发生错误。' });

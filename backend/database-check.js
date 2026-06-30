@@ -17,10 +17,19 @@ async function resetAndRebuildDatabase() {
         console.log('[DB Init] Creating new `users` table...');
         await db.schema.createTable('users', (table) => {
             table.increments('id').primary();
-            table.string('fingerprint_id').notNullable().unique();
+            table.string('fingerprint_id').unique();
+            table.string('username').unique();
+            table.string('password_hash');
+            table.string('role').defaultTo('user');
             table.timestamps(true, true);
         });
         console.log('[DB Init] New `users` table created successfully.');
+    } else {
+      // 添加新列（如果不存在）
+      await ensureColumn('users', 'username', (table) => table.string('username').unique());
+      await ensureColumn('users', 'password_hash', (table) => table.string('password_hash'));
+      await ensureColumn('users', 'role', (table) => table.string('role').defaultTo('user'));
+      // fingerprint_id 改为可空（已有唯一索引不需要改）
     }
 
     const hasContractsTable = await db.schema.hasTable('contracts');

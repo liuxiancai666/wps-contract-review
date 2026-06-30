@@ -28,7 +28,7 @@ const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_
 const APP_HOST = process.env.APP_HOST;
 const BACKEND_URL_FOR_DOCKER = process.env.BACKEND_URL_FOR_DOCKER || APP_HOST;
 
-const ALLOWED_EXTENSIONS = ['.docx', '.pdf'];
+const ALLOWED_EXTENSIONS = ['.docx', '.doc', '.pdf'];
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 
 const storage = multer.diskStorage({
@@ -79,6 +79,28 @@ const extractTextFromFile = async (filePath) => {
             throw err;
         }
         return value;
+    }
+    if (ext === '.doc') {
+        // 使用 antiword 提取 .doc 文档文本
+        return new Promise((resolve, reject) => {
+            const { exec } = require('child_process');
+            exec(`antiword "${filePath}"`, { timeout: 30000 }, (error, stdout, stderr) => {
+                if (error) {
+                    // antiword 失败时尝试 catdoc 作为备用
+                    exec(`catdoc "${filePath}"`, { timeout: 30000 }, (err2, out2) => {
+                        if (err2 || !out2?.trim()) {
+                            reject(new Error('无法提取 .doc 文档文本，文件可能已损坏或为旧版格式。'));
+                        } else {
+                            resolve(out2);
+                        }
+                    });
+                } else if (!stdout || !stdout.trim()) {
+                    reject(new Error('.doc 文档文本提取为空。'));
+                } else {
+                    resolve(stdout);
+                }
+            });
+        });
     }
     if (ext === '.pdf') {
         const data = await pdf(fs.readFileSync(filePath));
@@ -1099,10 +1121,50 @@ router.post('/upload', upload.single('file'), async (req, res) => {
             const safeUserId = await ensureUploadUser(trx, userId);
             const originalFilenameDecoded = iconv.decode(Buffer.from(req.file.originalname, 'binary'), 'utf-8');
             const documentKey = uuidv4();
+
+            // .doc → .docx 转换：WPS WebOffice 不支持 .doc 格式
+            let storagePath = req.file.path;
+            const fileExt = path.extname(originalFilenameDecoded).toLowerCase();
+            if (fileExt === '.doc' || fileExt === '.wps') {
+                const docxPath = storagePath.replace(/\.\w+$/, '') + '.docx';
+                try {
+                    const text = await extractTextFromFile(storagePath);
+                    // 使用 docx 包生成完整 OOXML，确保 WPS 可正常渲染
+                    const { Document, Packer, Paragraph, TextRun } = require('docx');
+                    const lines = text.split('\n');
+                    const paragraphs = lines.map(line => {
+                        const trimmed = line.trim();
+                        if (!trimmed) return new Paragraph({ spacing: { after: 120 } });
+                        return new Paragraph({
+                            spacing: { after: 80, line: 360 },
+                            children: [new TextRun({ text: trimmed, font: '宋体', size: 24 })],
+                        });
+                    });
+                    const doc = new Document({
+                        styles: {
+                            default: {
+                                document: {
+                                    run: { font: '宋体', size: 24 },
+                                    paragraph: { spacing: { line: 360 } },
+                                },
+                            },
+                        },
+                        sections: [{ children: paragraphs }],
+                    });
+                    const buffer = await Packer.toBuffer(doc);
+                    fs.writeFileSync(docxPath, buffer);
+                    // 删除原始 .doc 文件
+                    try { fs.unlinkSync(storagePath); } catch {}
+                    storagePath = docxPath;
+                    console.log(`[UPLOAD] Converted .doc to proper DOCX: ${docxPath} (${buffer.length} bytes)`);
+                } catch (convErr) {
+                    console.warn('[UPLOAD] .doc conversion failed, falling back to original:', convErr.message);
+                }
+            }
             const [newContract] = await trx('contracts').insert({
                 user_id: safeUserId,
                 original_filename: originalFilenameDecoded,
-                storage_path: req.file.path,
+                storage_path: storagePath,
                 document_key: documentKey,
                 group_id: groupId || null,
                 status: 'Uploaded',
@@ -1766,7 +1828,7 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
                 body: `【AI审查—缺失条款】${m.title || '缺失条款'}\n说明：${m.description || ''}\n建议补充：${m.suggested_clause || ''}`,
             });
         }
-        if (allAnnotations.length > 0 && !String(contract.original_filename || '').toLowerCase().endsWith('.pdf')) {
+        if (allAnnotations.length > 0 && !String(contract.original_filename || '').toLowerCase().endsWith('.pdf') && !String(contract.original_filename || '').toLowerCase().endsWith('.doc')) {
             await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'running', message: `正在将 ${allAnnotations.length} 条审查结果以批注形式写入合同文件...（修改建议 ${suggestions.length} 条，风险 ${riskPoints.length} 条，缺失条款 ${missingClauses.length} 条）` });
             try {
                 const { insertReviewComments } = require('../services/docxAnnotator');

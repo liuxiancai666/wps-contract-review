@@ -133,9 +133,15 @@ function insertReviewComments(docxPath, annotations, outputPath) {
     if (!tm) continue;
     const before = tm[2].slice(0, i.runOffset);
     const after  = tm[2].slice(i.runOffset);
-    const replaced = tm[1] + before + tm[3] +
-      `</w:r><w:r><w:commentRangeStart w:id="${i.cid}"/><w:t xml:space="preserve">${after}</w:t></w:r>` +
-      `<w:r><w:commentRangeEnd w:id="${i.cid}"/><w:commentReference w:id="${i.cid}"/></w:r>`;
+    // 保留原始 <w:r> 开头（含 <w:rPr>）
+    const prefix = r.full.slice(0, tm.index);
+    // 提取 <w:rPr> 用于新创建的 <w:r>，保证格式一致
+    const rprMatch = r.full.match(/(<w:rPr>[\s\S]*?<\/w:rPr>)/);
+    const rprXml = rprMatch ? rprMatch[1] : '';
+    // 构造替换：保留原始 rPr 的 split run + commentRangeStart/End
+    const replaced = prefix + tm[1] + before + tm[3] +
+      `<w:r>${rprXml}<w:commentRangeStart w:id="${i.cid}"/><w:t xml:space="preserve">${after}</w:t></w:r>` +
+      `<w:r>${rprXml}<w:commentRangeEnd w:id="${i.cid}"/><w:commentReference w:id="${i.cid}"/></w:r>`;
     newBody = newBody.slice(0, r.start) + replaced + newBody.slice(r.end);
   }
 

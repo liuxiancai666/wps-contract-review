@@ -21,19 +21,18 @@ const getVisitorId = () => {
     return visitorId;
 };
 
-let currentUserId = localStorage.getItem(USER_ID_KEY);
+let currentUserId = localStorage.getItem(USER_ID_KEY) ? parseInt(localStorage.getItem(USER_ID_KEY), 10) : null;
 
 /**
  * Identifies the current user using a browser fingerprint.
  * If a user ID is already in localStorage, it's considered valid.
  * Otherwise, it generates a fingerprint, sends it to the backend to get a user ID,
  * and then stores that ID in localStorage.
- * This ensures we only run the identification process once per session/browser.
  */
 export const identifyUser = async () => {
     if (currentUserId) {
         console.log(`[User] Found existing User ID: ${currentUserId}`);
-        return parseInt(currentUserId, 10);
+        return currentUserId;
     }
 
     console.log('[User] No User ID found. Identifying browser...');
@@ -51,9 +50,7 @@ export const identifyUser = async () => {
         return currentUserId;
     } catch (error) {
         console.error('[User] Fingerprinting or API identification failed:', error);
-        // In a real app, you might want to handle this more gracefully.
-        // For now, we'll block the user from proceeding without an ID.
-        alert('无法识别用户身份，应用无法继续。请检查网络连接或浏览器设置。');
+        // Don't alert here — let the login page handle unauthenticated users
         return null;
     }
 };
@@ -64,4 +61,13 @@ export const identifyUser = async () => {
  */
 export const getUserId = () => {
     return currentUserId ? parseInt(currentUserId, 10) : null;
+};
+
+/**
+ * Sets the user ID after successful login (used by auth system).
+ * This overrides any fingerprint-based ID.
+ */
+export const setUserId = (userId) => {
+    currentUserId = userId;
+    localStorage.setItem(USER_ID_KEY, userId);
 };
