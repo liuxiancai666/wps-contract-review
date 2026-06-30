@@ -722,7 +722,6 @@
                             </div>
                             <div class="flex justify-between text-xs text-text-light mb-3">
                                 <span>已用时：{{ formatDuration(analysisElapsed) }}</span>
-                                <span v-if="analysisEta > 0">预计剩余：{{ formatDuration(analysisEta) }}</span>
                             </div>
                             <div v-if="analysisSteps.length" class="analysis-progress mt-2 w-full">
                                 <div
@@ -768,7 +767,6 @@
                 </div>
                 <div class="flex justify-between text-xs text-text-light mt-1">
                     <span>已用时：{{ formatDuration(analysisElapsed) }}</span>
-                    <span v-if="analysisEta > 0">预计剩余：{{ formatDuration(analysisEta) }}</span>
                 </div>
             </div>
 
@@ -1154,7 +1152,6 @@ export default {
         socket.value.on('analysis-progress', (data) => {
             analysisProgress.value.push(data);
             if (typeof data.percent === 'number') analysisPercent.value = data.percent;
-            if (typeof data.estimatedRemainingSeconds === 'number') analysisEta.value = data.estimatedRemainingSeconds;
             if (typeof data.elapsedSeconds === 'number') analysisElapsed.value = data.elapsedSeconds;
             if (Array.isArray(data.steps)) {
                 analysisSteps.value = data.steps;

@@ -213,7 +213,6 @@ const emitAnalysisProgress = async (reqOrIo, contractId, payload) => {
         totalSteps,
         stepLabel: ANALYSIS_STEPS.find((s) => s.key === stepKey)?.label || stepKey,
         elapsedSeconds: 0,
-        estimatedRemainingSeconds: Math.max(0, TOTAL_EST_SECONDS - Math.round((TOTAL_EST_SECONDS * effectivePercent) / 100)),
         ...payload,
         // 确保 percent 始终使用 effectivePercent（payload 中的 percent 会被下面覆盖）
         percent: effectivePercent,
@@ -221,12 +220,6 @@ const emitAnalysisProgress = async (reqOrIo, contractId, payload) => {
 
     // 基于已耗时动态估算 ETA（替代固定 TOTAL_EST_SECONDS 计算的偏差值）
     const emitJob = analysisJobs.get(Number(contractId));
-    const emitElapsed = emitJob ? Math.round((Date.now() - emitJob.startedAt) / 1000) : 0;
-    if (effectivePercent > 0 && effectivePercent < 100 && emitElapsed > 5) {
-        // 用已完成百分比推算总耗时，再算剩余
-        const dynamicTotal = emitElapsed / (effectivePercent / 100);
-        event.estimatedRemainingSeconds = Math.max(0, Math.round(dynamicTotal - emitElapsed));
-    }
 
     // 更新内存任务状态 — 永不回退（防止 batch 进度回调与首次 emit 的时间差导致 65%→35%）
     if (emitJob) {
@@ -1732,7 +1725,8 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
         }).join('\n');
 
         // Step 4: AI 逐组并行审查（替代一次性全篇审查，解决上下文过载导致的漏检问题）
-        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', message: 'AI 正在分章节深度审查合同，请耐心等待...' });
+        // 首次 emit 用 40%（前3步累计权重），与后续 batch 回调起点一致，防止进度回退（65%→40%）
+        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', percent: 40, message: 'AI 正在分章节深度审查合同，请耐心等待...' });
 
         // 按章节/条款拆分合同正文为若干 batch，并行审查每个 batch
         const batches = splitContractIntoSections(plainText);
