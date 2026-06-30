@@ -17,6 +17,8 @@ const { searchVectorDocumentsMulti, splitIntoParagraphGroups } = require('../ser
 const { getTemplateById, matchTemplate } = require('../services/reviewTemplates');
 const { extractCompanyNames, searchCompanyInfo } = require('../services/webSearch');
 const { createChatCompletion } = require('../services/llmClient');
+const { insertReviewComments } = require('../services/docxAnnotator');
+const { buildWpsEditorConfig } = require('../services/wpsEditor');
 
 // 合同正文段落 chunk 检索上限：0 = 不限；超过部分不再生成子 query，控制长合同的检索成本
 const CONTRACT_CHUNK_MAX = Math.max(0, Number(process.env.CONTRACT_CHUNK_MAX || 0));
@@ -387,7 +389,29 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
 
         updateAnalysisJob(contractId, { status: 'completed', result: analysisResult, percent: 100 });
         await emitAnalysisProgress(null, contractId, { step: 'finalize', status: 'completed', message: '审查结果已保存。', partialResult: analysisResult });
-        if (ioInstance) ioInstance.to(`contract-${contractId}`).emit('analysis-complete', { results: analysisResult, perspective: userPerspective });
+
+        // Step 7: 自动将修改建议以批注形式写入 DOCX 文件
+        const suggestions = analysisResult.modification_suggestions || [];
+        let newEditorConfig = null;
+        if (suggestions.length > 0 && !String(contract.original_filename || '').toLowerCase().endsWith('.pdf')) {
+            await emitAnalysisProgress(null, contractId, { step: 'finalize', status: 'running', message: `正在将 ${suggestions.length} 条审查建议以批注形式写入合同文件...` });
+            try {
+                const count = insertReviewComments(contract.storage_path, suggestions);
+                if (count > 0) {
+                    console.log(`[ANNOTATE] Inserted ${count}/${suggestions.length} comments into ${contract.storage_path}`);
+                    // 生成新 document_key 强制 WPS 重新加载（文件内容已变）
+                    const newDocKey = uuidv4();
+                    await db('contracts').where({ id: contractId }).update({ document_key: newDocKey });
+                    // 构建新配置供前端刷新
+                    const ext = String(contract.original_filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'docx';
+                    newEditorConfig = buildWpsEditorConfig({ ...contract, id: contractId, document_key: newDocKey, original_filename: contract.original_filename }, ext);
+                }
+            } catch (annotateError) {
+                console.warn('[ANNOTATE] Failed to insert comments:', annotateError.message);
+            }
+        }
+
+        if (ioInstance) ioInstance.to(`contract-${contractId}`).emit('analysis-complete', { results: analysisResult, perspective: userPerspective, newEditorConfig });
     } catch (error) {
         console.error('Error during background AI analysis:', error);
         updateAnalysisJob(contractId, { status: 'failed', error: error.message });

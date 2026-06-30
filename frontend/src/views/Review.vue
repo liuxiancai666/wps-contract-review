@@ -1144,8 +1144,11 @@ export default {
             activeStep.value = 2;
             loadRiskScore();
             loadAnnotations();
-            // 审查完成后自动插入批注（仅 DOCX 且编辑器就绪）
-            autoInsertAnnotations();
+            // 如果后端返回了新配置（批注已写入文件），刷新编辑器
+            if (data.newEditorConfig) {
+                contract.editorConfig = { ...data.newEditorConfig };
+                ElMessage.success('批注已嵌入文档，编辑器正在重新加载...');
+            }
         });
 
         socket.value.on('analysis-progress', (data) => {
@@ -2765,20 +2768,8 @@ export default {
 
     const exportAnnotatedDocx = async () => {
         try {
-            ElMessage.info('正在触发保存以确保批注已写入文档...');
-            // Step 1: 通过 WPS SDK 触发保存（将 JSAPI 添加的批注同步到后端文件）
-            if (wpsEditorRef.value && isEditorReady.value) {
-                // WPS SDK save() 触发三阶段保存回调（prepare→address→raw upload→complete）
-                const editor = wpsEditorRef.value;
-                if (typeof editor.save === 'function') {
-                    try { await editor.save(); } catch {}
-                } else {
-                    await api.forceSaveContract(contract.id, {});
-                }
-            }
-            // Step 2: 等待 WPS 三阶段保存回调完成
-            await new Promise(r => setTimeout(r, 2000));
-            // Step 3: 从后端下载带批注的最新文件
+            ElMessage.info('正在导出带批注的文档...');
+            // 批注已在审查完成后由后端直接写入DOCX文件，无需再次触发WPS保存
             const response = await api.exportAnnotatedDocx(contract.id);
             const filename = response.headers['content-disposition']
                 ? decodeURIComponent(response.headers['content-disposition'].split('filename=')[1]?.replace(/"/g, '') || '批注版.docx')
