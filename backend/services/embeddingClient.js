@@ -46,14 +46,15 @@ const embedTexts = async (texts) => {
         return input.map(hashFallbackEmbedding);
     }
 
-    // 413 防护：单条超过 6000 字符则进一步截断（上游代理可能有 payload 限制）
-    const safeInput = input.map(t => String(t || '').slice(0, 6000));
-    // 聚合总大小超过 200KB 则分批发送，避免上游代理 413
-    const MAX_PAYLOAD_BYTES = 150 * 1024;
+    // 上游代理 413 防护：单条文本截断到 400 字符（上游 10.99.23.118:80 限制约 5KB payload）
+    const MAX_INPUT_CHARS = 400;
+    const safeInput = input.map(t => String(t || '').slice(0, MAX_INPUT_CHARS));
+    // 聚合总大小超过 50KB 则分批发送，避免上游代理 413
+    const MAX_PAYLOAD_BYTES = 4 * 1024;
     const payloadSize = JSON.stringify({ model: EMBEDDING_MODEL, inputs: safeInput }).length;
     if (payloadSize > MAX_PAYLOAD_BYTES && safeInput.length === 1) {
-        // 单条过长：截断到 3000
-        const truncated = [String(safeInput[0] || '').slice(0, 3000)];
+        // 单条过长：截断到 MAX_INPUT_CHARS
+        const truncated = [String(safeInput[0] || '').slice(0, MAX_INPUT_CHARS)];
         return embedTexts(truncated);
     }
 
