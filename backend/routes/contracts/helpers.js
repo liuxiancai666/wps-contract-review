@@ -179,6 +179,20 @@ const emitAnalysisProgress = async (reqOrIo, contractId, payload) => {
     const status = payload.status;
     const { percent, stepIndex, totalSteps } = getStepProgress(stepKey, status);
 
+    // 基于实际已耗时和当前进度的动态 ETA 估算
+    // 避免使用固定 TOTAL_EST_SECONDS 导致的偏差（LLM 审查阶段实际耗时远超预设值）
+    const now = Date.now();
+    const emitJob = analysisJobs.get(Number(contractId));
+    const elapsedSeconds = emitJob ? Math.round((now - emitJob.startedAt) / 1000) : 0;
+    let estimatedRemainingSeconds = 0;
+    if (percent > 0 && percent < 100) {
+        // 根据已完成百分比推算总耗时 = elapsed / percent%，剩余 = 推算总耗时 - 已耗时
+        const estimatedTotal = elapsedSeconds / (percent / 100);
+        estimatedRemainingSeconds = Math.max(0, Math.round(estimatedTotal - elapsedSeconds));
+    } else if (percent === 0) {
+        estimatedRemainingSeconds = TOTAL_EST_SECONDS;
+    }
+
     const event = {
         contractId: Number(contractId),
         timestamp: new Date().toISOString(),
@@ -186,20 +200,19 @@ const emitAnalysisProgress = async (reqOrIo, contractId, payload) => {
         stepIndex,
         totalSteps,
         stepLabel: ANALYSIS_STEPS.find((s) => s.key === stepKey)?.label || stepKey,
-        elapsedSeconds: 0,
-        estimatedRemainingSeconds: Math.max(0, TOTAL_EST_SECONDS - Math.round((TOTAL_EST_SECONDS * percent) / 100)),
+        elapsedSeconds,
+        estimatedRemainingSeconds,
         ...payload,
     };
 
     // 更新内存任务状态
-    const job = analysisJobs.get(Number(contractId));
-    if (job) {
-        job.percent = percent;
-        job.currentStep = stepKey;
-        job.status = status === 'failed' ? 'failed' : (percent >= 100 ? 'completed' : 'running');
-        job.elapsedSeconds = Math.round((Date.now() - job.startedAt) / 1000);
-        event.elapsedSeconds = job.elapsedSeconds;
-        const stepEntry = job.steps.find((s) => s.key === stepKey);
+    if (emitJob) {
+        emitJob.percent = percent;
+        emitJob.currentStep = stepKey;
+        emitJob.status = status === 'failed' ? 'failed' : (percent >= 100 ? 'completed' : 'running');
+        emitJob.elapsedSeconds = Math.round((Date.now() - emitJob.startedAt) / 1000);
+        event.elapsedSeconds = emitJob.elapsedSeconds;
+        const stepEntry = emitJob.steps.find((s) => s.key === stepKey);
         if (stepEntry) {
             stepEntry.status = status;
             stepEntry.message = payload.message || '';

@@ -1713,10 +1713,9 @@ export default {
       if (!contract.id || forceSaveInFlight.value) return false;
       forceSaveInFlight.value = true;
       try {
-        // WPS WebOffice 使用 SDK save() 方法
-        if (wpsEditorRef.value && typeof wpsEditorRef.value.save === 'function') {
-          await wpsEditorRef.value.save();
-        }
+        // WPS WebOffice v2 通过三阶段回调（prepare→address→complete）自动保存
+        // 不主动调用 wpsInstance.save()，避免触发额外的"保存中"状态
+        // 只调用后端 force-save API 确保数据库合同信息同步
         await api.forceSaveContract(contract.id, {
           documentKey: contract.editorConfig?.fileId,
         });
@@ -1724,7 +1723,7 @@ export default {
         if (!silent) ElMessage.success('已触发文档保存同步');
         return true;
       } catch (error) {
-        console.warn('[OnlyOffice] force-save failed', error.response?.data || error.message);
+        console.warn('[WPS] force-save failed', error.response?.data || error.message);
         if (!silent) ElMessage.warning(error.response?.data?.error || '触发文档保存同步失败');
         return false;
       } finally {
@@ -1733,14 +1732,9 @@ export default {
     };
 
     const scheduleForceSave = (delay = 1200) => {
+      // WPS WebOffice v2 自带自动保存，不再通过前端调度额外保存
+      // 保留此函数用于显式用户操作（返回、切换页面）时的保存
       if (!contract.id) return;
-      if (forceSaveDebounceTimer.value) {
-        clearTimeout(forceSaveDebounceTimer.value);
-      }
-      forceSaveDebounceTimer.value = setTimeout(() => {
-        forceSaveDebounceTimer.value = null;
-        forceSaveCurrentDocument(true);
-      }, delay);
     };
 
     const stopAutoForceSave = () => {
@@ -1755,12 +1749,10 @@ export default {
     };
 
     const startAutoForceSave = () => {
+      // WPS WebOffice v2 自带三阶段保存机制（prepare→address→complete）
+      // 前端不再主动触发保存，避免与 WPS 自身保存机制冲突导致"保存中"不消失
+      // 仅保留 stopAutoForceSave 在组件销毁时清理定时器
       stopAutoForceSave();
-      forceSaveTimer.value = setInterval(() => {
-        if (hasPendingEditorChanges.value) {
-          forceSaveCurrentDocument(true);
-        }
-      }, 30000);
     };
 
     const onDocumentStateChange = (event) => {
@@ -2597,24 +2589,26 @@ export default {
             }
             
             // Step 2: 使用 WPS JSAPI Comments 接口添加批注
-            // ActiveDocument.Comments.Add(CommentText, Range) 
+            // 注意: WPS WebOffice SDK v2 的 Comments.Add 接受 (Text, Range?) 参数
+            // Range 通过 postMessage 代理返回，直接传代理 Range 对象会导致序列化失败。
+            // Find.Execute 已选中目标文本，不传 Range 参数即可锁定到当前选区。
             const doc = app.ActiveDocument;
             if (!doc || !doc.Comments || typeof doc.Comments.Add !== 'function') {
                 ElMessage.info('当前 WPS 版本不支持批注添加功能。');
                 return;
             }
             
-            // 使用 Comments.Add 直接在选中区域添加批注
+            // 使用 Comments.Add 直接在当前选区添加批注（Find.Execute 已选中目标文本）
             const commentText = comment || 'AI 审查建议';
-            await doc.Comments.Add(commentText, range);
+            await doc.Comments.Add(commentText);
             ElMessage.success('已在文档中选中位置添加批注。');
         } catch (error) {
             console.warn('[WPS Connector] addDocComment error:', error);
-            // Fallback: 采用传统方法
+            // Fallback: 使用 Selection 方式批注
             try {
                 const doc = (await getWpsApplication())?.ActiveDocument;
                 if (doc?.Comments?.Add) {
-                    await doc.Comments.Add(comment || 'AI 审查建议', doc.Selection?.Range);
+                    await doc.Comments.Add(comment || 'AI 审查建议');
                     ElMessage.success('已在当前光标位置添加批注。');
                     return;
                 }

@@ -238,7 +238,8 @@ router.put('/v3/3rd/files/:file_id/upload/raw', async (req, res) => {
       updated_at: db.fn.now(),
     });
 
-    res.status(200).end();
+    // WPS v3 协议要求返回 JSON { code: 0 }，否则 WPS 一直显示"保存中"
+    res.json(ok({ saved: true, file_id: fileId }));
   } catch (error) {
     console.error('[WPS-CALLBACK] Raw upload error:', error);
     res.status(500).json(fail(error.message));
