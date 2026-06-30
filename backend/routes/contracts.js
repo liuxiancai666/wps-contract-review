@@ -177,29 +177,43 @@ const updateAnalysisJob = (contractId, updates) => {
 const emitAnalysisProgress = async (reqOrIo, contractId, payload) => {
     const stepKey = payload.step;
     const status = payload.status;
-    const { percent, stepIndex, totalSteps } = getStepProgress(stepKey, status);
+    const { percent: stepPercent, stepIndex, totalSteps } = getStepProgress(stepKey, status);
+
+    // 如果 payload 中有自定义 percent，使用它（用于 llm_review 的逐批进度更新）
+    // 否则使用 stepPercent（基于步骤权重的固定估算）
+    const effectivePercent = typeof payload.percent === 'number' ? payload.percent : stepPercent;
 
     const event = {
         contractId: Number(contractId),
         timestamp: new Date().toISOString(),
-        percent,
         stepIndex,
         totalSteps,
         stepLabel: ANALYSIS_STEPS.find((s) => s.key === stepKey)?.label || stepKey,
         elapsedSeconds: 0,
-        estimatedRemainingSeconds: Math.max(0, TOTAL_EST_SECONDS - Math.round((TOTAL_EST_SECONDS * percent) / 100)),
+        estimatedRemainingSeconds: Math.max(0, TOTAL_EST_SECONDS - Math.round((TOTAL_EST_SECONDS * effectivePercent) / 100)),
         ...payload,
+        // 确保 percent 始终使用 effectivePercent（payload 中的 percent 会被下面覆盖）
+        percent: effectivePercent,
     };
 
-    // 更新内存任务状态
-    const job = analysisJobs.get(Number(contractId));
-    if (job) {
-        job.percent = percent;
-        job.currentStep = stepKey;
-        job.status = status === 'failed' ? 'failed' : (percent >= 100 ? 'completed' : 'running');
-        job.elapsedSeconds = Math.round((Date.now() - job.startedAt) / 1000);
-        event.elapsedSeconds = job.elapsedSeconds;
-        const stepEntry = job.steps.find((s) => s.key === stepKey);
+    // 基于已耗时动态估算 ETA（替代固定 TOTAL_EST_SECONDS 计算的偏差值）
+    const emitJob = analysisJobs.get(Number(contractId));
+    const emitElapsed = emitJob ? Math.round((Date.now() - emitJob.startedAt) / 1000) : 0;
+    if (effectivePercent > 0 && effectivePercent < 100 && emitElapsed > 5) {
+        // 用已完成百分比推算总耗时，再算剩余
+        const dynamicTotal = emitElapsed / (effectivePercent / 100);
+        event.estimatedRemainingSeconds = Math.max(0, Math.round(dynamicTotal - emitElapsed));
+    }
+
+    // 更新内存任务状态 — 使用 effectivePercent 而非 stepPercent
+    // 否则轮询看到的 percent 永远是固定值，前端会卡住
+    if (emitJob) {
+        emitJob.percent = event.percent;
+        emitJob.currentStep = stepKey;
+        emitJob.status = status === 'failed' ? 'failed' : (event.percent >= 100 ? 'completed' : 'running');
+        emitJob.elapsedSeconds = Math.round((Date.now() - emitJob.startedAt) / 1000);
+        event.elapsedSeconds = emitJob.elapsedSeconds;
+        const stepEntry = emitJob.steps.find((s) => s.key === stepKey);
         if (stepEntry) {
             stepEntry.status = status;
             stepEntry.message = payload.message || '';
@@ -1503,6 +1517,78 @@ ${batchContent.slice(0, 3000)}
     return { dispute_points: allDisputePoints, missing_clauses: allMissingClauses, modification_suggestions: allModificationSuggestions, batch_count: totalBatches };
 };
 
+// 带进度回调的分组审查 — 顺序执行每个 batch，每完成一个就回调进度
+// 解决 llm_review 阶段长时间无进度推送导致前端 socket 超时回退问题
+const batchReviewSectionsWithProgress = async (batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLMFn, onProgress) => {
+    const knowledgeContext = relevantKnowledge.length > 0
+        ? relevantKnowledge.map((item, idx) => `[${idx + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n')
+        : '未检索到直接依据。';
+    const buildBatchPrompt = (batchContent, batchIdx, totalBatches) => `你是资深法务专家，请对以下合同章节（第 ${batchIdx + 1}/${totalBatches} 组）进行深度专项审查，并只输出 JSON。
+
+审查模板：${template.name}
+合同类型：${template.name}
+用户立场：${userPerspective}
+审查点：${reviewPoints.join('；')}
+审查目的：${corePurposes.join('；')}
+模板规则：${(template.prompt_rules || []).join('；')}
+
+法律依据（仅引用以下内容，不得虚构）：
+${knowledgeContext}
+
+待审查章节内容：
+---
+${batchContent.slice(0, 3000)}
+---
+
+硬性要求：
+- 必须识别所有类型的风险（违法条款/霸王条款/不公平条款/缺失条款/程序性违规），即使是常见条款也不能跳过。
+- 重点关注：单方解释权、无偿解除、强制加班、限制生育、押金扣押、单方变更权等典型霸王条款。
+- 如果该章节无任何风险，请在 dispute_points 中返回一个空数组 []。
+- modification_suggestions 必须包含 original_text（尽量逐字摘录原文完整句子）和 suggested_text（可直接替换的完整文本）。
+- 只输出 JSON，不输出 markdown 包裹。
+
+输出 JSON 结构：
+{
+  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
+  "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
+  "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}]
+}`;
+    const totalBatches = batches.length;
+    const allDisputePoints = [], allMissingClauses = [], allModificationSuggestions = [];
+    const seenClauseKeys = new Set();
+    const addIfNotDuplicate = (arr, item, keyField) => {
+        if (!item || typeof item !== 'object') return;
+        const key = (item[keyField] || '').replace(/\s+/g, '').slice(0, 30);
+        if (!key || seenClauseKeys.has(key)) return;
+        const dupKey = `${item.title || ''}_${key}`;
+        if (seenClauseKeys.has(dupKey)) return;
+        seenClauseKeys.add(dupKey); seenClauseKeys.add(key); arr.push(item);
+    };
+
+    // 顺序执行每个 batch，每完成一个回调进度（推送 socket 保持连接活跃）
+    for (let idx = 0; idx < batches.length; idx++) {
+        const batch = batches[idx];
+        let content = String(batch.content || batch.combinedContent || '');
+        const titleContext = batch.titles?.length ? `所属章节：${batch.titles.join('、')}\n\n` : '';
+        const prompt = buildBatchPrompt(content.length >= 50 ? titleContext + content : content, idx, totalBatches);
+        try {
+            const result = await callJsonLLMFn(prompt);
+            if (result) {
+                if (Array.isArray(result.dispute_points)) result.dispute_points.forEach(p => addIfNotDuplicate(allDisputePoints, p, 'original_clause'));
+                if (Array.isArray(result.missing_clauses)) result.missing_clauses.forEach(c => { if (c && typeof c === 'object') allMissingClauses.push(c); });
+                if (Array.isArray(result.modification_suggestions)) result.modification_suggestions.forEach(s => addIfNotDuplicate(allModificationSuggestions, s, 'original_text'));
+            }
+        } catch (e) {
+            console.warn(`[Progress Review] Batch ${idx + 1}/${totalBatches} failed:`, e.message);
+        }
+        // 每完成一个 batch 回调进度，保持 socket 活跃
+        if (typeof onProgress === 'function') {
+            try { onProgress(idx + 1, totalBatches); } catch {}
+        }
+    }
+    return { dispute_points: allDisputePoints, missing_clauses: allMissingClauses, modification_suggestions: allModificationSuggestions, batch_count: totalBatches };
+};
+
 // 轻量内存任务队列：大合同分析不阻塞主事件循环
 class AnalysisTaskQueue {
   constructor(concurrency = 2) {
@@ -1583,19 +1669,32 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
             return `${index + 1}. ${company.companyName}\n${evidence || '未检索到可用外部证据'}`;
         }).join('\n');
 
-        // Step 4: AI 生成审查结论
         // Step 4: AI 逐组并行审查（替代一次性全篇审查，解决上下文过载导致的漏检问题）
         await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', message: 'AI 正在分章节深度审查合同，请耐心等待...' });
 
         // 按章节/条款拆分合同正文为若干 batch，并行审查每个 batch
         const batches = splitContractIntoSections(plainText);
-        const batchResult = await batchReviewSections(batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLM);
+        const reviewResults = await batchReviewSectionsWithProgress(
+            batches, template, userPerspective, relevantKnowledge,
+            reviewPoints, corePurposes, callJsonLLM,
+            // 每完成一组 batch 推送一次进度，防止 socket 超时导致前端子65%回退
+            (completed, total) => {
+                const pct = Math.round((completed / total) * 100);
+                // 百分比映射到 llm_review 阶段（占50%权重，在35%~85%之间）
+                const overallPct = 35 + Math.round(pct * 0.5);
+                emitAnalysisProgress(null, contractId, {
+                    step: 'llm_review', status: 'running',
+                    message: `AI 正在分章节深度审查合同（已完成 ${completed}/${total} 组）...`,
+                    percent: overallPct,
+                }).catch(() => {});
+            }
+        );
 
         // 构造 analysisResult（合并 batch 结果 + 公司主体审查 + 整体摘要）
         const analysisResult = {
-            ...normalizeAnalysisResult({ dispute_points: batchResult.dispute_points }),
-            missing_clauses: batchResult.missing_clauses || [],
-            modification_suggestions: batchResult.modification_suggestions || [],
+            ...normalizeAnalysisResult({ dispute_points: reviewResults.dispute_points }),
+            missing_clauses: reviewResults.missing_clauses || [],
+            modification_suggestions: reviewResults.modification_suggestions || [],
             breach_cost_analysis: [],
         };
 

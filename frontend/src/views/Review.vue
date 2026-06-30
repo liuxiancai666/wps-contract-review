@@ -1173,8 +1173,11 @@ export default {
         });
 
         socket.value.on('disconnect', () => {
-            // 断线时启动轮询恢复
-            if (analysisActive.value) startStatusPolling();
+            // 断线时启动轮询恢复，保持进度更新
+            // 注意：不重置任何状态，只追加轮询作为兜底
+            if (analysisActive.value || reAnalyzing.value) {
+                startStatusPolling();
+            }
         });
     };
 
