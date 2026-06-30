@@ -59,9 +59,18 @@ function searchPos(displayText, searchText) {
   return -1;
 }
 
-function insertReviewComments(docxPath, suggestions, outputPath) {
+/**
+ * 在 DOCX 文件中插入批注 — 支持风险点/缺失条款/修改建议三种类型
+ *
+ * 每条批注需含:
+ *   title        — 标题
+ *   original_text — 在文档中查找定位的原文（缺失条款传空）
+ *   body         — 批注正文（含类型标签）
+ *   type         — 'risk' | 'missing' | 'suggestion'
+ */
+function insertReviewComments(docxPath, annotations, outputPath) {
   if (!fs.existsSync(docxPath)) throw new Error(`File not found: ${docxPath}`);
-  if (!suggestions || !suggestions.length) return 0;
+  if (!annotations || !annotations.length) return 0;
 
   const zip = new AdmZip(docxPath);
   const docXml = zip.getEntry('word/document.xml').getData().toString('utf8');
@@ -77,13 +86,19 @@ function insertReviewComments(docxPath, suggestions, outputPath) {
 
   const ins = [];
 
-  for (const s of suggestions) {
-    if (!s.original_text) continue;
-    const pos = searchPos(displayText, s.original_text);
-    if (pos === -1) {
-      // 回退：在文档开头插入
+  for (const a of annotations) {
+    if (!a.original_text) {
+      // 无原文定位 → 回退插入（文档开头）
       ins.push({ cid: cid++, fallback: true,
-        commentBody: `【AI审查】${s.title||'修改建议'}\n建议：${s.suggested_text||''}\n理由：${s.reason||''}`,
+        commentBody: a.body,
+        author: 'AI审查', date: new Date().toISOString().replace(/T/,' ').replace(/\..+/,'') });
+      continue;
+    }
+    const pos = searchPos(displayText, a.original_text);
+    if (pos === -1) {
+      // 未找到原文 → 回退
+      ins.push({ cid: cid++, fallback: true,
+        commentBody: a.body,
         author: 'AI审查', date: new Date().toISOString().replace(/T/,' ').replace(/\..+/,'') });
       continue;
     }
@@ -92,13 +107,14 @@ function insertReviewComments(docxPath, suggestions, outputPath) {
       if (acc + runs[i].text.length > pos) { ri = i; off = pos - acc; break; }
       acc += runs[i].text.length;
     }
-    if (ri === -1) { /* 回退插入 */ ins.push({ cid: cid++, fallback: true,
-      commentBody: `【AI审查】${s.title||'修改建议'}\n建议：${s.suggested_text||''}\n理由：${s.reason||''}`,
-      author: 'AI审查', date: new Date().toISOString().replace(/T/,' ').replace(/\..+/,'') });
+    if (ri === -1) {
+      ins.push({ cid: cid++, fallback: true,
+        commentBody: a.body,
+        author: 'AI审查', date: new Date().toISOString().replace(/T/,' ').replace(/\..+/,'') });
       continue;
     }
     ins.push({ cid: cid++, runIdx: ri, runOffset: off,
-      commentBody: `【AI审查】${s.title||'修改建议'}\n建议：${s.suggested_text||''}\n理由：${s.reason||''}`,
+      commentBody: a.body,
       author: 'AI审查', date: new Date().toISOString().replace(/T/,' ').replace(/\..+/,'') });
   }
 

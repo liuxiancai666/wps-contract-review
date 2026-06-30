@@ -390,15 +390,45 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
         updateAnalysisJob(contractId, { status: 'completed', result: analysisResult, percent: 100 });
         await emitAnalysisProgress(null, contractId, { step: 'finalize', status: 'completed', message: '审查结果已保存。', partialResult: analysisResult });
 
-        // Step 7: 自动将修改建议以批注形式写入 DOCX 文件（不改变 finalize 状态以避免进度回退）
+        // Step 7: 将识别出的所有风险以批注形式写入 DOCX 文件（不改变 finalize 状态以避免进度回退）
         const suggestions = analysisResult.modification_suggestions || [];
+        const riskPoints = analysisResult.dispute_points || [];
+        const missingClauses = analysisResult.missing_clauses || [];
         let newEditorConfig = null;
-        if (suggestions.length > 0 && !String(contract.original_filename || '').toLowerCase().endsWith('.pdf')) {
-            await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'running', message: `正在将 ${suggestions.length} 条审查建议以批注形式写入合同文件...` });
+
+        // 组装全部批注：修改建议 + 风险点 + 缺失条款
+        const allAnnotations = [];
+
+        // (a) 修改建议 → 定位到原文
+        for (const s of suggestions) {
+            allAnnotations.push({
+                original_text: s.original_text,
+                body: `【AI审查—修改建议】${s.title || '修改建议'}\n建议：${s.suggested_text || ''}\n理由：${s.reason || ''}`,
+            });
+        }
+
+        // (b) 风险点 → 定位到原文（original_clause）
+        for (const r of riskPoints) {
+            allAnnotations.push({
+                original_text: r.original_clause || '',
+                body: `【AI审查—风险】${r.title || '风险'}\n严重程度：${r.severity || '未标明'}\n说明：${r.dispute_rationale || ''}\n法律依据：${r.legal_reference || ''}\n通俗说法：${r.plain_language || ''}`,
+            });
+        }
+
+        // (c) 缺失条款 → 无原文可定位，放在文档最前
+        for (const m of missingClauses) {
+            allAnnotations.push({
+                original_text: '', // 无原文
+                body: `【AI审查—缺失条款】${m.title || '缺失条款'}\n说明：${m.description || ''}\n建议补充：${m.suggested_clause || ''}`,
+            });
+        }
+
+        if (allAnnotations.length > 0 && !String(contract.original_filename || '').toLowerCase().endsWith('.pdf')) {
+            await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'running', message: `正在将 ${allAnnotations.length} 条审查结果以批注形式写入合同文件...（修改建议 ${suggestions.length} 条，风险 ${riskPoints.length} 条，缺失条款 ${missingClauses.length} 条）` });
             try {
-                const count = insertReviewComments(contract.storage_path, suggestions);
+                const count = insertReviewComments(contract.storage_path, allAnnotations);
                 if (count > 0) {
-                    console.log(`[ANNOTATE] Inserted ${count}/${suggestions.length} comments into ${contract.storage_path}`);
+                    console.log(`[ANNOTATE] Inserted ${count}/${allAnnotations.length} comments into ${contract.storage_path}`);
                     // 生成新 document_key 强制 WPS 重新加载（文件内容已变）
                     const newDocKey = uuidv4();
                     await db('contracts').where({ id: contractId }).update({ document_key: newDocKey });
