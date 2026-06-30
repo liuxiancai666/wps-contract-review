@@ -984,6 +984,23 @@ export default {
     const analysisSteps = ref([]);
     const statusPollTimer = ref(null);
     const analysisActive = ref(false);
+    const elapsedTimer = ref(null); // 本地实时计时器
+
+    // 启动本地实时计时器（秒级更新）
+    const startElapsedTimer = () => {
+      stopElapsedTimer();
+      elapsedTimer.value = setInterval(() => {
+        if (analysisActive.value) {
+          analysisElapsed.value += 1;
+        }
+      }, 1000);
+    };
+    const stopElapsedTimer = () => {
+      if (elapsedTimer.value) {
+        clearInterval(elapsedTimer.value);
+        elapsedTimer.value = null;
+      }
+    };
 
     const formatDuration = (seconds) => {
       if (!seconds || seconds < 0) return '0秒';
@@ -1109,6 +1126,7 @@ export default {
             analysisPercent.value = 100;
             reAnalyzing.value = false;
             stopStatusPolling();
+            stopElapsedTimer();
             ElMessage.success({
                 message: `审查完成（立场：${data.perspective || '未指定'}）。`,
                 duration: 3000
@@ -1147,6 +1165,7 @@ export default {
             loading.value = false;
             reAnalyzing.value = false;
             stopStatusPolling();
+            stopElapsedTimer();
             ElMessage.error(data?.error || '分析失败，请稍后重试');
         });
 
@@ -1611,6 +1630,7 @@ export default {
                     reAnalyzing.value = false;
                     activeStep.value = 2;
                     stopStatusPolling();
+                    stopElapsedTimer();
                     ElMessage.success('审查完成。');
                     loadRiskScore();
                     loadAnnotations();
@@ -1619,6 +1639,7 @@ export default {
                     loading.value = false;
                     reAnalyzing.value = false;
                     stopStatusPolling();
+                    stopElapsedTimer();
                     ElMessage.error(data.error || '分析失败，请稍后重试');
                 }
             } catch (err) {
@@ -1647,6 +1668,7 @@ export default {
         analysisProgress.value = [];
         analysisSteps.value = [];
         loadingMessage.value = 'AI 正在深度审查合同，请通过下方进度追踪实时查看状态...';
+        startElapsedTimer(); // 启动本地实时计时
         try {
             const analysisPayload = {
                 contractId: contract.id,
@@ -1771,6 +1793,7 @@ export default {
       analysisProgress.value = [];
       analysisSteps.value = [];
       loadingMessage.value = '正在重新审查合同，请通过进度追踪查看状态...';
+      startElapsedTimer(); // 启动本地实时计时
       try {
         const analysisPayload = {
           contractId: contract.id,
@@ -2072,6 +2095,7 @@ export default {
         stopAutoForceSave();
         forceSaveCurrentDocument(true);
         stopStatusPolling();
+        stopElapsedTimer();
         if (socket.value) socket.value.disconnect();
     });
 
