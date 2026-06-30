@@ -7,12 +7,16 @@ const { v4: uuidv4 } = require('uuid');
 
 const WPS_APP_ID = process.env.WPS_APP_ID || '';
 const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET || 'change-me';
-
 /**
  * 生成 WPS WebOffice 前端 SDK init 配置
- * @param {Object} contractRecord - 合同记录
- * @param {string} ext - 文件扩展名
- * @returns {Object} WPS SDK init 配置
+ * 
+ * WPS WebOffice SDK v2.0.7 初始化参数说明：
+ * - appId: 应用ID（WPS控制台获取）
+ * - fileId: 文档唯一标识（SDK通过此ID + appId 向WPS云服务请求回调）
+ * - officeType: 文档类型（w=文字, s=表格, p=演示, f=PDF）
+ * - token: 自定义令牌，WPS会通过 X-Weboffice-Token 回传给回调服务器
+ * - 注意：不支持 url 参数！WPS云服务根据 appId 自动路由到控制台配置的回调地址
+ * - 回调地址必须在 WPS 控制台（https://solution.wps.cn）中配置
  */
 const buildWpsEditorConfig = (contractRecord, ext = 'docx') => {
   const isPdf = ext === 'pdf';
