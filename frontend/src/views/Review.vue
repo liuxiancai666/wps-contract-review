@@ -249,6 +249,7 @@
                 </button>
             </div>
             <WpsEditor
+                ref="wpsEditorRef"
                 v-if="contract.editorConfig"
                 :config="contract.editorConfig"
                 @onDocumentReady="onDocumentReady"
@@ -2222,44 +2223,50 @@ export default {
             ElMessage.info('AI 未返回可定位的原文，请在文档中手动核对该建议。');
             return;
         }
-        if (!ensureEditorReady()) return;
         try {
             const app = await getWpsApplication();
             if (!app) {
-                ElMessage.info('WPS 编辑器 JSAPI 尚未就绪，请在文档加载完成后重试。');
+                // 尝试等待 Application 就绪（最长5秒）
+                for (let i = 0; i < 5; i++) {
+                    await new Promise(r => setTimeout(r, 1000));
+                    const retry = await getWpsApplication();
+                    if (retry) { return await doLocateText(text, retry); }
+                }
+                ElMessage.info('WPS 文档尚未完全加载，请稍候再试。（左侧文档加载完成后可正常使用定位功能）');
                 return;
             }
-            // WPS JSAPI: 使用 Selection.Find 查找并定位文本
-            const selection = app.ActiveDocument?.Selection;
-            if (!selection?.Find) {
-                ElMessage.info('当前 WPS 版本不支持文档内定位功能。');
-                return;
-            }
-            const found = await selection.Find.Execute({ Text: text });
-            if (found) {
-                // 选中并滚动到可见位置
-                if (typeof selection.ScrollIntoView === 'function') {
-                    await selection.ScrollIntoView();
-                }
-                ElMessage.success(`已定位到原文位置。`);
-            } else {
-                // 尝试逐句定位
-                const sentences = text.split(/[。；;.!?]+/).filter(s => s.trim().length >= 6);
-                for (const sentence of sentences) {
-                    const foundSentence = await selection.Find.Execute({ Text: sentence.trim() });
-                    if (foundSentence) {
-                        if (typeof selection.ScrollIntoView === 'function') {
-                            await selection.ScrollIntoView();
-                        }
-                        ElMessage.success(`已定位到附近原文。`);
-                        return;
-                    }
-                }
-                ElMessage.info('未在文档中找到完全匹配的原文，请在文档中手动定位。');
-            }
+            await doLocateText(text, app);
         } catch (error) {
-            console.warn('[locateText] WPS JSAPI error:', error);
+            console.warn('[locateText] error:', error);
             ElMessage.info('文档定位暂时不可用，请手动在左侧文档中查找。');
+        }
+    };
+
+    const doLocateText = async (text, app) => {
+        const selection = app.ActiveDocument?.Selection;
+        if (!selection?.Find) {
+            ElMessage.info('当前 WPS 版本不支持文档内定位功能。');
+            return;
+        }
+        const found = await selection.Find.Execute({ Text: text });
+        if (found) {
+            if (typeof selection.ScrollIntoView === 'function') {
+                await selection.ScrollIntoView();
+            }
+            ElMessage.success(`已定位到原文位置。`);
+        } else {
+            const sentences = text.split(/[。；;.!?]+/).filter(s => s.trim().length >= 6);
+            for (const sentence of sentences) {
+                const foundSentence = await selection.Find.Execute({ Text: sentence.trim() });
+                if (foundSentence) {
+                    if (typeof selection.ScrollIntoView === 'function') {
+                        await selection.ScrollIntoView();
+                    }
+                    ElMessage.success(`已定位到附近原文。`);
+                    return;
+                }
+            }
+            ElMessage.info('未在文档中找到完全匹配的原文，请在文档中手动定位。');
         }
     };
 
@@ -2806,7 +2813,8 @@ export default {
       diffLoading,
       loadLatestDiff,
       exportReport,
-      downloadPdfAnnotations
+      downloadPdfAnnotations,
+      wpsEditorRef
     };
   }
 };
