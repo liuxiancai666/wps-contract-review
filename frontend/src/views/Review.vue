@@ -2756,6 +2756,20 @@ export default {
 
     const exportAnnotatedDocx = async () => {
         try {
+            ElMessage.info('正在触发保存以确保批注已写入文档...');
+            // Step 1: 通过 WPS SDK 触发保存（将 JSAPI 添加的批注同步到后端文件）
+            if (wpsEditorRef.value && isEditorReady.value) {
+                // WPS SDK save() 触发三阶段保存回调（prepare→address→raw upload→complete）
+                const editor = wpsEditorRef.value;
+                if (typeof editor.save === 'function') {
+                    try { await editor.save(); } catch {}
+                } else {
+                    await api.forceSaveContract(contract.id, {});
+                }
+            }
+            // Step 2: 等待 WPS 三阶段保存回调完成
+            await new Promise(r => setTimeout(r, 2000));
+            // Step 3: 从后端下载带批注的最新文件
             const response = await api.exportAnnotatedDocx(contract.id);
             const filename = response.headers['content-disposition']
                 ? decodeURIComponent(response.headers['content-disposition'].split('filename=')[1]?.replace(/"/g, '') || '批注版.docx')
