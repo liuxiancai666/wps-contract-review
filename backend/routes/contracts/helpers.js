@@ -212,10 +212,12 @@ const emitAnalysisProgress = async (reqOrIo, contractId, payload) => {
 
     // 更新内存任务状态
     if (emitJob) {
-        emitJob.percent = percent;
+        // 永不回退进度 — 防止 batch 各阶段发射时间差导致的回退
+        if (percent > emitJob.percent || emitJob.percent === 0) emitJob.percent = percent;
         emitJob.currentStep = stepKey;
-        emitJob.status = status === 'failed' ? 'failed' : (percent >= 100 ? 'completed' : 'running');
+        emitJob.status = status === 'failed' ? 'failed' : (emitJob.percent >= 100 ? 'completed' : 'running');
         emitJob.elapsedSeconds = Math.round((Date.now() - emitJob.startedAt) / 1000);
+        event.percent = emitJob.percent;
         event.elapsedSeconds = emitJob.elapsedSeconds;
         const stepEntry = emitJob.steps.find((s) => s.key === stepKey);
         if (stepEntry) {

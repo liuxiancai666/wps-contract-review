@@ -226,9 +226,21 @@ ${batchContent.slice(0, 3000)}
 
     // 顺序执行每个 batch，每完成一组推送进度（替代 Promise.all 全并行，解决 llm_review 阶段 60-120 秒无进度问题）
     const batchResults = [];
+    // 动态计算当前步骤的进度起止范围（与 ANALYSIS_STEPS 权重对齐）
+    const STEP_WEIGHTS = [
+        { key: 'extract_text', w: 5 },
+        { key: 'knowledge_search', w: 20 },
+        { key: 'company_search', w: 15 },
+        { key: 'llm_review', w: 50 },
+        { key: 'seal_analysis', w: 7 },
+        { key: 'finalize', w: 3 },
+    ];
+    const cumBeforeLlm = STEP_WEIGHTS.filter(s => s.key !== 'llm_review' && ['extract_text','knowledge_search','company_search'].includes(s.key))
+        .reduce((sum, s) => sum + s.w, 0);
+    const llmW = 50;
     for (let idx = 0; idx < totalBatches; idx++) {
-        // 推送进度：35% → 递增到 85%
-        const lPct = Math.round(35 + (idx / totalBatches) * 50);
+        // 推送进度：cumBeforeLlm → cumBeforeLlm + llmW
+        const lPct = Math.round(cumBeforeLlm + (idx / totalBatches) * llmW);
         if (emitProgress) {
             await emitProgress(null, cid || 0, {
                 step: 'llm_review',
@@ -332,9 +344,7 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
         }).join('\n');
 
         // Step 4: AI 逐组并行审查（替代一次性全篇审查，解决上下文过载导致的漏检问题）
-        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', message: 'AI 正在分章节深度审查合同，请耐心等待...' });
-
-        // 按章节/条款拆分合同正文为若干 batch，并行审查每个 batch
+        // 分章节/条款拆批，batchReviewSections内部管理进度：40% → 90%
         const batches = splitContractIntoSections(plainText);
         const batchResult = await batchReviewSections(batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLM, emitAnalysisProgress, contractId);
 
