@@ -1479,9 +1479,9 @@ ${batchContent.slice(0, 3000)}
 }`;
     const totalBatches = batches.length;
     const prompts = batches.map((batch, idx) => {
-      const content = batch.content || batch.combinedContent || '';
+      const content = String(batch.content || batch.combinedContent || '');
       const titleContext = batch.titles?.length ? `所属章节：${batch.titles.join('、')}\n\n` : '';
-      return buildBatchPrompt(titleContext + content, idx, totalBatches);
+      return buildBatchPrompt(content.length >= 50 ? titleContext + content : content, idx, totalBatches);
     });
     const batchResults = await parallelLimit(prompts.map(p => () => callJsonLLMFn(p)));
     const allDisputePoints = [], allMissingClauses = [], allModificationSuggestions = [];
