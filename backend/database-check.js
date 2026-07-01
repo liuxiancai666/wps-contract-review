@@ -61,6 +61,8 @@ async function resetAndRebuildDatabase() {
     await ensureColumn('contracts', 'analysis_status', (table) => table.string('analysis_status'));
     await ensureColumn('contracts', 'group_id', (table) => table.integer('group_id').unsigned());
     await ensureColumn('contracts', 'edit_enabled', (table) => table.boolean('edit_enabled').defaultTo(true));
+    // 确保默认值始终为 true（ensureColumn 只在列不存在时生效，列已存在时需单独修改默认值）
+    await db.raw("ALTER TABLE contracts ALTER COLUMN edit_enabled SET DEFAULT true").catch(() => {});
 
     const hasContractVersionsTable = await db.schema.hasTable('contract_versions');
     if (!hasContractVersionsTable) {
