@@ -445,6 +445,31 @@
                                             @add-comment="handleAddAnnotation"
                                             @refresh="commentingItemKey = null"
                                         />
+                                        <!-- 书签按钮组（dispute_points 新版审查有书签，存量合同降级为文本定位） -->
+                                        <el-tooltip content="定位原文（书签）" placement="top">
+                                            <button
+                                                @click="gotoDisputeBookmark(item, index)"
+                                                :class="['p-1 transition-colors', item.titleBookmark ? 'text-blue-500 hover:text-blue-700' : 'text-gray-400 hover:text-blue-500']"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                                            </button>
+                                        </el-tooltip>
+                                        <el-tooltip content="原位批注（书签）" placement="top">
+                                            <button
+                                                @click="addReviewCommentByDisputeBookmark(item, index)"
+                                                :class="['p-1 transition-colors', item.editBookmark ? 'text-purple-500 hover:text-purple-700' : 'text-gray-400 hover:text-purple-500']"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+                                            </button>
+                                        </el-tooltip>
+                                        <el-tooltip content="一键调整（书签）" placement="top">
+                                            <button
+                                                @click="adjustReplaceByDisputeBookmark(item, index)"
+                                                :class="['p-1 transition-colors', item.editBookmark ? 'text-green-500 hover:text-green-700' : 'text-gray-400 hover:text-green-500']"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                                            </button>
+                                        </el-tooltip>
                                         <span v-if="item.severity" :class="severityClass(item.severity)" class="px-2 py-0.5 text-xs font-bold rounded border whitespace-nowrap">{{ severityLabel(item.severity) }}</span>
                                     </div>
                                 </div>
@@ -2581,6 +2606,96 @@ export default {
         }
     };
 
+    // ========== 风险总览（dispute_points）书签定位 ==========
+    // 书签存在时直接导航；不存在时按需创建书签（存量合同场景）
+    const gotoDisputeBookmark = async (item, index) => {
+        const app = await getWpsApplication();
+        if (!app) { ElMessage.info('WPS 文档尚未加载，请稍候'); return; }
+        if (item.titleBookmark) {
+            try {
+                await wpsEditorRef.value?.gotoBookmark(item.titleBookmark);
+            } catch (e) {
+                console.warn('[gotoDisputeBookmark] bookmark failed, recreate:', e);
+                await createAndGotoDisputeBookmark(item, index, app);
+            }
+        } else {
+            await createAndGotoDisputeBookmark(item, index, app);
+        }
+    };
+
+    // 按需为 dispute_point 创建书签并导航
+    const createAndGotoDisputeBookmark = async (item, index, app) => {
+        // 优先用 original_clause（原文片段），其次用 title 摘要
+        const searchText = item.original_clause || item.title;
+        if (!searchText) { ElMessage.info('无法定位：缺少原文文本'); return; }
+        // 复用 batchCreateRiskBookmarks 逻辑（传单项数组）
+        const wps = wpsEditorRef.value;
+        if (!wps) { await locateText(searchText, 'dispute_point', index); return; }
+        try {
+            const itemId = `dp_${contract.id}_${index}_${Date.now()}`;
+            const tempItem = { ...item, id: itemId, original_text: searchText };
+            await wps.batchCreateRiskBookmarks([tempItem], app);
+            item.titleBookmark = tempItem.titleBookmark;
+            item.editBookmark = tempItem.editBookmark;
+            await wps.gotoBookmark(tempItem.titleBookmark);
+        } catch (e) {
+            console.warn('[createAndGotoDisputeBookmark] failed, fallback to text:', e);
+            await locateText(searchText, 'dispute_point', index);
+        }
+    };
+
+    const addReviewCommentByDisputeBookmark = async (item, index) => {
+        const app = await getWpsApplication();
+        if (!app) { ElMessage.info('WPS 文档尚未加载'); return; }
+        if (!item.editBookmark) {
+            // 按需创建 editBookmark
+            await createDisputeEditBookmark(item, index, app);
+        }
+        if (item.editBookmark) {
+            await wpsEditorRef.value?.addReviewCommentByBookmarkWps(
+                item.editBookmark,
+                { action: item.action || 'warn', target_text: item.original_clause, actionText: '风险说明', new_text: item.risk_suggestion || '' },
+                item.id || index
+            );
+        } else {
+            ElMessage.info('书签创建失败，请稍候再试');
+        }
+    };
+
+    const adjustReplaceByDisputeBookmark = async (item, index) => {
+        const app = await getWpsApplication();
+        if (!app) { ElMessage.info('WPS 文档尚未加载'); return; }
+        if (!item.editBookmark) {
+            await createDisputeEditBookmark(item, index, app);
+        }
+        if (item.editBookmark) {
+            await wpsEditorRef.value?.adjustReplaceByBookmarkWps(
+                item.editBookmark,
+                { action: 'warn', target_text: item.original_clause, new_text: item.risk_suggestion || '' },
+                item.id || index
+            );
+        } else {
+            ElMessage.info('书签创建失败，请稍候再试');
+        }
+    };
+
+    // 为 dispute_point 按需创建 editBookmark
+    const createDisputeEditBookmark = async (item, index, app) => {
+        const searchText = item.original_clause || item.title;
+        if (!searchText) return;
+        const wps = wpsEditorRef.value;
+        if (!wps) return;
+        try {
+            const itemId = `dp_${contract.id}_${index}_${Date.now()}`;
+            const tempItem = { ...item, id: itemId, original_text: searchText };
+            await wps.batchCreateRiskBookmarks([tempItem], app);
+            item.titleBookmark = tempItem.titleBookmark;
+            item.editBookmark = tempItem.editBookmark;
+        } catch (e) {
+            console.warn('[createDisputeEditBookmark] failed:', e);
+        }
+    };
+
     const doLocateText = async (text, itemType, itemIndex, app) => {
         const doc = app.ActiveDocument;
         const selection = doc?.Selection;
@@ -3492,6 +3607,9 @@ export default {
       applyFocusedSuggestion,
       locateText,
       addDocComment,
+      gotoDisputeBookmark,
+      addReviewCommentByDisputeBookmark,
+      adjustReplaceByDisputeBookmark,
       adoptSuggestion,
       acceptAllRevisions,
       rejectAllRevisions,
