@@ -1839,7 +1839,33 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
             await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'running', message: `正在将 ${allAnnotations.length} 条审查结果以批注形式写入合同文件...（修改建议 ${suggestions.length} 条，风险 ${riskPoints.length} 条，缺失条款 ${missingClauses.length} 条）` });
             try {
                 const { insertReviewComments } = require('../services/docxAnnotator');
-                const count = insertReviewComments(contract.storage_path, allAnnotations);
+                // ── 通用修复：先备份原始文件，再将批注写入审查版本 ──
+                // 原始文件永久保留在 versions/<id>-original.<ext>
+                // 审查版本写入 versions/<id>-reviewed.<ext>，再复制回 storage_path
+                const ext = storageExt || '.docx';
+                const versionsDir = path.join(__dirname, '..', 'uploads', 'versions');
+                if (!fs.existsSync(versionsDir)) fs.mkdirSync(versionsDir, { recursive: true });
+                const originalBackup = path.join(versionsDir, `${contractId}-original${ext}`);
+                const reviewedFile = path.join(versionsDir, `${contractId}-reviewed${ext}`);
+                // 仅当原始备份不存在时才备份（避免重复覆盖）
+                if (!fs.existsSync(originalBackup) && fs.existsSync(contract.storage_path)) {
+                    fs.copyFileSync(contract.storage_path, originalBackup);
+                    console.log(`[ANNOTATE] Backup original → ${originalBackup}`);
+                }
+                // 将批注写入审查版本文件（不直接修改原始文件）
+                let count = 0;
+                if (fs.existsSync(originalBackup)) {
+                    // 用原始文件生成审查版本
+                    fs.copyFileSync(originalBackup, reviewedFile);
+                    count = insertReviewComments(reviewedFile, allAnnotations);
+                    // 审查版本复制回 storage_path（WPS 显示审查后的文档）
+                    fs.copyFileSync(reviewedFile, contract.storage_path);
+                    console.log(`[ANNOTATE] Reviewed version written → ${contract.storage_path}`);
+                } else {
+                    // 兜底：直接写入 storage_path（旧行为兼容）
+                    count = insertReviewComments(contract.storage_path, allAnnotations);
+                    console.log(`[ANNOTATE] No original backup found, wrote directly to storage_path`);
+                }
                 if (count > 0) {
                     console.log(`[ANNOTATE] Inserted ${count}/${allAnnotations.length} comments into ${contract.storage_path}`);
                     const newDocKey = uuidv4();
@@ -2089,6 +2115,14 @@ router.post('/:id/replace-text', async (req, res) => {
         }
 
         const version = await createContractVersionSnapshot(contract, 'replace-text');
+        // ── 替换前确保有原始文件备份（避免直接覆盖原始文件）──
+        const versionsDir = path.join(__dirname, '..', 'uploads', 'versions');
+        const ext2 = path.extname(contract.storage_path).toLowerCase() || '.docx';
+        const originalBackup = path.join(versionsDir, `${contract.id}-original${ext2}`);
+        if (!fs.existsSync(originalBackup) && fs.existsSync(contract.storage_path)) {
+            fs.copyFileSync(contract.storage_path, originalBackup);
+            console.log(`[REPLACE] Backup original → ${originalBackup}`);
+        }
         const replacements = replaceTextInDocx(contract.storage_path, originalText, suggestedText, originalCandidates);
         const nextKey = uuidv4();
         await db('contracts').where({ id: contract.id }).update({
@@ -2131,6 +2165,14 @@ router.post('/:id/batch-replace-text', async (req, res) => {
         }
 
         const version = await createContractVersionSnapshot(contract, 'batch-replace-text');
+        // ── 批量替换前确保有原始文件备份 ──
+        const versionsDir2 = path.join(__dirname, '..', 'uploads', 'versions');
+        const ext3 = path.extname(contract.storage_path).toLowerCase() || '.docx';
+        const originalBackup2 = path.join(versionsDir2, `${contract.id}-original${ext3}`);
+        if (!fs.existsSync(originalBackup2) && fs.existsSync(contract.storage_path)) {
+            fs.copyFileSync(contract.storage_path, originalBackup2);
+            console.log(`[BATCH-REPLACE] Backup original → ${originalBackup2}`);
+        }
         const results = [];
         let totalReplacements = 0;
         let succeededCount = 0;

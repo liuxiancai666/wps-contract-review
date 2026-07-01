@@ -78,6 +78,62 @@ const findContract = async (fileId) => {
   return db('contracts').where({ id: Number(numericId) }).first();
 };
 
+// ── storage_path 文件完整性检查 & 自动修复 ──
+// 当 storage_path 文件缺失或异常小时，从 versions/ 目录或 contract_versions 表恢复
+const ensureStoragePathIntegrity = async (contract) => {
+  if (!contract || !contract.storage_path) return;
+  const MIN_FILE_SIZE = 5 * 1024; // 5KB以下认为是异常文件
+  const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
+  const VERSIONS_DIR = path.join(UPLOADS_DIR, 'versions');
+  const ext = path.extname(contract.storage_path).toLowerCase() || '.docx';
+
+  try {
+    const stat = fs.statSync(contract.storage_path);
+    if (stat.size >= MIN_FILE_SIZE) return; // 文件正常，无需修复
+    console.warn(`[INTEGRITY] storage_path file too small (${stat.size} bytes), attempting repair for contract ${contract.id}`);
+  } catch {
+    console.warn(`[INTEGRITY] storage_path file missing for contract ${contract.id}, attempting repair`);
+  }
+
+  // 尝试1：从 versions/<id>-original.<ext> 恢复
+  const originalBackup = path.join(VERSIONS_DIR, `${contract.id}-original${ext}`);
+  if (fs.existsSync(originalBackup)) {
+    fs.copyFileSync(originalBackup, contract.storage_path);
+    console.log(`[INTEGRITY] Restored from original backup: ${originalBackup} → ${contract.storage_path}`);
+    return;
+  }
+
+  // 尝试2：从 versions/<id>-reviewed.<ext> 恢复
+  const reviewedFile = path.join(VERSIONS_DIR, `${contract.id}-reviewed${ext}`);
+  if (fs.existsSync(reviewedFile)) {
+    fs.copyFileSync(reviewedFile, contract.storage_path);
+    console.log(`[INTEGRITY] Restored from reviewed file: ${reviewedFile} → ${contract.storage_path}`);
+    return;
+  }
+
+  // 尝试3：从 contract_versions 表找最大版本号的备份文件
+  try {
+    const latestVersion = await db('contract_versions')
+      .where({ contract_id: contract.id })
+      .whereNotNull('storage_path')
+      .where('storage_path', '!=', '')
+      .orderBy('version_no', 'desc')
+      .first();
+    if (latestVersion && latestVersion.storage_path && fs.existsSync(latestVersion.storage_path)) {
+      const vStat = fs.statSync(latestVersion.storage_path);
+      if (vStat.size >= MIN_FILE_SIZE) {
+        fs.copyFileSync(latestVersion.storage_path, contract.storage_path);
+        console.log(`[INTEGRITY] Restored from contract_versions: ${latestVersion.storage_path} → ${contract.storage_path}`);
+        return;
+      }
+    }
+  } catch (e) {
+    console.warn(`[INTEGRITY] contract_versions lookup failed: ${e.message}`);
+  }
+
+  console.error(`[INTEGRITY] ALL recovery attempts failed for contract ${contract.id} — storage_path may be corrupted`);
+};
+
 const getFileStat = (storagePath) => {
   try {
     const stat = fs.statSync(storagePath);
@@ -95,6 +151,8 @@ router.get('/v3/3rd/files/:file_id', verifyWpsSignature, async (req, res) => {
     if (!contract) {
       return res.status(404).json(fail('File not found'));
     }
+    // ── 文件完整性检查：首次打开时自动修复异常 storage_path ──
+    await ensureStoragePathIntegrity(contract);
     // 从 document_key 的版本计算版本号（每次 document_key 更新视为新版本）
     // 用 updated_at 的时间戳除以 1000 作为版本号，保证单调递增
     const versionTs = contract.updated_at
@@ -125,8 +183,14 @@ router.get('/v3/3rd/files/:file_id/download', verifyWpsSignature, async (req, re
       return res.status(404).json(fail('File not found'));
     }
 
+    // ── 上传前完整性检查：确保 storage_path 基准文件正常 ──
+    await ensureStoragePathIntegrity(contract);
+
     // 返回一个直链（raw endpoint 在下方实现）
     const rawUrl = `${WPS_CALLBACK_BASE}/v3/3rd/files/${req.params.file_id}/download/raw`;
+
+    // ── 文件完整性检查：storage_path 异常时自动从备份恢复 ──
+    await ensureStoragePathIntegrity(contract);
 
     // 计算文件校验和（WPS 仅支持 md5 或 sha1）
     let digest = '';
