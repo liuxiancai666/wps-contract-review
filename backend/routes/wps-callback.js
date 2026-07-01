@@ -310,6 +310,7 @@ router.get('/v3/3rd/users', verifyWpsSignature, async (req, res) => {
         name,
         avatar_url: '',
         logined,
+        permission: 2,  // 2=可写，1=只读；WPS SDK 通过此字段控制用户操作权限
       };
     }));
 
@@ -345,6 +346,7 @@ router.post('/v3/3rd/users', verifyWpsSignature, async (req, res) => {
         name,
         avatar_url: '',
         logined,
+        permission: 2,  // 2=可写，1=只读；WPS SDK 通过此字段控制用户操作权限
       };
     }));
 
@@ -372,6 +374,7 @@ router.get('/v3/3rd/users/:user_id', verifyWpsSignature, async (req, res) => {
       name,
       avatar_url: '',
       logined,
+      permission: 2,  // 2=可写
     }));
   } catch (error) {
     console.error('[WPS-CALLBACK] User info error:', error);
