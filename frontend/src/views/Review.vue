@@ -1154,6 +1154,9 @@ export default {
             if (data.newEditorConfig) {
                 contract.editorConfig = { ...data.newEditorConfig };
                 ElMessage.success('批注已嵌入文档，正在重新加载简化编辑界面...');
+            } else if (reviewData.modification_suggestions?.length > 0) {
+                // 后端没有写入批注到文档，前端需要在文档加载后自动插入
+                needsAutoInsert.value = true;
             }
         });
 
@@ -1785,9 +1788,17 @@ export default {
 
     const onDocumentReady = () => {
       console.log("[INFO] WPS WebOffice document is ready.");
-      setTimeout(() => {
+      setTimeout(async () => {
         isEditorReady.value = true;
         if (isEditorReady.value) startAutoForceSave();
+        
+        // 如果是从历史记录加载的合同，且有未插入的批注，自动插入
+        if (needsAutoInsert.value && reviewData.modification_suggestions?.length > 0) {
+          needsAutoInsert.value = false; // 重置标志
+          // 延迟一下确保文档完全就绪
+          await new Promise(r => setTimeout(r, 1000));
+          await autoInsertAnnotations();
+        }
       }, 300);
     };
 
@@ -1863,6 +1874,11 @@ export default {
             selectedReviewPoints.value = contractData.selectedReviewPoints || [];
             customPurposes.value = contractData.customPurposes || [{ value: '' }];
             Object.assign(reviewData, contractData.reviewData || {});
+
+            // 标记需要自动插入批注（当文档加载完成后）
+            if (reviewData.modification_suggestions?.length > 0) {
+                needsAutoInsert.value = true;
+            }
 
             // Save this loaded state to localStorage so a refresh works correctly
             saveState();
@@ -2823,6 +2839,9 @@ export default {
     const toggleRevisionMenu = () => {
         showRevisionMenu.value = !showRevisionMenu.value;
     };
+
+    // 标记是否需要自动插入批注（从历史记录加载时）
+    const needsAutoInsert = ref(false);
 
     // 审查完成后，自动将 modification_suggestions 插入为 WPS 批注 + 书签
     // 性能优化：一次性获取app，复用document引用
