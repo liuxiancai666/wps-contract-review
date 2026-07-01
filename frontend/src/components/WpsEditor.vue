@@ -133,7 +133,7 @@ export default defineComponent({
           refreshToken: getRefreshToken,
           // attrAllow: SDK 权限字符串，定义允许的操作（edit=可编辑）
           // 缺少此字段时 SDK 可能默认只读
-          attrAllow: 'edit|comment|download|print|saveas',
+          attrAllow: ['edit', 'comment', 'download', 'print', 'saveas'],
           // permission JS 对象：控制 UI 操作按钮状态（edit=编辑按钮可用）
           permission: {
             edit: true,
