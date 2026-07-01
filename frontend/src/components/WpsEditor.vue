@@ -274,13 +274,224 @@ export default defineComponent({
       }
     });
 
+    // ============================================================
+    // 星法2.0 书签定位技术实现
+    // ============================================================
+
+    // 规范化文本（用于 WPS Find API 匹配）
+    const normalizeText = (text) => {
+      if (!text) return '';
+      let t = String(text);
+      t = t.replace(/[\r\n\v]+/g, '^p');  // 换行 → ^p
+      t = t.replace(/\t/g, '^t');          // 制表符 → ^t
+      t = t.replace(/\u0007/g, '');        // 移除 bell 字符
+      t = t.replace(/[\x00-\x08\x0C-\x1F\x7F]/g, ''); // 移除控制字符
+      return t;
+    };
+
+    // 查找所有匹配的原始位置（使用 WPS Find API）
+    const findAllMatchPositions = async (originalText) => {
+      const app = await getApplication();
+      if (!app || !app.ActiveDocument) return [];
+      const positions = [];
+      try {
+        const doc = app.ActiveDocument;
+        await doc.Range.SetRange(0, 0);
+        const normText = normalizeText(originalText);
+        const findResults = await doc.Find.Execute(normText, false);
+        if (!Array.isArray(findResults) || !findResults.length) return positions;
+        for (const result of findResults) {
+          const startPos = await doc.Range.SetRange(result.pos, result.pos + result.len);
+          const start = await startPos.Start;
+          const end = await startPos.End;
+          positions.push([start, end]);
+        }
+      } catch (error) {
+        console.error('[WPS] findAllMatchPositions error:', error);
+      }
+      return positions;
+    };
+
+    // 批量创建纠错书签（fixItems = [{sceUuid, original_text, ...}]
+    const batchCreateFixBookmarks = async (fixItems) => {
+      const app = await getApplication();
+      if (!app || !app.ActiveDocument) return;
+      const doc = app.ActiveDocument;
+      try {
+        // 获取现有书签列表
+        const existingBookmarks = (await doc.Bookmarks.Json()).map(b => b.name);
+        for (let i = 0; i < fixItems.length; i++) {
+          const item = fixItems[i];
+          if (!item.original_text) continue;
+          try {
+            const positions = await findAllMatchPositions(item.original_text);
+            if (positions && positions.length > 0) {
+              const bookmarkName = `fix_${item.sceUuid || i}`;
+              if (!existingBookmarks.includes(bookmarkName)) {
+                await doc.Bookmarks.Add({ Name: bookmarkName, Range: { Start: positions[0][0], End: positions[0][1] } });
+              }
+              item.titleBookmark = bookmarkName;
+            }
+          } catch (e) {
+            console.warn(`[WPS] batchCreateFixBookmarks item ${i} failed:`, e.message);
+          }
+        }
+        console.log(`[WPS] batchCreateFixBookmarks: ${fixItems.length} items processed`);
+      } catch (error) {
+        console.error('[WPS] batchCreateFixBookmarks error:', error);
+      }
+    };
+
+    // 批量创建风险书签（riskItems = [{id, filtered_content, ...}]
+    const batchCreateRiskBookmarks = async (riskItems) => {
+      const app = await getApplication();
+      if (!app || !app.ActiveDocument) return;
+      const doc = app.ActiveDocument;
+      console.log('[WPS] batchCreateRiskBookmarks called with', riskItems?.length, 'items');
+      try {
+        const existingBookmarks = (await doc.Bookmarks.Json()).map(b => b.name);
+        for (let i = 0; i < riskItems.length; i++) {
+          const item = riskItems[i];
+          const itemId = item.id || i;
+          const titleBookmarkName = `risk_title_${itemId}`;
+          const editBookmarkName = `risk_edit_${itemId}`;
+          try {
+            if (item.filtered_content) {
+              if (existingBookmarks.includes(titleBookmarkName)) {
+                item.titleBookmark = titleBookmarkName;
+              } else {
+                const positions = await findAllMatchPositions(item.filtered_content);
+                if (positions && positions.length > 0) {
+                  // 创建标题书签
+                  await doc.Bookmarks.Add({ Name: titleBookmarkName, Range: { Start: positions[0][0], End: positions[0][1] } });
+                  // 创建编辑书签（同一位置）
+                  await doc.Bookmarks.Add({ Name: editBookmarkName, Range: { Start: positions[0][0], End: positions[0][1] } });
+                  item.titleBookmark = titleBookmarkName;
+                  item.editBookmark = editBookmarkName;
+                }
+              }
+            }
+          } catch (e) {
+            console.warn(`[WPS] batchCreateRiskBookmarks item ${i} failed:`, e.message);
+          }
+        }
+        console.log(`[WPS] batchCreateRiskBookmarks: ${riskItems.length} items processed`);
+      } catch (error) {
+        console.error('[WPS] batchCreateRiskBookmarks error:', error);
+      }
+    };
+
+    // 定位原文（书签导航）
+    const gotoBookmark = async (bookmarkName) => {
+      if (!bookmarkName) {
+        console.warn('[WPS] gotoBookmark: bookmarkName is empty');
+        return;
+      }
+      const app = await getApplication();
+      if (!app) return;
+      try {
+        await app.ActiveDocument.ActiveWindow.Selection.GoTo({
+          What: app.Enum.WdGoToItem.wdGoToBookmark,
+          Name: bookmarkName,
+        });
+        console.log('[WPS] gotoBookmark:', bookmarkName);
+      } catch (error) {
+        console.error('[WPS] gotoBookmark error:', error.message);
+      }
+    };
+
+    // 添加审查批注（通过书签）
+    const addReviewCommentByBookmarkWps = async (editBookmark, actionData, itemId) => {
+      if (!editBookmark) {
+        console.warn('[WPS] addReviewCommentByBookmarkWps: editBookmark is empty');
+        return;
+      }
+      const app = await getApplication();
+      if (!app) return;
+      try {
+        // 定位到书签
+        await app.ActiveDocument.ActiveWindow.Selection.GoTo({
+          What: app.Enum.WdGoToItem.wdGoToBookmark,
+          Which: app.Enum.WdGoToDirection.wdGoToAbsolute,
+          Name: editBookmark,
+        });
+        // 构建批注内容
+        let commentText = '';
+        if (actionData) {
+          switch (actionData.action) {
+            case 'replace':
+              commentText = `【AI审查建议】将"${actionData.target_text}"${actionData.actionText}为"${actionData.new_text}"`;
+              break;
+            case 'insert_before':
+              commentText = `【AI审查建议】在"${actionData.target_text}"起始位置之前插入"${actionData.new_text}"`;
+              break;
+            case 'insert_after':
+              commentText = `【AI审查建议】在"${actionData.target_text}"结束位置之后插入"${actionData.new_text}"`;
+              break;
+            case 'delete':
+              commentText = `【AI审查建议】删除"${actionData.target_text}"`;
+              break;
+            default:
+              commentText = `【AI审查建议】${JSON.stringify(actionData)}`;
+          }
+        }
+        // 添加批注
+        const selection = app.ActiveDocument.ActiveWindow.Selection;
+        await app.ActiveDocument.Comments.Add(selection.Range, commentText);
+        console.log('[WPS] addReviewCommentByBookmarkWps:', editBookmark, commentText.substring(0, 50));
+      } catch (error) {
+        console.error('[WPS] addReviewCommentByBookmarkWps error:', error.message);
+      }
+    };
+
+    // 通过书签替换文本（保留书签）
+    const adjustReplaceByBookmarkWps = async (editBookmark, actionData, itemId) => {
+      if (!editBookmark) {
+        console.warn('[WPS] adjustReplaceByBookmarkWps: editBookmark is empty');
+        return;
+      }
+      const app = await getApplication();
+      if (!app) return;
+      try {
+        const doc = app.ActiveDocument;
+        const bookmarkRange = await doc.Bookmarks.Item(editBookmark);
+        const currentText = await bookmarkRange.Range.Text;
+        let newText = '';
+        if (actionData) {
+          switch (actionData.action) {
+            case 'replace': newText = actionData.new_text || ''; break;
+            case 'insert_before': newText = (actionData.new_text || '') + currentText; break;
+            case 'insert_after': newText = currentText + (actionData.new_text || ''); break;
+            case 'delete': newText = ''; break;
+            default: newText = actionData.new_text || currentText;
+          }
+        }
+        await doc.Bookmarks.ReplaceBookmark([{ name: editBookmark, type: 'text', value: newText }]);
+        await gotoBookmark(editBookmark);
+        console.log('[WPS] adjustReplaceByBookmarkWps:', editBookmark, '→', newText.substring(0, 30));
+      } catch (error) {
+        console.error('[WPS] adjustReplaceByBookmarkWps error:', error.message);
+      }
+    };
+
+    // ============================================================
+    // 对外暴露的方法（供父组件通过 ref 调用）
+    // ============================================================
     return {
       editorMount,
       loaded,
       sdkError,
       loadingText,
       retryInit,
-      getApplication,  // 暴露给父组件
+      getApplication,
+      // 星法2.0 书签 API
+      batchCreateFixBookmarks,
+      batchCreateRiskBookmarks,
+      gotoBookmark,
+      addReviewCommentByBookmarkWps,
+      adjustReplaceByBookmarkWps,
+      findAllMatchPositions,
+      normalizeText,
     };
   },
 });

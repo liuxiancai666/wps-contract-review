@@ -1754,6 +1754,15 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
             breach_cost_analysis: [],
         };
 
+        // 添加 id 和 filtered_content 字段（供前端星法式书签 API 使用）
+        // id: 用于书签命名 risk_title_${id} / risk_edit_${id}
+        // filtered_content: 用于 WPS Find API 定位原文（优先用 anchor_hint，其次 original_text）
+        analysisResult.modification_suggestions = (analysisResult.modification_suggestions || []).map((item, idx) => ({
+            ...item,
+            id: item.id || idx,
+            filtered_content: item.filtered_content || item.anchor_hint || item.original_text || '',
+        }));
+
         // 兜底检测：补充 LLM 可能遗漏的典型霸王条款
         supplementKnownRiskPatterns(analysisResult, plainText);
 
