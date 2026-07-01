@@ -131,6 +131,16 @@ export default defineComponent({
           // 不传 callbackUrl：SDK v2 通过 token 直连 WPS 服务器，不需要回调
           token: sdkToken,
           refreshToken: getRefreshToken,
+          // attrAllow: SDK 权限字符串，定义允许的操作（edit=可编辑）
+          // 缺少此字段时 SDK 可能默认只读
+          attrAllow: 'edit|comment|download|print|saveas',
+          // permission JS 对象：控制 UI 操作按钮状态（edit=编辑按钮可用）
+          permission: {
+            edit: true,
+            comment: true,
+            download: true,
+            print: true,
+          },
           commonOptions: {
             isShowTopArea: showToolbar,  // 审查结果页显示工具栏
             isShowHeader: showToolbar,   // 与星法 SDK 一致：顶部标题区
@@ -138,10 +148,9 @@ export default defineComponent({
             isIframeViewFullscreen: false,
             acceptVisualViewportResizeEvent: true,  // 与星法 SDK 一致
           },
-          wordOptions: {
+          wpsOptions: {
             isShowDocMap: false,    // 审查页不需要目录大纲
-            isBestScale: false,
-            isFullscreen: false,
+            isBestScale: true,
           },
           // commandBars 在 init 时传给 WPS，控制命令栏显示/隐藏
           // 这里只隐藏 FloatQuickHelp（帮助浮窗），其余工具栏按钮保持默认
