@@ -10,7 +10,7 @@
         <router-link to="/review" class="nav-link" active-class="nav-link-active">合同审查</router-link>
         <router-link to="/qna" class="nav-link" active-class="nav-link-active">智能问答</router-link>
         <router-link to="/rules" class="nav-link" active-class="nav-link-active">规则</router-link>
-        <router-link to="/settings" class="nav-link" active-class="nav-link-active">知识库</router-link>
+        <router-link v-if="isAdmin" to="/settings" class="nav-link" active-class="nav-link-active">知识库</router-link>
         <router-link v-if="isAdmin" to="/admin" class="nav-link" active-class="nav-link-active">管理</router-link>
       </nav>
       <div class="app-user" v-if="isLoggedIn">
