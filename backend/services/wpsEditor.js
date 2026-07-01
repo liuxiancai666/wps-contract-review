@@ -27,15 +27,25 @@ const buildWpsEditorConfig = (contractRecord, ext = 'docx', options = {}) => {
   };
   const token = jwt.sign(tokenPayload, WPS_TOKEN_SECRET);
 
-  const officeType = isPdf ? 'f' : 'w';
+  // WPS SDK v2 officeType 短码：w=Writer, s=Spreadsheet, p=Presentation, f=Pdf
+  const officeTypeMap = { pdf: 'f', docx: 'w', doc: 'w', xlsx: 's', xls: 's', pptx: 'p', ppt: 'p' };
+  const officeType = officeTypeMap[ext] || 'w';
 
   // mode: 'nomal' = 普通模式，'simple' = 简化模式
   // 为保证文档与原始文件100%一致，使用普通模式并禁用不必要的功能
+  const APP_HOST = process.env.APP_HOST || '';
+  const WPS_CALLBACK_BASE_URL = process.env.WPS_CALLBACK_BASE || (APP_HOST ? `${APP_HOST}/v3` : '');
+
   const config = {
     appId: WPS_APP_ID,
     fileId: `contract-${contractRecord.id || 'new'}`,
     officeType,
     token,
+    // endpoint: WPS WebOffice API 端点（公网可访问的 WPS 服务器地址）
+    // SDK 向此地址发送业务请求，WPS 服务器会回调 backend 的 /v3/ 接口
+    endpoint: process.env.WPS_ENDPOINT || 'https://o.wpsgo.com',
+    // attrAllow: SDK 必填字段，定义文档允许的操作权限
+    attrAllow: 'edit|comment|download|print|saveas',
     mode: 'nomal',  // 普通模式，不做额外处理
 
     customArgs: {

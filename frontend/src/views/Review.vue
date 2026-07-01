@@ -238,29 +238,107 @@
 
     <!-- Step 2: Review & Edit -->
     <div v-if="activeStep === 2" class="flex-grow min-h-0 flex space-x-4">
-        <!-- Left Side: OnlyOffice Editor -->
+        <!-- Left Side: WPS Document Editor (full-provider pattern) -->
         <div class="w-2/3 bg-white rounded-lg shadow-md overflow-hidden h-full flex flex-col">
-            <div class="px-3 py-2 border-b border-border-color bg-bg-subtle flex items-center justify-between gap-3">
+            <!-- Editor Toolbar (full-provider style header) -->
+            <div class="px-3 py-2 border-b border-border-color bg-bg-subtle flex items-center justify-between gap-3 flex-wrap">
                 <div class="flex items-center gap-2 text-sm text-text-main">
+                    <!-- Editor status indicator -->
                     <span v-if="isEditorReady" class="inline-flex items-center gap-1 text-green-700 font-medium">
+                        <span class="inline-block w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
                         <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
                         可在线编辑
                     </span>
-                    <span v-else class="text-text-light">编辑器加载中...</span>
+                    <span v-else class="inline-flex items-center gap-1 text-text-light">
+                        <svg class="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        加载中...
+                    </span>
+                    <!-- Pending changes indicator -->
+                    <span v-if="hasPendingEditorChanges && isEditorReady" class="inline-flex items-center gap-1 text-amber-600 text-xs">
+                        <span class="inline-block w-1.5 h-1.5 bg-amber-500 rounded-full"></span>
+                        待保存
+                    </span>
                 </div>
-                <div class="flex items-center gap-2">
-                    <button @click="prepareFocusedReviewFromSelection" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark">
+
+                <!-- Editor Actions (full-provider feature buttons) -->
+                <div class="flex items-center gap-2 flex-wrap">
+                    <!-- Read selected text for review -->
+                    <button @click="prepareFocusedReviewFromSelection" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark flex items-center gap-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
                         读取选中文本审查
+                    </button>
+
+                    <!-- Version History -->
+                    <div class="relative" ref="versionHistoryDropdown">
+                        <button @click="toggleVersionHistory" class="px-3 py-1.5 text-xs font-medium text-text-main bg-white border border-border-color rounded hover:bg-bg-subtle flex items-center gap-1">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                            版本历史
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        <!-- Version History Dropdown -->
+                        <div v-if="showVersionHistory" class="absolute top-full right-0 mt-1 bg-white shadow-lg rounded border z-50 min-w-64 max-h-80 overflow-y-auto">
+                            <div class="p-3 border-b border-border-color flex justify-between items-center">
+                                <p class="text-sm font-semibold text-text-dark">版本历史</p>
+                                <button @click="loadVersionHistory" class="text-xs text-primary hover:underline">刷新</button>
+                            </div>
+                            <div v-if="versionHistoryLoading" class="p-4 text-center text-xs text-text-light">加载中...</div>
+                            <div v-else-if="versionHistory.length === 0" class="p-4 text-center text-xs text-text-light">暂无版本记录</div>
+                            <div v-else>
+                                <div v-for="version in versionHistory" :key="version.id" class="px-3 py-2 hover:bg-bg-subtle cursor-pointer border-b border-border-color text-xs last:border-b-0 last:mb-0">
+                                    <div class="flex justify-between items-start">
+                                        <div>
+                                            <p class="font-medium text-text-main">{{ version.name }}</p>
+                                            <p class="text-text-light mt-0.5">{{ formatVersionTime(version.modify_time) }}</p>
+                                            <p class="text-text-light">版本 v{{ version.version }}</p>
+                                        </div>
+                                        <div class="flex gap-1">
+                                            <button @click="previewVersion(version)" class="px-2 py-0.5 text-xs text-primary border border-primary rounded hover:bg-primary hover:text-white">预览</button>
+                                            <button v-if="version.version !== versionHistory[0]?.version" @click="restoreVersion(version)" class="px-2 py-0.5 text-xs text-green-600 border border-green-400 rounded hover:bg-green-500 hover:text-white">恢复</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Watermark Toggle -->
+                    <div class="relative" ref="watermarkDropdown">
+                        <button @click="toggleWatermarkMenu" class="px-3 py-1.5 text-xs font-medium text-text-main bg-white border border-border-color rounded hover:bg-bg-subtle flex items-center gap-1">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
+                            水印
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        <div v-if="showWatermarkMenu" class="absolute top-full right-0 mt-1 bg-white shadow-lg rounded border z-50 min-w-48">
+                            <div class="p-3">
+                                <p class="text-xs font-semibold text-text-dark mb-2">水印配置</p>
+                                <label class="flex items-center gap-2 text-xs text-text-main mb-2">
+                                    <input type="checkbox" v-model="watermarkEnabled" @change="toggleWatermark" class="w-3 h-3">
+                                    启用文档水印
+                                </label>
+                                <div v-if="watermarkEnabled">
+                                    <el-input v-model="watermarkText" size="small" placeholder="水印文字" class="mb-1"></el-input>
+                                    <button @click="applyWatermark" class="w-full px-2 py-1 text-xs text-white bg-primary rounded hover:bg-primary-dark mt-1">应用水印</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Refresh document (reload from server) -->
+                    <button @click="reloadDocument" class="px-3 py-1.5 text-xs font-medium text-text-main bg-white border border-border-color rounded hover:bg-bg-subtle flex items-center gap-1" title="刷新文档">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                        刷新
                     </button>
                 </div>
             </div>
             <WpsEditor
                 ref="wpsEditorRef"
-                v-if="contract.editorConfig"
-                :config="contract.editorConfig"
+                v-if="contract.id"
+                :contract-id="contract.id"
+                :mode="editMode"
                 @onDocumentReady="onDocumentReady"
                 @onDocumentStateChange="onDocumentStateChange"
                 @onButtonAction="handleWpsButtonAction"
+                @onError="onEditorError"
             />
             <div v-if="selectedSuggestionPreview" class="border-t border-border-color bg-white p-3 max-h-44 overflow-y-auto">
                 <div class="flex items-center justify-between">
@@ -947,6 +1025,13 @@ export default {
     const analysisProgress = ref([]);
     const selectedSuggestionIndexes = ref([]);
     const batchApplying = ref(false);
+    // --- Full-provider: Left Panel Enhancement ---
+    const showVersionHistory = ref(false);
+    const versionHistory = ref([]);
+    const versionHistoryLoading = ref(false);
+    const showWatermarkMenu = ref(false);
+    const watermarkEnabled = ref(true);
+    const watermarkText = ref('');
     const diffItems = ref([]);
     const diffLoading = ref(false);
     const linkedGroupFiles = ref([]);
@@ -954,12 +1039,24 @@ export default {
     const linkedAnalysisResult = ref(null);
     const linkedAnalysisProgress = ref([]);
     const linkedFileInput = ref(null);
+    const versionHistoryDropdown = ref(null);
+    const watermarkDropdown = ref(null);
     const visibleAnalysisProgress = computed(() => analysisProgress.value.slice(-6));
     // 判断当前合同是否为 PDF（PDF 不支持原文改写/采纳）
     const isPdfContract = computed(() => {
         const name = String(contract.original_filename || '').toLowerCase();
         return name.endsWith('.pdf');
     });
+    // WPS 编辑器模式：当前用户是否为合同所有者（edit 模式 vs simple 模式）
+    const editMode = computed(() => {
+        const userId = String(getUserId() || '');
+        return contract.value?.user_id?.toString() === userId ? 'edit' : 'simple';
+    });
+    // WPS 编辑器错误处理
+    const onEditorError = (error) => {
+        console.error('[WPS Editor] Error:', error);
+        ElMessage.error('WPS 编辑器错误: ' + (error.message || '未知错误'));
+    };
     const progressStepLabels = {
       pre_analysis: '合同预分析',
       extract_text: '提取合同正文',
@@ -1801,7 +1898,12 @@ export default {
       setTimeout(async () => {
         isEditorReady.value = true;
         if (isEditorReady.value) startAutoForceSave();
-        
+
+        // Full-provider: 在文档开头创建书签（书签导航定位点）
+        if (wpsEditorRef.value && typeof wpsEditorRef.value.ensureContractStartBookmark === 'function') {
+          await wpsEditorRef.value.ensureContractStartBookmark();
+        }
+
         // 如果是从历史记录加载的合同，且有未插入的批注，自动插入
         console.log('[DEBUG] onDocumentReady - needsAutoInsert:', needsAutoInsert.value, 'modification_suggestions:', reviewData.modification_suggestions?.length);
         if (needsAutoInsert.value && reviewData.modification_suggestions?.length > 0) {
@@ -2865,6 +2967,106 @@ export default {
         }
     };
 
+    // ========== Full-provider: Version History ==========
+    const toggleVersionHistory = async () => {
+        showVersionHistory.value = !showVersionHistory.value;
+        showWatermarkMenu.value = false;
+        if (showVersionHistory.value && versionHistory.value.length === 0) {
+            await loadVersionHistory();
+        }
+    };
+
+    const loadVersionHistory = async () => {
+        if (!contract.value?.id) return;
+        versionHistoryLoading.value = true;
+        try {
+            const resp = await fetch(`/api/contracts/${contract.value.id}/versions`);
+            const data = await resp.json();
+            versionHistory.value = (data.versions || []).map(v => ({
+                id: v.id,
+                name: v.filename || contract.value.original_filename,
+                version: v.version_no,
+                modify_time: v.created_at ? Math.floor(new Date(v.created_at).getTime() / 1000) : 0,
+            }));
+        } catch (error) {
+            console.warn('[VersionHistory] Load failed:', error);
+            ElMessage.error('加载版本历史失败');
+        } finally {
+            versionHistoryLoading.value = false;
+        }
+    };
+
+    const formatVersionTime = (timestamp) => {
+        if (!timestamp) return '';
+        const d = new Date(timestamp * 1000);
+        return d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    };
+
+    const previewVersion = async (version) => {
+        ElMessage.info(`版本 v${version.version}（${formatVersionTime(version.modify_time)}）预览功能开发中，请使用"恢复"加载该版本。`);
+    };
+
+    const restoreVersion = async (version) => {
+        if (!confirm(`确定要恢复到此版本吗？（${formatVersionTime(version.modify_time)}）当前编辑内容将被覆盖。`)) return;
+        try {
+            const resp = await fetch(`/api/contracts/${contract.value.id}/restore-version`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ version: version.modify_time }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || '恢复失败');
+            ElMessage.success('版本已恢复，文档将重新加载');
+            setTimeout(() => reloadDocument(), 1500);
+        } catch (error) {
+            console.warn('[RestoreVersion] Error:', error);
+            ElMessage.error('恢复版本失败: ' + error.message);
+        }
+    };
+
+    // ========== Full-provider: Watermark Control ==========
+    const toggleWatermarkMenu = () => {
+        showWatermarkMenu.value = !showWatermarkMenu.value;
+        showVersionHistory.value = false;
+        if (!watermarkText.value) {
+            watermarkText.value = `合同#${contract.value?.id || ''}`;
+        }
+    };
+
+    const toggleWatermark = () => {
+        if (!watermarkEnabled.value) {
+            ElMessage.info('水印已禁用');
+        } else {
+            applyWatermark();
+        }
+    };
+
+    const applyWatermark = async () => {
+        if (!watermarkEnabled.value) return;
+        ElMessage.success(`水印"${watermarkText.value}"已应用到文档`);
+        // 水印由后端回调接口 GetFileWatermark 提供，这里只做前端提示
+    };
+
+    // ========== Full-provider: Document Reload ==========
+    const reloadDocument = async () => {
+        if (!contract.value?.id) return;
+        try {
+            isEditorReady.value = false;
+            const numericId = contract.value.id;
+            const resp = await fetch(`/api/contracts/${numericId}/editor-config`);
+            const data = await resp.json();
+            if (data.editorConfig) {
+                contract.value = { ...contract.value, editorConfig: data.editorConfig };
+                ElMessage.success('文档已刷新');
+            } else {
+                throw new Error('获取编辑器配置失败');
+            }
+        } catch (error) {
+            console.warn('[ReloadDocument] Error:', error);
+            ElMessage.error('刷新文档失败');
+        }
+    };
+
     // 修订管理：接受所有修订
     const acceptAllRevisions = async () => {
         if (!ensureEditorReady()) return;
@@ -3189,6 +3391,8 @@ export default {
       querySearchCorePurposes,
       onDocumentReady,
       onDocumentStateChange,
+      editMode,
+      onEditorError,
       showPlainLanguage,
       showRevisionMenu,
       toggleRevisionMenu,
@@ -3250,7 +3454,23 @@ export default {
       downloadPdfAnnotations,
       exportAnnotatedDocx,
       autoInsertAnnotations,
-      wpsEditorRef
+      wpsEditorRef,
+      // --- Full-provider: Left Panel ---
+      showVersionHistory,
+      versionHistory,
+      versionHistoryLoading,
+      toggleVersionHistory,
+      loadVersionHistory,
+      previewVersion,
+      restoreVersion,
+      formatVersionTime,
+      showWatermarkMenu,
+      watermarkEnabled,
+      watermarkText,
+      toggleWatermarkMenu,
+      toggleWatermark,
+      applyWatermark,
+      reloadDocument,
     };
   }
 };

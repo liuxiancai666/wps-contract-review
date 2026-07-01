@@ -176,16 +176,29 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
     // 默认可编辑：非PDF且edit_enabled未明确设置为false
     const editEnabled = !isPdf && contract.edit_enabled !== false;
 
+    // 调试：记录 WPS 回调的所有 header
+    console.log('[WPS-CALLBACK] Permission request:',
+      'file_id:', req.params.file_id,
+      'X-App-ID:', req.get('X-App-ID'),
+      'X-WebOffice-Token:', (req.get('X-WebOffice-Token') || '').slice(0, 20) + '...',
+      'X-Request-ID:', req.get('X-Request-ID'),
+      'query:', JSON.stringify(req.query).slice(0, 100)
+    );
+
+    // 权限位：必须使用 Go SDK 的 GetFilePermissionReply 字段名
+    // update=编辑权限（不是edit），saveas=另存为，history=历史版本
+    // user_id: WPS 服务器用于标识当前操作用户，会在创建 session 时传递给 callbackUrl
     res.json(ok({
-      // 权限位：1=可读 2=可下载 4=可编辑 8=可打印 16=可评论 32=可分享
       read: 1,
       download: 1,
-      edit: editEnabled ? 1 : 0,
+      update: editEnabled ? 1 : 0,   // 核心：编辑权限字段名是 update 不是 edit
       print: 1,
       comment: editEnabled ? 1 : 0,
       rename: 0,
       copy: 1,
-      history: 0, // 暂不提供版本历史回调
+      saveas: 1,
+      history: 0,
+      user_id: String(contract.user_id || req.query.user_id || '1'),
     }));
   } catch (error) {
     console.error('[WPS-CALLBACK] Permission error:', error);
@@ -194,14 +207,101 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
 });
 
 // ========== 4. 用户信息 ==========
-// GET /v3/3rd/users/:user_id
+
+// GET /v3/3rd/users — 批量用户信息（WPS 服务器通过此接口批量查询用户）
+// Go SDK 源码: userIDs := c.QueryArray("user_ids") — 参数名是 user_ids（下划线）
+// 请求参数: ?user_ids=10001&user_ids=2
+// 注意：此路由必须定义在 /v3/3rd/users/:user_id 之前，否则会被 :user_id 路由捕获
+router.get('/v3/3rd/users', verifyWpsSignature, async (req, res) => {
+  try {
+    const userIds = req.query.user_ids
+      ? (Array.isArray(req.query.user_ids) ? req.query.user_ids : [req.query.user_ids])
+      : [];
+    console.log('[WPS-CALLBACK] Users GET request:', 'user_ids:', JSON.stringify(userIds), 'query:', JSON.stringify(req.query).slice(0, 100));
+
+    if (userIds.length === 0) {
+      return res.json(ok([]));
+    }
+
+    const users = await Promise.all(userIds.map(async (uid) => {
+      let name = `用户 ${uid}`;
+      let logined = true;
+      try {
+        const db = require('../db');
+        const [row] = await db('users').where({ id: uid }).select('username', 'name');
+        if (row) {
+          name = row.name || row.username || name;
+          logined = true;
+        }
+      } catch {}
+
+      return {
+        id: String(uid),
+        name,
+        avatar_url: '',
+        logined,
+      };
+    }));
+
+    res.json(ok(users));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] Users error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// POST /v3/3rd/users — WPS 调用此接口批量查询用户信息
+// 请求体: { userIds: ["10001", "10002"] }
+// 返回: [{id, name, avatar_url, logined}]
+router.post('/v3/3rd/users', verifyWpsSignature, async (req, res) => {
+  try {
+    const { userIds = [] } = req.body || {};
+    console.log('[WPS-CALLBACK] Users POST request:', 'userIds:', JSON.stringify(userIds));
+
+    const users = await Promise.all(userIds.map(async (uid) => {
+      let name = `用户 ${uid}`;
+      let logined = true;
+      try {
+        const db = require('../db');
+        const [row] = await db('users').where({ id: uid }).select('username', 'name');
+        if (row) {
+          name = row.name || row.username || name;
+          logined = true;
+        }
+      } catch {}
+
+      return {
+        id: String(uid),
+        name,
+        avatar_url: '',
+        logined,
+      };
+    }));
+
+    res.json(ok(users));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] Users error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// GET /v3/3rd/users/:user_id — 单个用户信息
+// 注意：此路由必须在 /v3/3rd/users 之后定义，否则会捕获 "users" 作为 user_id
 router.get('/v3/3rd/users/:user_id', verifyWpsSignature, async (req, res) => {
   try {
     const userId = req.params.user_id;
+    let name = `用户 ${userId}`;
+    let logined = true;
+    try {
+      const db = require('../db');
+      const [row] = await db('users').where({ id: userId }).select('username', 'name');
+      if (row) name = row.name || row.username || name;
+    } catch {}
     res.json(ok({
       id: String(userId),
-      name: `用户 ${userId}`,
+      name,
       avatar_url: '',
+      logined,
     }));
   } catch (error) {
     console.error('[WPS-CALLBACK] User info error:', error);
@@ -318,10 +418,233 @@ router.get('/v3/3rd/gateway', (req, res) => {
   }));
 });
 
+// ========== 8. 水印接口 ==========
+// GET /v3/3rd/files/:file_id/watermark
+router.get('/v3/3rd/files/:file_id/watermark', verifyWpsSignature, async (req, res) => {
+  try {
+    const contract = await findContract(req.params.file_id);
+    if (!contract) return res.status(404).json(fail('File not found'));
+
+    // 默认水印：显示合同ID+用户ID，防止截图泄露
+    res.json(ok({
+      type: 1,
+      value: `合同#${contract.id}`,
+      fill_style: 'rgba(192,192,192,0.5)',
+      font: 'bold 16px Serif',
+      rotate: 0.5,
+      horizontal: 50,
+      vertical: 50,
+    }));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] Watermark error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// ========== 9. 版本历史列表 ==========
+// GET /v3/3rd/files/:file_id/versions
+router.get('/v3/3rd/files/:file_id/versions', verifyWpsSignature, async (req, res) => {
+  try {
+    const contract = await findContract(req.params.file_id);
+    if (!contract) return res.status(404).json(fail('File not found'));
+
+    const versionsDir = path.join(UPLOADS_DIR, 'versions');
+    const currentStorage = contract.storage_path;
+    const versions = [];
+
+    // 当前版本
+    const currentStat = getFileStat(currentStorage);
+    versions.push({
+      id: String(contract.id),
+      name: contract.original_filename || '当前版本',
+      version: Math.floor(new Date(contract.updated_at || Date.now()).getTime() / 1000),
+      size: currentStat,
+      create_time: Math.floor(new Date(contract.created_at || Date.now()).getTime() / 1000),
+      modify_time: Math.floor(new Date(contract.updated_at || Date.now()).getTime() / 1000),
+      creator_id: String(contract.user_id || 1),
+      modifier_id: String(contract.user_id || 1),
+    });
+
+    // 历史版本（从 versionsDir 读取备份文件）
+    if (fs.existsSync(versionsDir)) {
+      const files = fs.readdirSync(versionsDir)
+        .filter(f => f.startsWith(`${contract.id}-`))
+        .sort()
+        .reverse();
+
+      for (const file of files.slice(0, 20)) { // 最多20个历史版本
+        const filePath = path.join(versionsDir, file);
+        const stat = fs.statSync(filePath);
+        // 从文件名提取版本时间戳: contractId-timestamp.bak.docx
+        const timestamp = parseInt(file.replace(`${contract.id}-`, '').replace('.bak.docx', ''), 10) || stat.mtimeMs;
+        versions.push({
+          id: `${contract.id}_v${timestamp}`,
+          name: `${contract.original_filename || '合同'} (备份)`,
+          version: Math.floor(timestamp / 1000),
+          size: stat.size,
+          create_time: Math.floor(stat.mtimeMs / 1000),
+          modify_time: Math.floor(stat.mtimeMs / 1000),
+          creator_id: String(contract.user_id || 1),
+          modifier_id: String(contract.user_id || 1),
+        });
+      }
+    }
+
+    res.json(ok(versions));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] Versions list error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// ========== 10. 获取指定版本详情 ==========
+// GET /v3/3rd/files/:file_id/versions/:version
+router.get('/v3/3rd/files/:file_id/versions/:version', verifyWpsSignature, async (req, res) => {
+  try {
+    const contract = await findContract(req.params.file_id);
+    if (!contract) return res.status(404).json(fail('File not found'));
+
+    const versionId = parseInt(req.params.version, 10);
+
+    // 如果是当前版本（用 updated_at 时间戳）
+    const currentVersionTs = Math.floor(new Date(contract.updated_at || Date.now()).getTime() / 1000);
+    if (versionId === currentVersionTs) {
+      return res.json(ok({
+        id: req.params.file_id,
+        name: contract.original_filename || '当前版本',
+        version: currentVersionTs,
+        size: getFileStat(contract.storage_path),
+        create_time: Math.floor(new Date(contract.created_at || Date.now()).getTime() / 1000),
+        modify_time: currentVersionTs,
+        creator_id: String(contract.user_id || 1),
+        modifier_id: String(contract.user_id || 1),
+      }));
+    }
+
+    // 历史版本：从 versionsDir 查找
+    const versionsDir = path.join(UPLOADS_DIR, 'versions');
+    const targetTimestamp = versionId * 1000; // 还原为毫秒
+    const versionFileName = `${contract.id}-${targetTimestamp}.bak.docx`;
+    const versionFilePath = path.join(versionsDir, versionFileName);
+
+    if (fs.existsSync(versionFilePath)) {
+      const stat = fs.statSync(versionFilePath);
+      res.json(ok({
+        id: `${contract.id}_v${versionId}`,
+        name: `${contract.original_filename || '合同'} (v${versionId})`,
+        version: versionId,
+        size: stat.size,
+        create_time: Math.floor(stat.mtimeMs / 1000),
+        modify_time: Math.floor(stat.mtimeMs / 1000),
+        creator_id: String(contract.user_id || 1),
+        modifier_id: String(contract.user_id || 1),
+      }));
+    } else {
+      res.status(404).json(fail('File version not found'));
+    }
+  } catch (error) {
+    console.error('[WPS-CALLBACK] Version detail error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// ========== 11. 下载指定版本 ==========
+// GET /v3/3rd/files/:file_id/versions/:version/download
+router.get('/v3/3rd/files/:file_id/versions/:version/download', verifyWpsSignature, async (req, res) => {
+  try {
+    const contract = await findContract(req.params.file_id);
+    if (!contract) return res.status(404).json(fail('File not found'));
+
+    const versionId = parseInt(req.params.version, 10);
+    const versionsDir = path.join(UPLOADS_DIR, 'versions');
+    const currentVersionTs = Math.floor(new Date(contract.updated_at || Date.now()).getTime() / 1000);
+
+    // 当前版本直接用 storage_path
+    if (versionId === currentVersionTs) {
+      const digest = await getFileDigest(contract.storage_path);
+      return res.json(ok({
+        url: `${WPS_CALLBACK_BASE}/v3/3rd/files/${req.params.file_id}/download/raw`,
+        digest,
+        digest_type: 'sha1',
+      }));
+    }
+
+    // 历史版本
+    const targetTimestamp = versionId * 1000;
+    const versionFilePath = path.join(versionsDir, `${contract.id}-${targetTimestamp}.bak.docx`);
+
+    if (fs.existsSync(versionFilePath)) {
+      const digest = await getFileDigest(versionFilePath);
+      res.json(ok({
+        url: `${WPS_CALLBACK_BASE}/v3/3rd/files/${req.params.file_id}/versions/${versionId}/download/raw`,
+        digest,
+        digest_type: 'sha1',
+      }));
+    } else {
+      res.status(404).json(fail('File version not found'));
+    }
+  } catch (error) {
+    console.error('[WPS-CALLBACK] Version download error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// ========== 12. 历史版本原始内容下载 ==========
+router.get('/v3/3rd/files/:file_id/versions/:version/download/raw', async (req, res) => {
+  try {
+    const contract = await findContract(req.params.file_id);
+    if (!contract) return res.status(404).send('File not found');
+
+    const versionId = parseInt(req.params.version, 10);
+    const versionsDir = path.join(UPLOADS_DIR, 'versions');
+    const currentVersionTs = Math.floor(new Date(contract.updated_at || Date.now()).getTime() / 1000);
+
+    if (versionId === currentVersionTs) {
+      return res.sendFile(contract.storage_path);
+    }
+
+    const targetTimestamp = versionId * 1000;
+    const versionFilePath = path.join(versionsDir, `${contract.id}-${targetTimestamp}.bak.docx`);
+
+    if (!fs.existsSync(versionFilePath)) {
+      return res.status(404).send('Version not found');
+    }
+
+    const fileName = `${contract.original_filename || 'contract'}_v${versionId}.docx`;
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+    res.sendFile(versionFilePath);
+  } catch (error) {
+    console.error('[WPS-CALLBACK] Version raw download error:', error);
+    res.status(500).send('Internal error');
+  }
+});
+
+// ========== 辅助函数：计算文件 SHA1 ==========
+const getFileDigest = (filePath) => {
+  return new Promise((resolve) => {
+    try {
+      const fileBuffer = fs.readFileSync(filePath);
+      resolve(crypto.createHash('sha1').update(fileBuffer).digest('hex'));
+    } catch {
+      resolve('');
+    }
+  });
+};
+
 // ========== 扩展能力回调 ==========
 // POST /v3/3rd/files/:file_id/extend
 router.post('/v3/3rd/files/:file_id/extend', verifyWpsSignature, async (req, res) => {
   res.json(ok({ processed: true }));
+});
+
+// ========== 状态通知回调 ==========
+// POST /v3/3rd/notify
+// WPS 服务器通知文档状态变化（保存完成、版本变化等）
+router.post('/v3/3rd/notify', async (req, res) => {
+  const body = req.body || {};
+  console.log(`[WPS-CALLBACK] Notify: ${JSON.stringify(body).substring(0, 200)}`);
+  // 返回成功响应
+  res.json(ok({ received: true }));
 });
 
 module.exports = router;

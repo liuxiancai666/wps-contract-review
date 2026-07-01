@@ -1,6 +1,6 @@
 <template>
   <div class="wps-editor-wrapper w-full h-full relative">
-    <div ref="editorMount" class="wps-editor-mount w-full h-full"></div>
+    <div ref="editorMount" id="file-views-wps" class="wps-editor-mount w-full h-full"></div>
     <!-- 加载中提示 / 重新加载动画 -->
     <div v-if="!loaded" class="absolute inset-0 flex items-center justify-center bg-white bg-opacity-80 z-10">
       <div class="text-center">
@@ -27,26 +27,28 @@
 
 <script>
 import { ref, onMounted, onUnmounted, watch, nextTick, defineComponent } from 'vue';
+import { getUserId } from '../user';
 
 /**
- * WPS WebOffice 编辑器组件 v3 - 性能优化版
+ * WPS WebOffice 编辑器组件 - 参考网站方式
  * 
- * 优化点：
- * 1. wpsApplication 缓存 - 避免重复获取
- * 2. 应用实例获取队列 - 防止并发重复获取
- * 3. ready事件中自动缓存application
+ * 使用参考网站 xingfa.cjbdi.com 的接入方式：
+ * 1. 调用 /api/contracts/:id/wps-config 获取 appId, fileSuffix, mode
+ * 2. 调用 /api/contracts/:id/wps-download 获取下载 URL
+ * 3. 使用 xingfa-sdk.js 初始化 WPS SDK
  * 
  * Props:
- * - config: WPS SDK init 配置对象
- * - customButtons: 额外自定义按钮订阅映射 { key: callback }
+ * - contractId: 合同 ID
+ * - mode: 'simple' | 'edit'
  *
  * Events:
- * - onDocumentReady, onDocumentStateChange, onButtonAction
+ * - onDocumentReady, onDocumentStateChange, onButtonAction, onError
  */
 export default defineComponent({
   name: 'WpsEditor',
   props: {
-    config: { type: Object, default: null },
+    contractId: { type: [String, Number], required: true },
+    mode: { type: String, default: 'simple' },
   },
   emits: ['onDocumentReady', 'onDocumentStateChange', 'onButtonAction', 'onError'],
   setup(props, { emit }) {
@@ -57,93 +59,112 @@ export default defineComponent({
     
     let wpsInstance = null;
     let wpsApplication = null;
-    
-    // 性能优化：Application获取队列，防止并发重复获取
     let appResolveQueue = [];
     let isAppResolving = false;
 
-    const loadSDK = () => {
-      if (typeof window.WebOfficeSDK === 'undefined') {
-        const script = document.createElement('script');
-        script.src = '/wps-sdk/web-office-sdk-solution-v2.0.7.umd.js';
-        script.onload = initEditor;
-        script.onerror = () => { sdkError.value = 'WPS SDK 加载失败'; };
-        document.head.appendChild(script);
-      } else {
-        initEditor();
-      }
+    // 参考网站方式：从 cookies 获取 token
+    const getTokenFromCookie = () => {
+      const match = document.cookie.match(/(?:^|;\s*)token=([^;]*)/);
+      return match ? decodeURIComponent(match[1]) : '';
     };
 
-    const initEditor = async () => {
-      if (!props.config || !editorMount.value) return;
+    // 参考网站方式：refreshToken 函数
+    const getRefreshToken = () => {
+      const token = getTokenFromCookie();
+      return Promise.resolve({ token, timeout: 600 * 1000 });
+    };
 
-      if (wpsInstance) {
-        try { wpsInstance.destroy(); } catch {}
-        wpsInstance = null;
-      }
-      
-      // 重置状态
-      wpsApplication = null;
-      appResolveQueue = [];
-      isAppResolving = false;
+    // 加载 WPS SDK（使用官方 UMD SDK）
+    const loadSDK = () => {
+      return new Promise((resolve, reject) => {
+        if (typeof window.WebOfficeSDK !== 'undefined') {
+          resolve();
+          return;
+        }
+        const script = document.createElement('script');
+        script.src = '/wps-sdk/web-office-sdk-solution-v2.0.7.umd.js';
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error('WPS SDK 加载失败'));
+        document.head.appendChild(script);
+      });
+    };
+
+    // 初始化 WPS 编辑器
+    const initEditor = async () => {
+      if (!editorMount.value) return;
 
       try {
         loaded.value = false;
         sdkError.value = null;
+        loadingText.value = '获取 WPS 配置...';
+
+        const numericId = Number(props.contractId);
+
+        // 1. 调用 /api/contracts/:id/wps-config 获取配置
+        loadingText.value = '获取 WPS 配置...';
+        const configResp = await fetch(`/api/contracts/${numericId}/wps-config`, {
+          headers: { 'X-User-ID': getUserId() || '' }
+        });
+        if (!configResp.ok) throw new Error('获取 WPS 配置失败');
+        const wpsConfig = await configResp.json();
+        
+        // 2. 调用 /api/contracts/:id/wps-download 获取下载 URL
+        loadingText.value = '获取文档...';
+        const downloadResp = await fetch(`/api/contracts/${numericId}/wps-download`, {
+          headers: { 'X-User-ID': getUserId() || '' }
+        });
+        if (!downloadResp.ok) throw new Error('获取文档下载链接失败');
+        const downloadConfig = await downloadResp.json();
+
+        // 3. 使用参考网站方式初始化 SDK
         loadingText.value = 'WPS 文档加载中...';
+        
+        const SDK = window.WPS || window.WebOfficeSDK;
+        if (!SDK) throw new Error('WPS SDK 未加载');
 
-        const SDK = window.WebOfficeSDK;
-
-        const subscriptions = {
-          ready: () => {
-            loaded.value = true;
-            emit('onDocumentReady');
-            // 预获取并缓存application
-            fetchAndCacheApplication();
-          },
-          documentStateChange: (event) => {
-            const changed = event?.data;
-            if (typeof changed === 'boolean') emit('onDocumentStateChange', changed);
-          },
-        };
-
-        const h = props.config.headers;
-        if (h?.backBtn?.subscribe) {
-          subscriptions[h.backBtn.subscribe] = () => emit('onButtonAction', { action: 'back' });
-        }
-        if (h?.otherMenuBtn?.items) {
-          h.otherMenuBtn.items.forEach((item) => {
-            if (item.subscribe && typeof item.subscribe === 'string') {
-              subscriptions[item.subscribe] = () => emit('onButtonAction', { action: item.subscribe, text: item.text });
-            }
-          });
-        }
-
+        // 参考网站的初始化参数
         const initConfig = {
-          ...props.config,
-          mount: editorMount.value,
-          subscriptions,
-          refreshToken: async () => {
-            try {
-              const fileId = props.config?.fileId || '';
-              const numericId = fileId.replace(/^contract-/, '');
-              const resp = await fetch(`/api/contracts/${numericId}/editor-config`);
-              const data = await resp.json();
-              const ec = data.editorConfig || data;
-              return { token: ec.token, timeout: 82800 };
-            } catch {
-              return { token: '', timeout: 82800 };
-            }
+          officeType: wpsConfig.fileSuffix || 'w',  // "w", "s", "f"
+          appId: wpsConfig.appId,
+          fileId: wpsConfig.fileId || `contract-${numericId}`,
+          mode: wpsConfig.mode || props.mode || 'simple',
+          mount: '#file-views-wps',
+          token: getTokenFromCookie(),
+          refreshToken: getRefreshToken,
+          commonOptions: {
+            isShowTopArea: true,
+            isShowHeader: true,
+            isBrowserViewFullscreen: false,
+            isIframeViewFullscreen: false,
+            acceptVisualViewportResizeEvent: true,
+          },
+          wpsOptions: {
+            isShowDocMap: true,
+            isBestScale: false,
+          },
+          // 订阅事件
+          subscriptions: {
+            ready: () => {
+              loaded.value = true;
+              emit('onDocumentReady');
+              fetchAndCacheApplication();
+            },
+            documentStateChange: (event) => {
+              const changed = event?.data;
+              if (typeof changed === 'boolean') emit('onDocumentStateChange', changed);
+            },
           },
         };
 
         wpsInstance = SDK.init(initConfig);
         if (!wpsInstance) {
-          sdkError.value = 'WPS SDK init 返回空实例';
+          throw new Error('WPS SDK init 返回空实例');
         }
+
       } catch (error) {
         console.error('[WPS Editor] Init error:', error);
         sdkError.value = error.message || 'WPS 编辑器初始化失败';
+        emit('onError', error);
       }
     };
 
@@ -152,7 +173,6 @@ export default defineComponent({
       if (wpsApplication) return wpsApplication;
       if (!wpsInstance) return null;
       
-      // 已在获取中，加入队列等待
       if (isAppResolving) {
         return new Promise((resolve, reject) => {
           appResolveQueue.push({ resolve, reject });
@@ -174,14 +194,10 @@ export default defineComponent({
         }
         
         wpsApplication = app;
-        
-        // resolve队列中的所有等待者
         appResolveQueue.forEach(({ resolve }) => resolve(app));
         appResolveQueue = [];
-        
         return app;
       } catch (error) {
-        // reject队列中的所有等待者
         appResolveQueue.forEach(({ reject }) => reject(error));
         appResolveQueue = [];
         return null;
@@ -190,57 +206,61 @@ export default defineComponent({
       }
     };
 
-    // 对外暴露的getApplication - 使用缓存
+    // 对外暴露的 getApplication
     const getApplication = async () => {
       if (wpsApplication) return wpsApplication;
       return fetchAndCacheApplication();
     };
 
-    const save = async () => {
-      if (!wpsInstance || !wpsInstance.save) return null;
-      try { return await wpsInstance.save(); } catch { return null; }
-    };
-
+    // 重试初始化
     const retryInit = () => {
-      sdkError.value = null;
-      loaded.value = false;
+      if (wpsInstance) {
+        try { wpsInstance.destroy(); } catch {}
+        wpsInstance = null;
+      }
       wpsApplication = null;
-      nextTick(() => initEditor());
+      appResolveQueue = [];
+      initEditor();
     };
 
-    watch(
-      () => props.config,
-      (newVal) => {
-        if (newVal && editorMount.value) {
-          loaded.value = false;
-          wpsApplication = null;
-          appResolveQueue = [];
-          nextTick(() => initEditor());
-        }
-      },
-      { deep: true }
-    );
+    // 暴露方法给父组件（Options API 方式：在 return 中暴露）
+    // defineExpose({ getApplication, retryInit });  // <-- 这个在 Options API 中不适用
 
-    onMounted(() => { nextTick(() => loadSDK()); });
+    onMounted(async () => {
+      await loadSDK();
+      await initEditor();
+    });
 
     onUnmounted(() => {
       if (wpsInstance) {
         try { wpsInstance.destroy(); } catch {}
         wpsInstance = null;
+      }
+      wpsApplication = null;
+    });
+
+    // 监听 contractId 变化
+    watch(() => props.contractId, async (newId, oldId) => {
+      if (newId && newId !== oldId) {
+        loaded.value = false;
+        if (wpsInstance) {
+          try { wpsInstance.destroy(); } catch {}
+          wpsInstance = null;
+        }
         wpsApplication = null;
-        appResolveQueue = [];
+        await loadSDK();
+        await initEditor();
       }
     });
 
     return {
-      editorMount, loaded, sdkError, loadingText,
-      getApplication, save, retryInit,
+      editorMount,
+      loaded,
+      sdkError,
+      loadingText,
+      retryInit,
+      getApplication,  // 暴露给父组件
     };
   },
 });
 </script>
-
-<style scoped>
-.wps-editor-wrapper { position: relative; overflow: hidden; }
-.wps-editor-mount iframe { width: 100% !important; height: 100% !important; }
-</style>

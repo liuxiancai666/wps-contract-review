@@ -2786,5 +2786,119 @@ router.get('/:id/fresh-editor-config', async (req, res) => {
     }
 });
 
+// ========== 恢复指定历史版本 ==========
+// POST /api/contracts/:id/restore-version
+router.post('/:id/restore-version', async (req, res) => {
+    const userId = requireRequestUserId(req, res);
+    if (!userId) return;
+    const contractId = Number(req.params.id);
+    const { version } = req.body; // version = unix timestamp (seconds)
+
+    const contract = await findOwnedContract(contractId, userId);
+    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+    if (!version) return res.status(400).json({ error: 'version is required.' });
+
+    try {
+        const versionsDir = path.join(__dirname, '..', 'uploads', 'versions');
+        const ext = path.extname(contract.storage_path).toLowerCase() || '.docx';
+        const versionTimestamp = parseInt(version, 10) * 1000; // 转换为毫秒
+        const versionFilePath = path.join(versionsDir, `${contractId}-${versionTimestamp}${ext}`);
+
+        if (!fs.existsSync(versionFilePath)) {
+            // 尝试不带扩展名匹配
+            const files = fs.readdirSync(versionsDir).filter(f => f.startsWith(`${contractId}-${versionTimestamp}`));
+            if (files.length === 0) return res.status(404).json({ error: 'Version file not found.' });
+            const matched = path.join(versionsDir, files[0]);
+            fs.copyFileSync(matched, contract.storage_path);
+        } else {
+            fs.copyFileSync(versionFilePath, contract.storage_path);
+        }
+
+        // 更新合同时间戳和文档 key（触发编辑器重新加载）
+        const { v4: uuidv4 } = require('uuid');
+        await db('contracts').where({ id: contractId }).update({
+            document_key: uuidv4(),
+            updated_at: db.fn.now(),
+        });
+
+        res.json({ success: true, message: 'Version restored successfully.' });
+    } catch (error) {
+        console.error('[ERROR] restore-version:', error);
+        res.status(500).json({ error: 'Failed to restore version: ' + error.message });
+    }
+});
+
+// ========== 获取 WPS 编辑器配置（参考网站方式）==========
+// GET /api/contracts/:id/wps-config
+// 返回 { appId, fileSuffix, mode } 用于前端初始化 WPS SDK
+router.get('/:id/wps-config', async (req, res) => {
+    const userId = requireRequestUserId(req, res);
+    if (!userId) return;
+    const contractId = Number(req.params.id);
+
+    const contract = await findOwnedContract(contractId, userId);
+    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+
+    // 从原始文件名推断文件类型
+    const filename = contract.original_filename || '';
+    let fileSuffix = 'docx';
+    if (filename.toLowerCase().endsWith('.pdf')) {
+        fileSuffix = 'pdf';
+    } else if (filename.toLowerCase().endsWith('.doc')) {
+        fileSuffix = 'doc';
+    } else if (filename.toLowerCase().endsWith('.xls') || filename.toLowerCase().endsWith('.xlsx')) {
+        fileSuffix = 'xls';
+    }
+
+    // officeType 映射：docx/doc → w, pdf → f, xls/xlsx → s
+    const officeTypeMap = { docx: 'w', doc: 'w', pdf: 'f', xls: 's', xlsx: 's' };
+    const officeType = officeTypeMap[fileSuffix] || 'w';
+
+    // WPS AppID 从环境变量读取
+    const WPS_APP_ID = process.env.WPS_APP_ID || 'SX20260630QNEJSR';
+
+    // mode: 是否有编辑权限（edit_enabled 或 contract 编辑权限）
+    const canEdit = contract.edit_enabled === 1 || contract.user_id === userId;
+    const mode = canEdit ? 'edit' : 'simple';
+
+    res.json({
+        appId: WPS_APP_ID,
+        fileSuffix: officeType,  // 参考网站用 fileSuffix 存 officeType
+        mode,
+        fileId: `contract-${contractId}`,
+        originalFilename: contract.original_filename,
+    });
+});
+
+// ========== 获取 WPS 下载配置（参考网站方式）==========
+// GET /api/contracts/:id/wps-download
+// 返回 { url, filename } 用于 WPS SDK 下载文档
+router.get('/:id/wps-download', async (req, res) => {
+    const userId = requireRequestUserId(req, res);
+    if (!userId) return;
+    const contractId = Number(req.params.id);
+
+    const contract = await findOwnedContract(contractId, userId);
+    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+
+    // 检查文件是否存在
+    if (!contract.storage_path || !fs.existsSync(contract.storage_path)) {
+        return res.status(404).json({ error: 'File not found.' });
+    }
+
+    const downloadToken = jwt.sign(
+        { contractId, userId, exp: Math.floor(Date.now() / 1000) + 3600 },
+        WPS_TOKEN_SECRET || 'wps-secret-key'
+    );
+
+    const filename = contract.original_filename || 'document.docx';
+    const downloadUrl = `${BACKEND_URL_FOR_DOCKER || 'http://localhost:8089'}/api/contracts/${contractId}/download?token=${downloadToken}`;
+
+    res.json({
+        url: downloadUrl,
+        filename,
+    });
+});
+
 module.exports = router;
 module.exports.setIoInstance = setIoInstance;
