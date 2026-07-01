@@ -2903,6 +2903,35 @@ router.get('/:id/wps-config', async (req, res) => {
     });
 });
 
+// ========== WPS SDK 文档下载（用于 WPS WebOffice 加载文档）==========
+// GET /api/contracts/:id/download?token=xxx
+router.get('/:id/download', async (req, res) => {
+    const contractId = Number(req.params.id);
+    const { token } = req.query;
+
+    if (!token) return res.status(401).json({ error: 'Token required.' });
+
+    try {
+        const decoded = jwt.verify(token, WPS_TOKEN_SECRET || 'wps-secret-key');
+        if (decoded.contractId !== contractId) return res.status(403).json({ error: 'Invalid token.' });
+
+        const contract = await db('contracts').where({ id: contractId }).first();
+        if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+
+        if (!contract.storage_path || !fs.existsSync(contract.storage_path)) {
+            return res.status(404).json({ error: 'File not found.' });
+        }
+
+        const filename = encodeURIComponent(contract.original_filename || 'document.docx');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        fs.createReadStream(contract.storage_path).pipe(res);
+    } catch (error) {
+        console.error('[download] Error:', error.message);
+        res.status(401).json({ error: 'Invalid or expired token.' });
+    }
+});
+
 // ========== 获取 WPS 下载配置（参考网站方式）==========
 // GET /api/contracts/:id/wps-download
 // 返回 { url, filename } 用于 WPS SDK 下载文档
