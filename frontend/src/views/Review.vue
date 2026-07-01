@@ -1538,8 +1538,8 @@ export default {
     const suggestionTitle = (item, index) => firstText(item.title, item.clause, `修改建议 ${index + 1}`);
 
     const suggestionOriginal = (item) => {
-      // 优先使用 anchor_hint（更可能在文档中找到）
-      const hint = item.anchor_hint?.trim();
+      // 优先使用 anchor_hint / highlight_segment（更可能在文档中找到）
+      const hint = (item.anchor_hint || item.highlight_segment)?.trim();
       if (hint && hint.length >= 4) return hint;
 
       // 其次使用 original_text（但需要清理多余空白）
