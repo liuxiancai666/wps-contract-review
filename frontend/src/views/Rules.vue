@@ -32,7 +32,8 @@
         <article v-for="rule in items" :key="rule.id" class="rule-card" :class="{ 'rule-disabled': !rule.is_enabled }">
           <div class="rule-card-header">
             <h3>{{ rule.name }}</h3>
-            <el-tag v-if="!rule.is_enabled" size="small" type="info">已禁用</el-tag>
+            <el-tag v-if="rule.is_system" size="small" type="success">系统默认</el-tag>
+            <el-tag v-else-if="!rule.is_enabled" size="small" type="info">已禁用</el-tag>
           </div>
 
           <div v-if="rule.contract_type_keywords" class="rule-keywords">
@@ -45,7 +46,7 @@
             <span>审查规则：{{ rule.prompt_rules?.length || 0 }} 条</span>
           </div>
 
-          <div class="rule-card-actions">
+          <div v-if="!rule.is_system" class="rule-card-actions">
             <button class="text-button" @click="editRule(rule)">编辑</button>
             <button class="text-button" @click="toggleRule(rule)">{{ rule.is_enabled ? '禁用' : '启用' }}</button>
             <button class="text-danger" @click="confirmDelete(rule)">删除</button>
@@ -185,6 +186,10 @@ export default {
     };
 
     const editRule = (rule) => {
+      if (rule.is_system) {
+        ElMessage.info('系统默认规则不可修改。');
+        return;
+      }
       editingRule.value = rule;
       form.value = payloadToForm(rule);
       dialogVisible.value = true;
@@ -212,6 +217,7 @@ export default {
     };
 
     const toggleRule = async (rule) => {
+      if (rule.is_system) return;
       try {
         await apiClient.put(`/rules/${rule.id}`, { is_enabled: !rule.is_enabled });
         await loadRules();
@@ -222,6 +228,7 @@ export default {
     };
 
     const confirmDelete = async (rule) => {
+      if (rule.is_system) return;
       try {
         await ElMessageBox.confirm(`确认删除规则「${rule.name}」？删除后无法恢复。`, '确认删除', { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' });
         await apiClient.delete(`/rules/${rule.id}`);
