@@ -188,7 +188,8 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
     // 【重要】update=1 时 WPS 服务器要求在企业控制台登记 Provider 回调地址
     // 若未登记，WPS 服务器返回 ProviderError，文档无法加载。
     // 当前阶段：企业控制台配置未完成，强制只读模式让文档正常渲染。
-    const forceReadOnly = true;
+    // 启用编辑模式：改成 false + 在 WPS 控制台配置回调地址
+    const forceReadOnly = false;
 
     res.json(ok({
       read: 1,
@@ -196,7 +197,7 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
       update: forceReadOnly ? 0 : (editEnabled ? 1 : 0),
       print: 1,
       comment: editEnabled ? 1 : 0,
-      rename: 0,
+      rename: forceReadOnly ? 0 : 1,
       copy: 1,
       saveas: 1,
       history: 0,
@@ -407,6 +408,25 @@ router.post('/v3/3rd/files/:file_id/upload/complete', verifyWpsSignature, async 
     }));
   } catch (error) {
     console.error('[WPS-CALLBACK] Upload complete error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// PUT /v3/3rd/files/:file_id/name — 重命名文件（EditProvider.RenameFile）
+router.put('/v3/3rd/files/:file_id/name', verifyWpsSignature, async (req, res) => {
+  try {
+    const fileId = req.params.file_id;
+    const { name } = req.body || {};
+    if (!name) return res.status(400).json(fail('name is required'));
+
+    console.log(`[WPS-CALLBACK] RenameFile: ${fileId} → ${name}`);
+    await db('contracts').where({ id: fileId }).update({
+      original_filename: name,
+      updated_at: db.fn.now(),
+    });
+    res.json(ok({}));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] RenameFile error:', error);
     res.status(500).json(fail(error.message));
   }
 });
