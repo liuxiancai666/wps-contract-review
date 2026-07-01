@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue';
+import { setUserId } from '../user';
 
 const TOKEN_KEY = 'auth_token';
 const USER_KEY = 'auth_user';
@@ -45,6 +46,7 @@ export function useAuth() {
 
     authToken.value = data.token;
     authUser.value = { id: data.id, username: data.username, role: data.role };
+    setUserId(data.id); // 确保 API 请求头携带正确的 X-User-ID
     persist(data.token, authUser.value);
     return data;
   }
@@ -60,6 +62,7 @@ export function useAuth() {
 
     authToken.value = data.token;
     authUser.value = { id: data.id, username: data.username, role: data.role };
+    setUserId(data.id); // 确保 API 请求头携带正确的 X-User-ID
     persist(data.token, authUser.value);
     return data;
   }
@@ -67,6 +70,7 @@ export function useAuth() {
   function logout() {
     authToken.value = null;
     authUser.value = null;
+    localStorage.removeItem('user_id'); // 清除 API 用户标识
     persist(null, null);
   }
 

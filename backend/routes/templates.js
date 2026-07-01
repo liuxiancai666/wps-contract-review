@@ -10,7 +10,7 @@ const getRequestUserId = (req) => {
     return Number.isInteger(id) && id > 0 ? id : null;
 };
 
-// GET /api/templates — 返回预设模板 + 用户自定义规则合并
+// GET /api/templates — 返回预设模板 + 用户自定义规则 + 系统默认规则
 router.get('/', async (req, res) => {
     try {
         const presets = getAllTemplates();
@@ -19,13 +19,17 @@ router.get('/', async (req, res) => {
         let customRules = [];
         if (userId) {
             const rules = await db('review_rules')
-                .where({ user_id: userId, is_enabled: true })
-                .select('id', 'name', 'contract_type_keywords', 'review_points', 'core_purposes', 'prompt_rules', 'updated_at');
+                .where(function () {
+                    this.where({ user_id: userId, is_enabled: true })
+                        .orWhere({ is_system: true, is_enabled: true }); // 系统默认规则对所有用户可见
+                })
+                .select('id', 'name', 'user_id', 'contract_type_keywords', 'review_points', 'core_purposes', 'prompt_rules', 'updated_at');
 
             customRules = rules.map((r) => ({
                 id: `custom-${r.id}`,
-                name: `📋 ${r.name}`,
+                name: r.is_system ? `[系统] ${r.name}` : `📋 ${r.name}`,
                 is_custom: true,
+                is_system: r.is_system === true,
                 custom_rule_id: r.id,
                 contract_type_keywords: parseKeywords(r.contract_type_keywords),
                 review_points: parseJsonField(r.review_points, []),
@@ -38,7 +42,6 @@ router.get('/', async (req, res) => {
         res.json([...presets, ...customRules]);
     } catch (error) {
         console.error('[Templates] Merge error:', error);
-        // Fallback: return presets only
         res.json(getAllTemplates());
     }
 });

@@ -296,6 +296,17 @@
                     <button @click="exportReport('pdf')" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出PDF</button>
                     <button @click="exportReport('word')" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出Word</button>
                     <button @click="downloadPdfAnnotations" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">PDF批注</button>
+                    <el-dropdown trigger="click" class="mr-3">
+                        <span class="text-sm font-medium text-primary hover:text-primary-dark cursor-pointer">
+                            修订操作 ▾
+                        </span>
+                        <template #dropdown>
+                            <el-dropdown-menu>
+                                <el-dropdown-item @click="acceptAllRevisions">✓ 接受所有修订</el-dropdown-item>
+                                <el-dropdown-item @click="rejectAllRevisions">✗ 拒绝所有修订</el-dropdown-item>
+                            </el-dropdown-menu>
+                        </template>
+                    </el-dropdown>
                     <template v-if="cameFromHistory">
                         <button @click="goBackToUpload" class="text-sm font-medium text-primary hover:text-primary-dark">重新上传</button>
                         <button @click="goBackSmart" class="ml-4 text-sm font-medium text-primary hover:text-primary-dark">返回历史</button>
@@ -2298,12 +2309,41 @@ export default {
             ElMessage.info('当前 WPS 版本不支持文档内定位功能。');
             return;
         }
+        
+        // 方案1: 尝试通过书签定位（更快更准）
+        const doc = app.ActiveDocument;
+        const bookmarkIndex = reviewData.modification_suggestions?.findIndex(
+            item => suggestionOriginal(item) === text || suggestionText(item) === text
+        );
+        
+        if (bookmarkIndex !== -1 && doc?.Bookmarks) {
+            const bookmarkName = `risk_annotation_${bookmarkIndex}`;
+            try {
+                const bookmark = doc.Bookmarks.Item(bookmarkName);
+                if (bookmark && bookmark.Range) {
+                    await bookmark.Range.Select();
+                    if (typeof selection.ScrollIntoView === 'function') {
+                        await selection.ScrollIntoView();
+                    }
+                    // 高亮显示找到的文本
+                    await highlightCurrentRange('warning');
+                    ElMessage.success(`已通过书签定位到原文位置。`);
+                    return;
+                }
+            } catch {
+                // 书签不存在，继续使用Find
+            }
+        }
+        
+        // 方案2: 使用Find定位文本
         const found = await selection.Find.Execute({ Text: text });
         if (found) {
             if (typeof selection.ScrollIntoView === 'function') {
                 await selection.ScrollIntoView();
             }
-            ElMessage.success(`已定位到原文位置。`);
+            // 高亮显示找到的文本
+            await highlightCurrentRange('risk');
+            ElMessage.success(`已定位到原文位置并高亮显示。`);
         } else {
             const sentences = text.split(/[。；;.!?]+/).filter(s => s.trim().length >= 6);
             for (const sentence of sentences) {
@@ -2312,7 +2352,8 @@ export default {
                     if (typeof selection.ScrollIntoView === 'function') {
                         await selection.ScrollIntoView();
                     }
-                    ElMessage.success(`已定位到附近原文。`);
+                    await highlightCurrentRange('warning');
+                    ElMessage.success(`已定位到附近原文并高亮显示。`);
                     return;
                 }
             }
@@ -2602,7 +2643,182 @@ export default {
         });
     };
 
-    // 审查完成后，自动将 modification_suggestions 插入为 WPS 批注
+    // 高亮指定范围（用于风险条款标注）
+    // highlightType: 'risk' = 红色, 'warning' = 橙色, 'info' = 蓝色
+    const highlightCurrentRange = async (highlightType = 'risk') => {
+        try {
+            const app = await getWpsApplication();
+            if (!app?.ActiveDocument?.Selection) return false;
+            const range = app.ActiveDocument.Selection.Range;
+            if (!range) return false;
+            
+            // 设置高亮颜色
+            const colorMap = {
+                risk: 0xFF6666,     // 红色高亮
+                warning: 0xFFAA00,  // 橙色高亮  
+                info: 0x66B3FF,     // 蓝色高亮
+                success: 0x66FF66   // 绿色高亮
+            };
+            const color = colorMap[highlightType] || colorMap.risk;
+            
+            // WPS JSAPI: 设置文字高亮颜色
+            if (typeof range.Highlight === 'number') {
+                range.Highlight = color;
+            }
+            return true;
+        } catch (error) {
+            console.warn('[WPS Connector] highlightCurrentRange failed:', error.message);
+            return false;
+        }
+    };
+
+    // 书签管理：添加书签
+    const addBookmark = async (bookmarkName, range) => {
+        try {
+            const app = await getWpsApplication();
+            if (!app?.ActiveDocument?.Bookmarks) return false;
+            const doc = app.ActiveDocument;
+            
+            // 删除已存在的同名书签
+            try {
+                const existing = doc.Bookmarks.Item(bookmarkName);
+                if (existing) await existing.Delete();
+            } catch {}
+            
+            // 添加新书签
+            if (typeof doc.Bookmarks.Add === 'function') {
+                await doc.Bookmarks.Add(bookmarkName, range);
+                console.log(`[Bookmark] Added: ${bookmarkName}`);
+                return true;
+            }
+            return false;
+        } catch (error) {
+            console.warn('[WPS Connector] addBookmark failed:', error.message);
+            return false;
+        }
+    };
+
+    // 书签管理：通过书签名称跳转
+    const jumpToBookmark = async (bookmarkName) => {
+        try {
+            const app = await getWpsApplication();
+            if (!app?.ActiveDocument?.Bookmarks) {
+                ElMessage.info('书签功能不可用');
+                return false;
+            }
+            const doc = app.ActiveDocument;
+            
+            // 查找书签
+            let bookmark = null;
+            try {
+                bookmark = doc.Bookmarks.Item(bookmarkName);
+            } catch {
+                console.warn(`[Bookmark] Not found: ${bookmarkName}`);
+                return false;
+            }
+            
+            if (bookmark && bookmark.Range) {
+                // 选中书签所在范围并滚动视图
+                const range = bookmark.Range;
+                if (typeof range.Select === 'function') {
+                    await range.Select();
+                }
+                if (typeof range.ScrollIntoView === 'function') {
+                    await range.ScrollIntoView();
+                }
+                // 高亮显示
+                await highlightCurrentRange('warning');
+                ElMessage.success(`已跳转到书签：${bookmarkName}`);
+                return true;
+            }
+            return false;
+        } catch (error) {
+            console.warn('[WPS Connector] jumpToBookmark failed:', error.message);
+            return false;
+        }
+    };
+
+    // 修订管理：接受所有修订
+    const acceptAllRevisions = async () => {
+        if (!ensureEditorReady()) return;
+        try {
+            const app = await getWpsApplication();
+            const doc = app?.ActiveDocument;
+            if (!doc?.Revisions) {
+                ElMessage.info('当前 WPS 版本不支持修订功能');
+                return;
+            }
+            
+            const count = await doc.Revisions.Count;
+            if (count === 0) {
+                ElMessage.info('文档中没有需要接受的修订');
+                return;
+            }
+            
+            if (typeof doc.Revisions.AcceptAll === 'function') {
+                await doc.Revisions.AcceptAll();
+                ElMessage.success(`已接受 ${count} 处修订`);
+            } else {
+                // 逐条接受
+                let accepted = 0;
+                for (let i = 0; i < count; i++) {
+                    try {
+                        const rev = await doc.Revisions.Item(1); // 每次取第1条，因为接受后会删除
+                        if (rev && typeof rev.Accept === 'function') {
+                            await rev.Accept();
+                            accepted++;
+                        }
+                    } catch {}
+                }
+                ElMessage.success(`已接受 ${accepted} 处修订`);
+            }
+        } catch (error) {
+            console.warn('[WPS Connector] acceptAllRevisions failed:', error.message);
+            ElMessage.error('接受修订失败');
+        }
+    };
+
+    // 修订管理：拒绝所有修订
+    const rejectAllRevisions = async () => {
+        if (!ensureEditorReady()) return;
+        try {
+            const app = await getWpsApplication();
+            const doc = app?.ActiveDocument;
+            if (!doc?.Revisions) {
+                ElMessage.info('当前 WPS 版本不支持修订功能');
+                return;
+            }
+            
+            const count = await doc.Revisions.Count;
+            if (count === 0) {
+                ElMessage.info('文档中没有需要拒绝的修订');
+                return;
+            }
+            
+            if (typeof doc.Revisions.RejectAll === 'function') {
+                await doc.Revisions.RejectAll();
+                ElMessage.success(`已拒绝 ${count} 处修订`);
+            } else {
+                // 逐条拒绝
+                let rejected = 0;
+                for (let i = 0; i < count; i++) {
+                    try {
+                        const rev = await doc.Revisions.Item(1);
+                        if (rev && typeof rev.Reject === 'function') {
+                            await rev.Reject();
+                            rejected++;
+                        }
+                    } catch {}
+                }
+                ElMessage.success(`已拒绝 ${rejected} 处修订`);
+            }
+        } catch (error) {
+            console.warn('[WPS Connector] rejectAllRevisions failed:', error.message);
+            ElMessage.error('拒绝修订失败');
+        }
+    };
+
+    // 审查完成后，自动将 modification_suggestions 插入为 WPS 批注 + 书签
     const autoInsertAnnotations = async () => {
         if (isPdfContract || !wpsEditorRef.value || !reviewData.modification_suggestions?.length) return;
         // 等待编辑器完全就绪（最多等 15 秒）
@@ -2615,15 +2831,31 @@ export default {
         if (!app || !app.ActiveDocument?.Comments?.Add) return;
         ElMessage.info(`正在自动插入 ${reviewData.modification_suggestions.length} 条批注到文档...`);
         let success = 0;
-        for (const item of reviewData.modification_suggestions) {
+        let bookmarksCreated = 0;
+        
+        for (let idx = 0; idx < reviewData.modification_suggestions.length; idx++) {
+            const item = reviewData.modification_suggestions[idx];
             const text = suggestionOriginal(item);
             if (!text) continue;
             try {
                 const doc = app.ActiveDocument;
                 const found = await doc.Selection.Find.Execute({ Text: text });
                 if (found) {
+                    const bookmarkName = `risk_annotation_${idx}`;
                     const comment = `【AI审查】${item.title || '修改建议'}\n建议：${suggestionText(item)}\n理由：${suggestionReason(item)}`;
                     await doc.Comments.Add(comment);
+                    
+                    // 创建书签便于后续定位
+                    if (doc.Bookmarks && typeof doc.Bookmarks.Add === 'function') {
+                        const range = doc.Selection.Range;
+                        try {
+                            await doc.Bookmarks.Add(bookmarkName, range);
+                            bookmarksCreated++;
+                        } catch (e) {
+                            console.warn(`[Auto-Annotate] Bookmark failed for ${bookmarkName}:`, e.message);
+                        }
+                    }
+                    
                     success++;
                 }
             } catch (e) {
@@ -2631,7 +2863,7 @@ export default {
             }
         }
         if (success > 0) {
-            ElMessage.success(`已在文档中自动插入 ${success}/${reviewData.modification_suggestions.length} 条批注。`);
+            ElMessage.success(`已在文档中自动插入 ${success}/${reviewData.modification_suggestions.length} 条批注，其中 ${bookmarksCreated} 个书签`);
         } else {
             ElMessage.info('批注插入完成，部分原文在文档中未能准确定位。');
         }
@@ -2670,6 +2902,20 @@ export default {
             // 使用 Comments.Add 直接在当前选区添加批注（Find.Execute 已选中目标文本）
             const commentText = comment || 'AI 审查建议';
             await doc.Comments.Add(commentText);
+            
+            // Step 3: 为刚添加的批注创建书签（使用当前批注数量作为索引）
+            try {
+                const commentCount = await doc.Comments.Count;
+                const bookmarkName = `manual_comment_${commentCount}`;
+                if (doc.Bookmarks && typeof doc.Bookmarks.Add === 'function') {
+                    const selRange = doc.Selection.Range;
+                    await doc.Bookmarks.Add(bookmarkName, selRange);
+                    console.log(`[Bookmark] Created for manual comment: ${bookmarkName}`);
+                }
+            } catch (e) {
+                console.warn('[WPS Connector] addDocComment bookmark creation failed:', e.message);
+            }
+            
             ElMessage.success('已在文档中选中位置添加批注。');
         } catch (error) {
             console.warn('[WPS Connector] addDocComment error:', error);
@@ -2891,6 +3137,11 @@ export default {
       locateText,
       addDocComment,
       adoptSuggestion,
+      acceptAllRevisions,
+      rejectAllRevisions,
+      highlightCurrentRange,
+      addBookmark,
+      jumpToBookmark,
       analysisProgress,
       visibleAnalysisProgress,
       isPdfContract,
