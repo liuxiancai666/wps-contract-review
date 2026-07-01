@@ -1537,14 +1537,16 @@ ${batchContent.slice(0, 3000)}
 - 必须识别所有类型的风险（违法条款/霸王条款/不公平条款/缺失条款/程序性违规），即使是常见条款也不能跳过。
 - 重点关注：单方解释权、无偿解除、强制加班、限制生育、押金扣押、单方变更权等典型霸王条款。
 - 如果该章节无任何风险，请在 dispute_points 中返回一个空数组 []。
-- modification_suggestions 必须包含 original_text（尽量逐字摘录原文完整句子）和 suggested_text（可直接替换的完整文本）。
+- 【核心要求】所有高风险（severity: "高"）的 dispute_points 条目，必须同时在 modification_suggestions 中输出一条对应条目，包含 original_text（原文完整句子）和 suggested_text（可直接替换的完整推荐文本）。如果无法给出推荐修改，至少填入 original_text（原文摘要）和 suggested_text（留空字符串），不可缺省。
+- modification_suggestions 中的每个条目必须同时包含 original_text（原文完整句子）和 suggested_text（推荐替换文本），不允许只有描述性文字而无实际替换内容。
+- 【severity 传递】请在 modification_suggestions 的每条记录中添加 severity 字段（复制对应 dispute_points 的 severity 值），方便前端展示风险等级标签。
 - 只输出 JSON，不输出 markdown 包裹。
 
 输出 JSON 结构：
 {
   "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
   "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
-  "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}]
+  "modification_suggestions": [{"title":"建议标题","original_text":"原文完整句子（必须）","suggested_text":"推荐替换文本（必须）","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语","severity":"高/中/低（复制对应风险点的值）"}]
 }`;
     const totalBatches = batches.length;
     const prompts = batches.map((batch, idx) => {
@@ -1599,14 +1601,16 @@ ${batchContent.slice(0, 3000)}
 - 必须识别所有类型的风险（违法条款/霸王条款/不公平条款/缺失条款/程序性违规），即使是常见条款也不能跳过。
 - 重点关注：单方解释权、无偿解除、强制加班、限制生育、押金扣押、单方变更权等典型霸王条款。
 - 如果该章节无任何风险，请在 dispute_points 中返回一个空数组 []。
-- modification_suggestions 必须包含 original_text（尽量逐字摘录原文完整句子）和 suggested_text（可直接替换的完整文本）。
+- 【核心要求】所有高风险（severity: "高"）的 dispute_points 条目，必须同时在 modification_suggestions 中输出一条对应条目，包含 original_text（原文完整句子）和 suggested_text（可直接替换的完整推荐文本）。如果无法给出推荐修改，至少填入 original_text（原文摘要）和 suggested_text（留空字符串），不可缺省。
+- modification_suggestions 中的每个条目必须同时包含 original_text（原文完整句子）和 suggested_text（推荐替换文本），不允许只有描述性文字而无实际替换内容。
+- 【severity 传递】请在 modification_suggestions 的每条记录中添加 severity 字段（复制对应 dispute_points 的 severity 值），方便前端展示风险等级标签。
 - 只输出 JSON，不输出 markdown 包裹。
 
 输出 JSON 结构：
 {
   "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
   "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
-  "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}]
+  "modification_suggestions": [{"title":"建议标题","original_text":"原文完整句子（必须）","suggested_text":"推荐替换文本（必须）","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语","severity":"高/中/低（复制对应风险点的值）"}]
 }`;
     const totalBatches = batches.length;
     const allDisputePoints = [], allMissingClauses = [], allModificationSuggestions = [];
@@ -2784,13 +2788,28 @@ router.get('/:id', async (req, res) => {
             ? JSON.parse(contractRecord.analysis_result)
             : parseJsonField(contractRecord.analysis_partial_result, {});
 
-        // 为已有的 modification_suggestions 补充 id 和 filtered_content 字段
+        // 为已有的 modification_suggestions 和 dispute_points 补充 id 和 filtered_content 字段
         // 这些字段在新的分析流程中由后端自动注入，但已有合同需要在此补全
+        // 同时将 dispute_points 的 severity 同步到 modification_suggestions（severity 传递）
         if (reviewData.modification_suggestions?.length) {
+            // 建立 title → severity 映射（从 dispute_points）
+            const severityMap = {};
+            (reviewData.dispute_points || []).forEach(dp => {
+                if (dp.title) severityMap[dp.title] = dp.severity;
+            });
             reviewData.modification_suggestions = reviewData.modification_suggestions.map((item, idx) => ({
                 ...item,
                 id: item.id ?? idx,
                 filtered_content: item.filtered_content || item.anchor_hint || item.original_text || '',
+                // severity 传递：如果 modification_suggestion 没有 severity，尝试从 dispute_points 映射
+                severity: item.severity || severityMap[item.title] || null,
+            }));
+        }
+        // 为 dispute_points 也补充 id
+        if (reviewData.dispute_points?.length) {
+            reviewData.dispute_points = reviewData.dispute_points.map((item, idx) => ({
+                ...item,
+                id: item.id ?? idx,
             }));
         }
 

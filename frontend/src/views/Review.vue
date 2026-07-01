@@ -564,7 +564,10 @@
                     <div v-if="reviewData.modification_suggestions && reviewData.modification_suggestions.length > 0" class="space-y-4">
                         <div v-for="(item, index) in reviewData.modification_suggestions" :key="'ms-' + index" class="p-4 bg-bg-subtle rounded-md border border-border-color transition-all hover:shadow-md">
                             <div class="flex justify-between items-start">
-                                <p class="font-semibold text-text-dark pr-2">{{ suggestionTitle(item, index) }}</p>
+                                <div class="flex items-center gap-2 flex-1 min-w-0">
+                                    <p class="font-semibold text-text-dark pr-2 truncate">{{ suggestionTitle(item, index) }}</p>
+                                    <span v-if="item.severity" :class="severityClass(item.severity)" class="px-2 py-0.5 text-xs font-bold rounded border whitespace-nowrap flex-shrink-0">{{ severityLabel(item.severity) }}</span>
+                                </div>
                                 <div class="flex space-x-1 flex-shrink-0">
                                     <ReviewAnnotations
                                         :contract-id="contract.id"
