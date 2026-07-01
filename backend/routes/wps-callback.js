@@ -173,6 +173,7 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
 
     const ext = String(contract.original_filename || '').toLowerCase();
     const isPdf = ext.endsWith('.pdf');
+    // 默认可编辑：非PDF且edit_enabled未明确设置为false
     const editEnabled = !isPdf && contract.edit_enabled !== false;
 
     res.json(ok({
