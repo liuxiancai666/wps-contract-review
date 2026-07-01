@@ -104,7 +104,7 @@ contractRoutes.setIoInstance(io);
 app.use('/api/contracts', contractRoutes);
 app.use('/api/qa', qaRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/knowledge', knowledgeRoutes);
+app.use('/api/knowledge', authRoutes.authMiddleware, authRoutes.adminMiddleware, knowledgeRoutes);
 app.use('/api/templates', templateRoutes);
 app.use('/api/rules', rulesRoutes);
 
