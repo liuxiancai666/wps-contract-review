@@ -62,6 +62,16 @@ const buildWpsEditorConfig = (contractRecord, ext = 'docx', options = {}) => {
       // 控制文档缩放和布局
       defaultZoomMode: 1,           // 适合页面宽度
       defaultViewMode: 1,           // 页面视图模式
+      // 允许编辑模式
+      isReadOnly: false,            // 显式设置为可编辑模式
+    },
+
+    // 显式权限配置：允许编辑、批注、下载
+    permission: {
+      edit: true,
+      comment: true,
+      download: true,
+      print: true,
     },
 
     // 强制使用原始文件模式：确保文档内容与上传时完全一致
