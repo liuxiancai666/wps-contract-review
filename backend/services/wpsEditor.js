@@ -67,7 +67,7 @@ const buildWpsEditorConfig = (contractRecord, ext = 'docx', options = {}) => {
     // 强制使用原始文件模式：确保文档内容与上传时完全一致
     // 不添加任何水印、页眉页脚或其他修饰
     wordOptions: {
-      isShowInsDel: false,          // 不显示插入/删除标记
+      isShowInsDel: true,           // 默认显示插入/删除标记（修订模式）
       isShowFormatCode: false,      // 不显示格式代码
       isHideScrollBar: false,
     },
