@@ -117,18 +117,22 @@ export default defineComponent({
         // 参考网站的初始化参数（完全对齐）
         // token 直接使用 wps-config API 返回的 JWT，不再从 cookie 读
         const sdkToken = wpsConfig.token || getTokenFromCookie();
+        const sdkMode = wpsConfig.mode || 'simple';
+        // nomal（typo for normal 有审查结果）| simple | embed
+        // 审查结果页需要工具栏：nomal 模式显示顶部导航栏
+        const showToolbar = (sdkMode === 'nomal' || sdkMode === 'edit');
         const initConfig = {
           officeType: wpsConfig.fileSuffix || 'w',
           appId: wpsConfig.appId,
           endpoint: wpsConfig.endpoint || 'https://o.wpsgo.com',
           fileId: wpsConfig.fileId || `contract-${numericId}`,
-          mode: wpsConfig.mode || 'simple',
+          mode: sdkMode,
           mount: '#file-views-wps',
           // 不传 callbackUrl：SDK v2 通过 token 直连 WPS 服务器，不需要回调
           token: sdkToken,
           refreshToken: getRefreshToken,
           commonOptions: {
-            isShowTopArea: false,   // false → simple mode without top toolbar
+            isShowTopArea: showToolbar,   // 审查结果页显示工具栏
             isShowHeader: false,
             isBrowserViewFullscreen: false,
             isIframeViewFullscreen: false,
@@ -136,6 +140,8 @@ export default defineComponent({
           wordOptions: {
             isShowDocMap: false,    // 审查页不需要目录大纲
             isBestScale: false,
+            isShowToolbar: showToolbar,   // 工具栏（文件/编辑/视图等）
+            isFullscreen: false,
           },
           // userProvider: SDK 内部 UserProvider 校验所需的回调
           // update=1 时 SDK 会调用此接口获取用户信息用于本地校验
