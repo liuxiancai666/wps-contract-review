@@ -2741,6 +2741,17 @@ router.get('/:id', async (req, res) => {
         const reviewData = contractRecord.analysis_result
             ? JSON.parse(contractRecord.analysis_result)
             : parseJsonField(contractRecord.analysis_partial_result, {});
+
+        // 为已有的 modification_suggestions 补充 id 和 filtered_content 字段
+        // 这些字段在新的分析流程中由后端自动注入，但已有合同需要在此补全
+        if (reviewData.modification_suggestions?.length) {
+            reviewData.modification_suggestions = reviewData.modification_suggestions.map((item, idx) => ({
+                ...item,
+                id: item.id ?? idx,
+                filtered_content: item.filtered_content || item.anchor_hint || item.original_text || '',
+            }));
+        }
+
         res.json({
             contract: {
                 id: contractRecord.id,
