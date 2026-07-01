@@ -132,17 +132,22 @@ export default defineComponent({
           token: sdkToken,
           refreshToken: getRefreshToken,
           commonOptions: {
-            isShowTopArea: showToolbar,   // 审查结果页显示工具栏
-            isShowHeader: false,
+            isShowTopArea: showToolbar,  // 审查结果页显示工具栏
+            isShowHeader: showToolbar,   // 与星法 SDK 一致：顶部标题区
             isBrowserViewFullscreen: false,
             isIframeViewFullscreen: false,
+            acceptVisualViewportResizeEvent: true,  // 与星法 SDK 一致
           },
           wordOptions: {
             isShowDocMap: false,    // 审查页不需要目录大纲
             isBestScale: false,
-            isShowToolbar: showToolbar,   // 工具栏（文件/编辑/视图等）
             isFullscreen: false,
           },
+          // commandBars 在 init 时传给 WPS，控制命令栏显示/隐藏
+          // 这里只隐藏 FloatQuickHelp（帮助浮窗），其余工具栏按钮保持默认
+          commandBars: [
+            { cmbId: 'FloatQuickHelp', attributes: { visible: false, enable: false } },
+          ],
           // userProvider: SDK 内部 UserProvider 校验所需的回调
           // update=1 时 SDK 会调用此接口获取用户信息用于本地校验
           userProvider: {
@@ -534,6 +539,10 @@ export default defineComponent({
       adjustReplaceByBookmarkWps,
       findAllMatchPositions,
       normalizeText,
+      // 命令栏控制
+      setCommandBars: (bars) => wpsInstance?.setCommandBars(bars),
+      executeCommandBar: (cmbId) => wpsInstance?.executeCommandBar(cmbId),
+      getWpsInstance: () => wpsInstance,
     };
   },
 });
