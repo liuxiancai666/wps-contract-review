@@ -2969,6 +2969,57 @@ router.get('/:id/wps-config', async (req, res) => {
     });
 });
 
+// ========== 修复 contracts storage_path（工具端点）==========
+// POST /api/contracts/:id/repair-storage
+// 将 storage_path 指向正确文件，并重建批注
+// ========== 修复 contracts storage_path（内部工具端点）==========
+// POST /api/internal/repair-contract-146
+router.post('/internal/repair-contract-146', async (req, res) => {
+    try {
+        const contractId = 146;
+        const contract = await db('contracts').where({ id: contractId }).first();
+        if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+
+        // versions 目录中包含完整内容的备份文件
+        const versionFile = '/root/data/disk/apps/wps-contract-review/backend/uploads/versions/146-v1782894107190.bak.docx';
+        if (!fs.existsSync(versionFile)) {
+            return res.status(500).json({ error: 'Version backup not found: ' + versionFile });
+        }
+
+        // 复制正确文件到 storage_path
+        const newStoragePath = contract.storage_path;
+        fs.copyFileSync(versionFile, newStoragePath);
+        console.log(`[REPAIR] Copied ${versionFile} → ${newStoragePath}`);
+
+        // 重新读取批注数据（从 analysis_result）
+        const analysisResult = contract.analysis_result;
+        let annotations = [];
+        try {
+            const parsed = (typeof analysisResult === 'string') ? JSON.parse(analysisResult) : (analysisResult || {});
+            annotations = (parsed.dispute_points || []).map((dp, i) => ({
+                original_text: dp.original_text || '',
+                body: `【AI审查】${dp.title || `风险点 ${i + 1}`}\n${dp.description || ''}\n建议：${dp.suggestion || ''}`,
+            }));
+        } catch (e) { /* no analysis result */ }
+
+        // 如果有批注，重新写入
+        if (annotations.length > 0) {
+            try {
+                const { insertReviewComments } = require('../services/docxAnnotator');
+                const count = insertReviewComments(newStoragePath, annotations);
+                console.log(`[REPAIR] Re-inserted ${count} comments into ${newStoragePath}`);
+            } catch (e) {
+                console.warn('[REPAIR] Re-annotation failed:', e.message);
+            }
+        }
+
+        res.json({ success: true, newStoragePath, annotationCount: annotations.length });
+    } catch (error) {
+        console.error('[REPAIR] Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ========== WPS SDK 文档下载（用于 WPS WebOffice 加载文档）==========
 // GET /api/contracts/:id/download?token=xxx
 router.get('/:id/download', async (req, res) => {

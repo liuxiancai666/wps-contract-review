@@ -1,6 +1,6 @@
 <template>
-  <div class="wps-editor-wrapper w-full h-full relative">
-    <div ref="editorMount" id="file-views-wps" class="wps-editor-mount w-full h-full"></div>
+  <div class="wps-editor-wrapper w-full h-full flex flex-col relative">
+    <div ref="editorMount" id="file-views-wps" class="wps-editor-mount w-full flex-1"></div>
     <!-- 加载中提示 / 重新加载动画 -->
     <div v-if="!loaded" class="absolute inset-0 flex items-center justify-center bg-white bg-opacity-80 z-10">
       <div class="text-center">
