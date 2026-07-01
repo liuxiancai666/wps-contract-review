@@ -2327,26 +2327,77 @@ router.get('/:id/export-report', async (req, res) => {
 router.get('/:id/export-annotated-docx', async (req, res) => {
     const userId = requireRequestUserId(req, res);
     if (!userId) return;
-    const contract = await findOwnedContract(req.params.id, userId);
+    const contractIdNum = Number(req.params.id);
+    const contract = await findOwnedContract(contractIdNum, userId);
     if (!contract) return res.status(404).json({ error: 'Contract not found.' });
 
-    // WPS 三阶段保存已将批注保存到 storage_path 的 docx 文件中
-    // 直接从存储路径返回带批注的最新 docx
+    // 从 contract.analysis_result 提取批注（dispute_points / missing_clauses / modification_suggestions）
+    // 正确列名是 analysis_result，不是 review_data
+    const analysisResult = contract.analysis_result ? (
+        typeof contract.analysis_result === 'string' ? JSON.parse(contract.analysis_result) : contract.analysis_result
+    ) : null;
+
+    const ext = (contract.storage_path ? path.extname(contract.storage_path) : '.docx').toLowerCase();
+    if (ext !== '.docx') {
+        return res.status(400).json({ error: 'Only DOCX files support annotated export.' });
+    }
     if (!contract.storage_path || !fs.existsSync(contract.storage_path)) {
         return res.status(404).json({ error: 'Contract file not found on disk.' });
     }
 
-    const ext = path.extname(contract.storage_path).toLowerCase();
-    if (ext !== '.docx') {
-        return res.status(400).json({ error: 'Only DOCX files support annotated export.' });
+    // 从 reviewData 提取批注（dispute_points / missing_clauses / modification_suggestions）
+    // review_comments 表只有操作记录，不存储原文定位信息
+    const annotations = [];
+    if (analysisResult) {
+        for (const r of (analysisResult.dispute_points || [])) {
+            annotations.push({
+                original_text: r.original_clause || r.title || '',
+                body: `【AI审查—风险·${r.severity || ''}】${r.title || '风险'}\n${r.dispute_rationale || ''}\n法律依据：${r.legal_reference || ''}\n通俗说法：${r.plain_language || ''}`,
+            });
+        }
+        for (const m of (analysisResult.missing_clauses || [])) {
+            annotations.push({
+                original_text: m.title || '',
+                body: `【AI审查—缺失条款】${m.title || '缺失条款'}\n${m.description || ''}\n建议补充：${m.suggested_clause || ''}`,
+            });
+        }
+        for (const s of (analysisResult.modification_suggestions || [])) {
+            annotations.push({
+                original_text: s.original_text || s.anchor_hint || '',
+                body: `【AI审查—修改建议】${s.title || '修改建议'}\n建议：${s.suggested_text || ''}\n理由：${s.reason || ''}\n通俗说法：${s.plain_language || ''}`,
+            });
+        }
     }
 
     const basename = path.basename(contract.original_filename, ext).replace(/[^a-zA-Z0-9._-]/g, '_') || 'contract';
     const filenameAscii = basename + '-annotated.docx';
     const filenameUtf8 = encodeURIComponent(basename + '-批注版.docx');
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${filenameAscii}"; filename*=UTF-8''${filenameUtf8}`);
-    res.sendFile(contract.storage_path);
+
+    if (annotations.length === 0) {
+        // 无批注时直接返回原文件
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        return res.sendFile(contract.storage_path);
+    }
+
+    // 生成临时文件写入批注
+    const tmpPath = `/tmp/annotated-${contract.id}-${Date.now()}.docx`;
+    const { insertReviewComments } = require('../services/docxAnnotator');
+    try {
+        await insertReviewComments(contract.storage_path, annotations, tmpPath);
+        // 流式传输，出错时删临时文件
+        const fstream = fs.createReadStream(tmpPath);
+        fstream.on('error', () => { try{fs.unlinkSync(tmpPath);}catch(e){} });
+        fstream.on('end', () => { try{fs.unlinkSync(tmpPath);}catch(e){} });
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        fstream.pipe(res);
+    } catch(err) {
+        try{fs.unlinkSync(tmpPath);}catch(e){}
+        console.error('[export-annotated-docx] insertReviewComments error:', err.message);
+        // 降级：返回原文件
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        res.sendFile(contract.storage_path);
+    }
 });
 
 router.get('/:id/pdf-annotations', async (req, res) => {
@@ -2870,6 +2921,9 @@ router.get('/:id/wps-config', async (req, res) => {
     const contract = await findOwnedContract(contractId, userId);
     if (!contract) return res.status(404).json({ error: 'Contract not found.' });
 
+    // contracts 表的正确列名是 analysis_result，不是 review_data
+    const rawAnalysisResult = contract.analysis_result;
+
     // 从原始文件名推断文件类型
     const filename = contract.original_filename || '';
     let fileSuffix = 'docx';
@@ -2887,19 +2941,31 @@ router.get('/:id/wps-config', async (req, res) => {
 
     // WPS AppID 从环境变量读取
     const WPS_APP_ID = process.env.WPS_APP_ID || 'SX20260630QNEJSR';
-    const WPS_CALLBACK_BASE = process.env.WPS_CALLBACK_BASE || 'http://82.157.138.176:8085';
-    const canEdit = contract.edit_enabled === 1 || contract.user_id === userId;
-    const mode = canEdit ? 'edit' : 'simple';
+    const WPS_ENDPOINT = process.env.WPS_ENDPOINT || 'https://o.wpsgo.com';
+    const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || 'wps-secret-key';
     const fileId = `contract-${contractId}`;
+
+    // SDK mode 有效值：'nomal' | 'simple' | 'embed'
+    // 审查完成的合同（有 analysis_result）返回 nomal，浏览模式；其他返回 simple
+    const analysisResultVal = (typeof rawAnalysisResult === 'string') ? rawAnalysisResult : (rawAnalysisResult ? JSON.stringify(rawAnalysisResult) : '');
+    const hasAnalysisResult = !!(analysisResultVal && analysisResultVal !== 'null' && analysisResultVal !== '{}');
+    const mode = hasAnalysisResult ? 'nomal' : 'simple';
+
+    // 生成 WPS SDK JWT token（参考网站方式：直接返回 token 字符串，SDK 用 token 直连）
+    const wpsToken = jwt.sign(
+      { fileId, appId: WPS_APP_ID, mode, userId: userId },
+      WPS_TOKEN_SECRET,
+      { expiresIn: '2h' }
+    );
 
     res.json({
         appId: WPS_APP_ID,
+        endpoint: WPS_ENDPOINT,
         fileSuffix: officeType,
         mode,
         fileId,
         originalFilename: contract.original_filename,
-        // callbackUrl：WPS SDK 请求文件操作的回调地址（公网可达）
-        callbackUrl: `${WPS_CALLBACK_BASE}/v3/3rd/files/${fileId}`,
+        token: wpsToken,  // 直接返回 JWT 字符串，SDK 用此 token 直连 WPS 服务器
     });
 });
 

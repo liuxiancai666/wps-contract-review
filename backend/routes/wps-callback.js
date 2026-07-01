@@ -185,13 +185,15 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
       'query:', JSON.stringify(req.query).slice(0, 100)
     );
 
-    // 权限位：必须使用 Go SDK 的 GetFilePermissionReply 字段名
-    // update=编辑权限（不是edit），saveas=另存为，history=历史版本
-    // user_id: WPS 服务器用于标识当前操作用户，会在创建 session 时传递给 callbackUrl
+    // 【重要】update=1 时 SDK 本地校验 UserProvider，校验失败文档无法加载。
+    // 因此默认强制只读（update=0），让文档正常渲染。
+    // editEnabled 由数据库 edit_enabled 字段控制，仅 PDF 时为 false。
+    const forceReadOnly = true;
+
     res.json(ok({
       read: 1,
       download: 1,
-      update: editEnabled ? 1 : 0,   // 核心：编辑权限字段名是 update 不是 edit
+      update: forceReadOnly ? 0 : (editEnabled ? 1 : 0),
       print: 1,
       comment: editEnabled ? 1 : 0,
       rename: 0,
@@ -666,11 +668,10 @@ router.post('/v3/3rd/files/:file_id/requestAuthVerify', verifyWpsSignature, asyn
       return res.status(404).json(fail('File not found'));
     }
 
-    // 返回认证跳转地址（空字符串表示无需认证，直接放行）
-    // 格式参考：{ redirect_url: "https://your-sso.com/auth?file_id=xxx" }
+    // 返回认证跳转地址
+    // WPS SDK 对空的 redirect_url 解释为认证失败，改用 null 表示无需认证
     res.json(ok({
-      redirect_url: '',  // 空字符串 = 无需认证，直接继续
-      message: 'auth not required',
+      redirect_url: null,  // null = 无需认证，直接继续
     }));
   } catch (error) {
     console.error('[WPS-CALLBACK] requestAuthVerify error:', error);

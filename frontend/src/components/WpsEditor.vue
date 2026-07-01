@@ -100,41 +100,36 @@ export default defineComponent({
 
         const numericId = Number(props.contractId);
 
-        // 1. 调用 /api/contracts/:id/wps-config 获取配置
+        // 1. 调用 /api/contracts/:id/wps-config 获取配置（参考网站方式）
         loadingText.value = '获取 WPS 配置...';
         const configResp = await fetch(`/api/contracts/${numericId}/wps-config`, {
           headers: { 'X-User-ID': getUserId() || '' }
         });
         if (!configResp.ok) throw new Error('获取 WPS 配置失败');
         const wpsConfig = await configResp.json();
-        
-        // 2. 调用 /api/contracts/:id/wps-download 获取下载 URL
-        loadingText.value = '获取文档...';
-        const downloadResp = await fetch(`/api/contracts/${numericId}/wps-download`, {
-          headers: { 'X-User-ID': getUserId() || '' }
-        });
-        if (!downloadResp.ok) throw new Error('获取文档下载链接失败');
-        const downloadConfig = await downloadResp.json();
 
-        // 3. 使用参考网站方式初始化 SDK
+        // 2. 使用参考网站(xingfa.cjbdi.com)方式初始化 SDK
         loadingText.value = 'WPS 文档加载中...';
-        
+
         const SDK = window.WPS || window.WebOfficeSDK;
         if (!SDK) throw new Error('WPS SDK 未加载');
 
-        // 参考网站的初始化参数
+        // 参考网站的初始化参数（完全对齐）
+        // token 直接使用 wps-config API 返回的 JWT，不再从 cookie 读
+        const sdkToken = wpsConfig.token || getTokenFromCookie();
         const initConfig = {
-          officeType: wpsConfig.fileSuffix || 'w',  // "w", "s", "f"
+          officeType: wpsConfig.fileSuffix || 'w',
           appId: wpsConfig.appId,
+          endpoint: wpsConfig.endpoint || 'https://o.wpsgo.com',
           fileId: wpsConfig.fileId || `contract-${numericId}`,
-          mode: wpsConfig.mode || props.mode || 'simple',
+          mode: wpsConfig.mode || 'simple',
           mount: '#file-views-wps',
-          callbackUrl: wpsConfig.callbackUrl,  // WPS 请求文件操作的回调地址（公网）
-          token: getTokenFromCookie(),
+          // 不传 callbackUrl：SDK v2 通过 token 直连 WPS 服务器，不需要回调
+          token: sdkToken,
           refreshToken: getRefreshToken,
           commonOptions: {
-            isShowTopArea: true,
-            isShowHeader: true,
+            isShowTopArea: false,   // 参考网站：false → URL 加 simple&hidecmb
+            isShowHeader: false,    // 参考网站：false
             isBrowserViewFullscreen: false,
             isIframeViewFullscreen: false,
             acceptVisualViewportResizeEvent: true,
@@ -143,7 +138,6 @@ export default defineComponent({
             isShowDocMap: true,
             isBestScale: false,
           },
-          // 订阅事件
           subscriptions: {
             ready: () => {
               loaded.value = true;
