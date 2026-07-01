@@ -446,7 +446,7 @@
                                             @refresh="commentingItemKey = null"
                                         />
                                         <!-- 书签按钮组（dispute_points 新版审查有书签，存量合同降级为文本定位） -->
-                                        <el-tooltip content="定位原文（书签）" placement="top">
+                                        <el-tooltip :content="item.titleBookmark ? '定位原文（书签）' : '点击创建书签并定位'" placement="top">
                                             <button
                                                 @click="gotoDisputeBookmark(item, index)"
                                                 :class="['p-1 transition-colors', item.titleBookmark ? 'text-blue-500 hover:text-blue-700' : 'text-gray-400 hover:text-blue-500']"
@@ -454,7 +454,7 @@
                                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
                                             </button>
                                         </el-tooltip>
-                                        <el-tooltip content="原位批注（书签）" placement="top">
+                                        <el-tooltip content="点击创建书签并添加原位批注" placement="top">
                                             <button
                                                 @click="addReviewCommentByDisputeBookmark(item, index)"
                                                 :class="['p-1 transition-colors', item.editBookmark ? 'text-purple-500 hover:text-purple-700' : 'text-gray-400 hover:text-purple-500']"
@@ -462,7 +462,7 @@
                                                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
                                             </button>
                                         </el-tooltip>
-                                        <el-tooltip content="一键调整（书签）" placement="top">
+                                        <el-tooltip content="点击创建书签并一键调整" placement="top">
                                             <button
                                                 @click="adjustReplaceByDisputeBookmark(item, index)"
                                                 :class="['p-1 transition-colors', item.editBookmark ? 'text-green-500 hover:text-green-700' : 'text-gray-400 hover:text-green-500']"
@@ -865,10 +865,10 @@
                         <div v-if="reAnalyzing || analysisActive" class="reanalysis-progress p-4 bg-white rounded-md border border-border-color">
                             <div class="flex items-center justify-between mb-2">
                                 <span class="text-sm font-semibold text-text-dark">{{ loadingMessage || '正在重新审查合同...' }}</span>
-                                <span v-if="analysisPercent > 0" class="text-lg font-bold text-primary">{{ analysisPercent }}%</span>
+                                <span v-if="analysisPercent > 0" class="analysis-percent-counter text-lg font-bold text-primary">{{ analysisPercent }}%</span>
                             </div>
                             <div class="w-full bg-gray-200 rounded-full h-2 overflow-hidden mb-2">
-                                <div class="bg-primary h-2 rounded-full transition-all duration-500 ease-out" :style="{ width: analysisPercent + '%' }"></div>
+                                <div class="analysis-progress-bar-shimmer h-2 rounded-full transition-all duration-500 ease-out" :style="{ width: analysisPercent + '%' }"></div>
                             </div>
                             <div class="flex justify-between text-xs text-text-light mb-3">
                                 <span>已用时：{{ formatDuration(analysisElapsed) }}</span>
@@ -889,7 +889,8 @@
                                     <div class="analysis-progress__content">
                                         <div class="analysis-progress__title">
                                             <span>{{ step.label }}</span>
-                                            <span class="analysis-progress__status">{{ progressStatusLabel(step.status) }}</span>
+                                            <span v-if="step.status === 'running'" class="analysis-thinking-dots"><span></span><span></span><span></span></span>
+                                            <span v-else class="analysis-progress__status">{{ progressStatusLabel(step.status) }}</span>
                                         </div>
                                         <p v-if="step.message" class="analysis-progress__message">{{ step.message }}</p>
                                     </div>
@@ -907,13 +908,13 @@
         <div class="flex flex-col items-center max-w-lg bg-white border border-border-color rounded-md p-6 shadow-sm w-full mx-4">
             <div class="flex items-center justify-between w-full mb-3">
                 <p class="text-lg font-semibold text-text-dark">{{ loadingMessage }}</p>
-                <span v-if="analysisPercent > 0" class="text-2xl font-bold text-primary">{{ analysisPercent }}%</span>
+                <span v-if="analysisPercent > 0" class="analysis-percent-counter text-2xl font-bold text-primary">{{ analysisPercent }}%</span>
             </div>
 
             <!-- 进度条 -->
             <div v-if="analysisActive" class="w-full mb-3">
                 <div class="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
-                    <div class="bg-primary h-2.5 rounded-full transition-all duration-500 ease-out" :style="{ width: analysisPercent + '%' }"></div>
+                    <div class="analysis-progress-bar-shimmer h-2.5 rounded-full transition-all duration-500 ease-out" :style="{ width: analysisPercent + '%' }"></div>
                 </div>
                 <div class="flex justify-between text-xs text-text-light mt-1">
                     <span>已用时：{{ formatDuration(analysisElapsed) }}</span>
@@ -939,7 +940,8 @@
                     <div class="analysis-progress__content">
                         <div class="analysis-progress__title">
                             <span>{{ step.label }}</span>
-                            <span class="analysis-progress__status">{{ progressStatusLabel(step.status) }}</span>
+                            <span v-if="step.status === 'running'" class="analysis-thinking-dots"><span></span><span></span><span></span></span>
+                            <span v-else class="analysis-progress__status">{{ progressStatusLabel(step.status) }}</span>
                         </div>
                         <p v-if="step.message" class="analysis-progress__message">{{ step.message }}</p>
                     </div>
@@ -2613,9 +2615,11 @@ export default {
         if (!app) { ElMessage.info('WPS 文档尚未加载，请稍候'); return; }
         if (item.titleBookmark) {
             try {
-                await wpsEditorRef.value?.gotoBookmark(item.titleBookmark);
+                const ok = await wpsEditorRef.value?.gotoBookmark(item.titleBookmark);
+                if (!ok) throw new Error('gotoBookmark returned false');
             } catch (e) {
                 console.warn('[gotoDisputeBookmark] bookmark failed, recreate:', e);
+                ElMessage.info('书签已失效，正在重新定位...');
                 await createAndGotoDisputeBookmark(item, index, app);
             }
         } else {
@@ -2633,11 +2637,14 @@ export default {
         if (!wps) { await locateText(searchText, 'dispute_point', index); return; }
         try {
             const itemId = `dp_${contract.id}_${index}_${Date.now()}`;
-            const tempItem = { ...item, id: itemId, original_text: searchText };
+            // batchCreateRiskBookmarks 依赖 item.filtered_content，找不到则用 original_clause 兜底
+            const tempItem = { ...item, id: itemId, original_text: searchText, filtered_content: item.filtered_content || searchText };
             await wps.batchCreateRiskBookmarks([tempItem], app);
+            if (!tempItem.titleBookmark) throw new Error('bookmark not created');
             item.titleBookmark = tempItem.titleBookmark;
             item.editBookmark = tempItem.editBookmark;
-            await wps.gotoBookmark(tempItem.titleBookmark);
+            const ok = await wps.gotoBookmark(tempItem.titleBookmark);
+            if (!ok) throw new Error('gotoBookmark returned false');
         } catch (e) {
             console.warn('[createAndGotoDisputeBookmark] failed, fallback to text:', e);
             await locateText(searchText, 'dispute_point', index);
@@ -2687,7 +2694,7 @@ export default {
         if (!wps) return;
         try {
             const itemId = `dp_${contract.id}_${index}_${Date.now()}`;
-            const tempItem = { ...item, id: itemId, original_text: searchText };
+            const tempItem = { ...item, id: itemId, original_text: searchText, filtered_content: searchText };
             await wps.batchCreateRiskBookmarks([tempItem], app);
             item.titleBookmark = tempItem.titleBookmark;
             item.editBookmark = tempItem.editBookmark;
@@ -2727,6 +2734,7 @@ export default {
         }
 
         // 方案2: 尝试用 anchor_hint 文本搜索定位（WPS Range.Find）
+        let textSearchFailed = false;
         try {
             if (doc?.Range) {
                 // anchor_hint 通常是 2-10 个字符的短文本片断，更容易匹配
@@ -2745,14 +2753,19 @@ export default {
                                 await selection.ScrollIntoView();
                             }
                             await highlightCurrentRange('info');
-                            ElMessage.success(`已定位到："${searchText.substring(0, 10)}..."`);
+                            ElMessage.success(`已定位到：\"${searchText.substring(0, 10)}...\"`);
                             return;
                         }
+                        textSearchFailed = true;
                     }
                 }
             }
         } catch (e) {
             console.warn('[doLocateText] anchor_hint search failed:', e.message);
+            textSearchFailed = true;
+        }
+        if (textSearchFailed) {
+            console.warn('[doLocateText] text search unavailable in WebOffice, falling back to contract_start');
         }
 
         // 方案3: 书签不存在且搜索失败 → 跳转到 contract_start 书签
@@ -2764,9 +2777,9 @@ export default {
                     if (typeof selection?.ScrollIntoView === 'function') {
                         await selection.ScrollIntoView();
                     }
-                    ElMessage.info({
-                        message: `已跳转到文档开头，请手动查找："${anchorHint.substring(0, 12)}..."`,
-                        duration: 4000
+                    ElMessage.warning({
+                        message: `无法定位到原文，已跳转到文档开头。请在左侧文档中手动查找："${anchorHint.substring(0, 12)}..."`,
+                        duration: 5000
                     });
                     return;
                 }
@@ -2776,7 +2789,7 @@ export default {
         }
 
         // 方案4: 完全无法定位
-        ElMessage.info({
+        ElMessage.warning({
             message: `无法定位"${anchorHint.substring(0, 10)}..."，请在左侧文档中手动查找。`,
             duration: 4000
         });
@@ -3805,6 +3818,113 @@ export default {
 .analysis-progress__item--failed .analysis-progress__marker {
   background: #dc2626;
   border-color: #dc2626;
+}
+
+/* ========== 审查动态效果 ========== */
+
+/* 进度条流光动画 */
+.analysis-progress-bar-shimmer {
+  background: linear-gradient(
+    90deg,
+    #2563eb 0%,
+    #60a5fa 30%,
+    #93c5fd 50%,
+    #60a5fa 70%,
+    #2563eb 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer-slide 1.8s linear infinite;
+}
+@keyframes shimmer-slide {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* 正在运行步骤标记：脉冲发光 */
+.analysis-progress__item--running .analysis-progress__marker {
+  border-color: #2563eb;
+  animation: marker-pulse-glow 1.8s ease-in-out infinite;
+}
+@keyframes marker-pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(37, 99, 235, 0.25), 0 0 12px rgba(37, 99, 235, 0.3);
+  }
+}
+
+/* 步骤入场动画 */
+.analysis-progress__item--running,
+.analysis-progress__item--completed,
+.analysis-progress__item--failed {
+  animation: step-enter 0.35s ease-out;
+}
+@keyframes step-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* 连接线：步骤完成后从灰变绿动画 */
+.analysis-progress__item--completed::after {
+  background: #16a34a;
+  animation: line-fill 0.5s ease-out forwards;
+}
+@keyframes line-fill {
+  from { transform: scaleY(0); transform-origin: top; }
+  to   { transform: scaleY(1); transform-origin: top; }
+}
+
+/* AI思考中省略号动画（替代文字"进行中"） */
+.analysis-thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 14px;
+}
+.analysis-thinking-dots span {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #2563eb;
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+.analysis-thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.analysis-thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thinking-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
+
+/* 进度百分比数字滚动效果 */
+.analysis-percent-counter {
+  display: inline-block;
+  transition: transform 0.15s ease-out;
+}
+.analysis-percent-counter.tick {
+  animation: percent-pop 0.2s ease-out;
+}
+@keyframes percent-pop {
+  0%  { transform: scale(1); }
+  50% { transform: scale(1.15); }
+  100%{ transform: scale(1); }
+}
+
+/* 审查完成时的庆祝动画 */
+.analysis-progress__item--completed .analysis-progress__marker {
+  animation: completed-pop 0.4s ease-out;
+}
+@keyframes completed-pop {
+  0%   { transform: scale(0.6); opacity: 0.5; }
+  70%  { transform: scale(1.15); }
+  100% { transform: scale(1); opacity: 1; }
 }
 
 .analysis-progress__content {

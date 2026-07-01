@@ -102,8 +102,13 @@ export default defineComponent({
 
         // 1. 调用 /api/contracts/:id/wps-config 获取配置（参考网站方式）
         loadingText.value = '获取 WPS 配置...';
+        const tokenKey = 'auth_token';
+        const authToken = localStorage.getItem(tokenKey) || '';
         const configResp = await fetch(`/api/contracts/${numericId}/wps-config`, {
-          headers: { 'X-User-ID': getUserId() || '' }
+          headers: {
+            'X-User-ID': getUserId() || '',
+            ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+          }
         });
         if (!configResp.ok) throw new Error('获取 WPS 配置失败');
         const wpsConfig = await configResp.json();
@@ -346,13 +351,25 @@ export default defineComponent({
     // 查找所有匹配的原始位置（使用 WPS Find API）
     const findAllMatchPositions = async (originalText) => {
       const app = await getApplication();
-      if (!app || !app.ActiveDocument) return [];
+      if (!app || !app.ActiveDocument) { console.warn('[WPS] findAllMatchPositions: no app'); return []; }
       const positions = [];
       try {
         const doc = app.ActiveDocument;
         await doc.Range.SetRange(0, 0);
         const normText = normalizeText(originalText);
-        const findResults = await doc.Find.Execute(normText, false);
+        console.log('[WPS] findAllMatchPositions searching:', JSON.stringify(normText.substring(0, 50)));
+        let findResults = await doc.Find.Execute(normText, false);
+        console.log('[WPS] findAllMatchPositions result:', JSON.stringify(findResults));
+        
+        // WebOffice Find API 可能对长文本匹配失败，尝试缩短文本
+        if ((!Array.isArray(findResults) || !findResults.length) && normText.length > 15) {
+          console.log('[WPS] findAllMatchPositions: trying shorter text...');
+          // 尝试前15字（去掉末尾标点和空格）
+          const shortText = normText.substring(0, 15).replace(/[，。、；：""'']$/, '').trim();
+          findResults = await doc.Find.Execute(shortText, false);
+          console.log('[WPS] findAllMatchPositions short result:', JSON.stringify(findResults), 'for:', shortText);
+        }
+        
         if (!Array.isArray(findResults) || !findResults.length) return positions;
         for (const result of findResults) {
           const startPos = await doc.Range.SetRange(result.pos, result.pos + result.len);
@@ -360,8 +377,9 @@ export default defineComponent({
           const end = await startPos.End;
           positions.push([start, end]);
         }
+        console.log('[WPS] findAllMatchPositions positions:', positions);
       } catch (error) {
-        console.error('[WPS] findAllMatchPositions error:', error);
+        console.error('[WPS] findAllMatchPositions error:', error.message, error.stack);
       }
       return positions;
     };
@@ -399,22 +417,26 @@ export default defineComponent({
     // 批量创建风险书签（riskItems = [{id, filtered_content, ...}]
     const batchCreateRiskBookmarks = async (riskItems) => {
       const app = await getApplication();
-      if (!app || !app.ActiveDocument) return;
+      if (!app || !app.ActiveDocument) { console.warn('[WPS] batchCreateRiskBookmarks: no app'); return; }
       const doc = app.ActiveDocument;
       console.log('[WPS] batchCreateRiskBookmarks called with', riskItems?.length, 'items');
       try {
         const existingBookmarks = (await doc.Bookmarks.Json()).map(b => b.name);
+        console.log('[WPS] existing bookmarks:', existingBookmarks);
         for (let i = 0; i < riskItems.length; i++) {
           const item = riskItems[i];
           const itemId = item.id || i;
           const titleBookmarkName = `risk_title_${itemId}`;
           const editBookmarkName = `risk_edit_${itemId}`;
+          console.log(`[WPS] processing item ${i}: filtered_content=`, item.filtered_content ? item.filtered_content.substring(0, 30) : 'EMPTY');
           try {
             if (item.filtered_content) {
               if (existingBookmarks.includes(titleBookmarkName)) {
                 item.titleBookmark = titleBookmarkName;
+                console.log(`[WPS] item ${i}: bookmark already exists, using ${titleBookmarkName}`);
               } else {
                 const positions = await findAllMatchPositions(item.filtered_content);
+                console.log(`[WPS] item ${i}: positions=`, positions);
                 if (positions && positions.length > 0) {
                   // 创建标题书签
                   await doc.Bookmarks.Add({ Name: titleBookmarkName, Range: { Start: positions[0][0], End: positions[0][1] } });
@@ -422,8 +444,13 @@ export default defineComponent({
                   await doc.Bookmarks.Add({ Name: editBookmarkName, Range: { Start: positions[0][0], End: positions[0][1] } });
                   item.titleBookmark = titleBookmarkName;
                   item.editBookmark = editBookmarkName;
+                  console.log(`[WPS] item ${i}: created bookmarks ${titleBookmarkName} and ${editBookmarkName}`);
+                } else {
+                  console.warn(`[WPS] item ${i}: no positions found, skipping bookmark creation`);
                 }
               }
+            } else {
+              console.warn(`[WPS] item ${i}: filtered_content is empty, skipping`);
             }
           } catch (e) {
             console.warn(`[WPS] batchCreateRiskBookmarks item ${i} failed:`, e.message);
@@ -431,7 +458,7 @@ export default defineComponent({
         }
         console.log(`[WPS] batchCreateRiskBookmarks: ${riskItems.length} items processed`);
       } catch (error) {
-        console.error('[WPS] batchCreateRiskBookmarks error:', error);
+        console.error('[WPS] batchCreateRiskBookmarks error:', error.message);
       }
     };
 
@@ -439,18 +466,25 @@ export default defineComponent({
     const gotoBookmark = async (bookmarkName) => {
       if (!bookmarkName) {
         console.warn('[WPS] gotoBookmark: bookmarkName is empty');
-        return;
+        ElMessage.warning('书签不存在，无法定位');
+        return false;
       }
       const app = await getApplication();
-      if (!app) return;
+      if (!app) {
+        ElMessage.warning('WPS 文档未就绪，请稍候再试');
+        return false;
+      }
       try {
         await app.ActiveDocument.ActiveWindow.Selection.GoTo({
           What: app.Enum.WdGoToItem.wdGoToBookmark,
           Name: bookmarkName,
         });
         console.log('[WPS] gotoBookmark:', bookmarkName);
+        return true;
       } catch (error) {
         console.error('[WPS] gotoBookmark error:', error.message);
+        ElMessage.warning(`定位失败：书签「${bookmarkName}」无法找到`);
+        return false;
       }
     };
 
@@ -458,6 +492,7 @@ export default defineComponent({
     const addReviewCommentByBookmarkWps = async (editBookmark, actionData, itemId) => {
       if (!editBookmark) {
         console.warn('[WPS] addReviewCommentByBookmarkWps: editBookmark is empty');
+        ElMessage.warning('书签未创建，请先点击"定位原文"按钮创建书签后再试');
         return;
       }
       const app = await getApplication();
@@ -495,6 +530,7 @@ export default defineComponent({
         console.log('[WPS] addReviewCommentByBookmarkWps:', editBookmark, commentText.substring(0, 50));
       } catch (error) {
         console.error('[WPS] addReviewCommentByBookmarkWps error:', error.message);
+        ElMessage.error('批注添加失败：' + (error.message || '未知错误'));
       }
     };
 
@@ -502,6 +538,7 @@ export default defineComponent({
     const adjustReplaceByBookmarkWps = async (editBookmark, actionData, itemId) => {
       if (!editBookmark) {
         console.warn('[WPS] adjustReplaceByBookmarkWps: editBookmark is empty');
+        ElMessage.warning('书签未创建，请先点击"定位原文"按钮创建书签后再试');
         return;
       }
       const app = await getApplication();
@@ -525,6 +562,7 @@ export default defineComponent({
         console.log('[WPS] adjustReplaceByBookmarkWps:', editBookmark, '→', newText.substring(0, 30));
       } catch (error) {
         console.error('[WPS] adjustReplaceByBookmarkWps error:', error.message);
+        ElMessage.error('文本调整失败：' + (error.message || '未知错误'));
       }
     };
 

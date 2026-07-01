@@ -1,6 +1,8 @@
 import axios from 'axios';
 import { getUserId } from './user'; // Assuming user.js is in the same src directory
 
+const TOKEN_KEY = 'auth_token';
+
 const apiClient = axios.create({
     baseURL: (import.meta.env.VITE_APP_BACKEND_API_URL || '') + '/api',
     headers: {
@@ -8,11 +10,15 @@ const apiClient = axios.create({
     }
 });
 
-// 使用拦截器，在每个请求中自动注入用户ID到请求头
+// 使用拦截器，在每个请求中自动注入用户ID和Authorization到请求头
 apiClient.interceptors.request.use(config => {
     const userId = getUserId();
     if (userId) {
         config.headers['X-User-ID'] = userId;
+    }
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (token) {
+        config.headers['Authorization'] = `Bearer ${token}`;
     }
     return config;
 }, error => {
