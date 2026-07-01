@@ -29,11 +29,14 @@ const buildWpsEditorConfig = (contractRecord, ext = 'docx', options = {}) => {
 
   const officeType = isPdf ? 'f' : 'w';
 
+  // mode: 'nomal' = 普通模式，'simple' = 简化模式
+  // 为保证文档与原始文件100%一致，使用普通模式并禁用不必要的功能
   const config = {
     appId: WPS_APP_ID,
     fileId: `contract-${contractRecord.id || 'new'}`,
     officeType,
     token,
+    mode: 'nomal',  // 普通模式，不做额外处理
 
     customArgs: {
       contract_id: String(contractRecord.id || ''),
@@ -49,9 +52,24 @@ const buildWpsEditorConfig = (contractRecord, ext = 'docx', options = {}) => {
     },
 
     wpsOptions: {
-      isShowDocMap: true,
+      isShowDocMap: false,
       isBestScale: true,
       isShowBottomStatusBar: !isPdf,
+      // 确保文档显示与原始文件一致的关键配置
+      isStrictMode: true,           // 严格模式，减少自动转换
+      isHideCopyResult: true,       // 隐藏拷贝结果提示
+      isRemoveDocumentCalendar: true, // 不显示日历控件
+      // 控制文档缩放和布局
+      defaultZoomMode: 1,           // 适合页面宽度
+      defaultViewMode: 1,           // 页面视图模式
+    },
+
+    // 强制使用原始文件模式：确保文档内容与上传时完全一致
+    // 不添加任何水印、页眉页脚或其他修饰
+    wordOptions: {
+      isShowInsDel: false,          // 不显示插入/删除标记
+      isShowFormatCode: false,      // 不显示格式代码
+      isHideScrollBar: false,
     },
 
     // 自定义头部按钮
