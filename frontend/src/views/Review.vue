@@ -296,17 +296,13 @@
                     <button @click="exportReport('pdf')" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出PDF</button>
                     <button @click="exportReport('word')" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出Word</button>
                     <button @click="downloadPdfAnnotations" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">PDF批注</button>
-                    <el-dropdown trigger="click" class="mr-3">
-                        <span class="text-sm font-medium text-primary hover:text-primary-dark cursor-pointer">
-                            修订操作 ▾
-                        </span>
-                        <template #dropdown>
-                            <el-dropdown-menu>
-                                <el-dropdown-item @click="acceptAllRevisions">✓ 接受所有修订</el-dropdown-item>
-                                <el-dropdown-item @click="rejectAllRevisions">✗ 拒绝所有修订</el-dropdown-item>
-                            </el-dropdown-menu>
-                        </template>
-                    </el-dropdown>
+                    <button @click="toggleRevisionMenu" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark relative">
+                        修订操作 ▾
+                        <div v-if="showRevisionMenu" class="absolute top-full left-0 mt-1 bg-white shadow-lg rounded border z-50 min-w-36">
+                            <div @click="acceptAllRevisions(); showRevisionMenu = false" class="px-4 py-2 text-sm cursor-pointer hover:bg-gray-100 text-green-600">✓ 接受所有修订</div>
+                            <div @click="rejectAllRevisions(); showRevisionMenu = false" class="px-4 py-2 text-sm cursor-pointer hover:bg-gray-100 text-red-600">✗ 拒绝所有修订</div>
+                        </div>
+                    </button>
                     <template v-if="cameFromHistory">
                         <button @click="goBackToUpload" class="text-sm font-medium text-primary hover:text-primary-dark">重新上传</button>
                         <button @click="goBackSmart" class="ml-4 text-sm font-medium text-primary hover:text-primary-dark">返回历史</button>
@@ -941,6 +937,7 @@ export default {
     const socket = ref(null);
     const reAnalyzing = ref(false);
     const showPlainLanguage = ref(false);
+    const showRevisionMenu = ref(false);
     const forceSaveTimer = ref(null);
     const forceSaveDebounceTimer = ref(null);
     const forceSaveInFlight = ref(false);
@@ -2818,6 +2815,11 @@ export default {
         }
     };
 
+    // 修订管理：下拉菜单切换
+    const toggleRevisionMenu = () => {
+        showRevisionMenu.value = !showRevisionMenu.value;
+    };
+
     // 审查完成后，自动将 modification_suggestions 插入为 WPS 批注 + 书签
     const autoInsertAnnotations = async () => {
         if (isPdfContract || !wpsEditorRef.value || !reviewData.modification_suggestions?.length) return;
@@ -3111,6 +3113,8 @@ export default {
       onDocumentReady,
       onDocumentStateChange,
       showPlainLanguage,
+      showRevisionMenu,
+      toggleRevisionMenu,
       selectedSuggestionPreview,
       focusedReviewText,
       focusedReviewQuestion,
