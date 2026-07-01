@@ -18,7 +18,7 @@ const requireRequestUserId = (req, res) => {
     return userId;
 };
 
-// GET /api/rules — 列出当前用户的所有自定义规则
+// GET /api/rules — 列出当前用户的所有自定义规则（含系统默认规则）
 router.get('/', async (req, res) => {
     const userId = requireRequestUserId(req, res);
     if (!userId) return;
@@ -26,8 +26,12 @@ router.get('/', async (req, res) => {
     try {
         const rules = await db('review_rules')
             .where({ user_id: userId })
-            .orderBy('updated_at', 'desc')
-            .select('id', 'name', 'contract_type_keywords', 'review_points', 'core_purposes', 'prompt_rules', 'is_enabled', 'created_at', 'updated_at');
+            .orWhere({ is_system: true }) // 系统默认规则对所有用户可见
+            .orderBy([
+                { column: 'is_system', order: 'desc' },  // 系统规则排在前面
+                { column: 'updated_at', order: 'desc' },
+            ])
+            .select('id', 'user_id', 'name', 'contract_type_keywords', 'review_points', 'core_purposes', 'prompt_rules', 'is_enabled', 'is_system', 'created_at', 'updated_at');
 
         const deserialized = rules.map((r) => ({
             ...r,
@@ -48,8 +52,9 @@ router.get('/:id', async (req, res) => {
     if (!userId) return;
 
     try {
-        const rule = await db('review_rules').where({ id: req.params.id, user_id: userId }).first();
+        const rule = await db('review_rules').where({ id: req.params.id }).first();
         if (!rule) return res.status(404).json({ error: '规则未找到。' });
+        if (!rule.is_system && rule.user_id !== userId) return res.status(403).json({ error: '规则未找到。' });
 
         rule.review_points = parseJsonField(rule.review_points, []);
         rule.core_purposes = parseJsonField(rule.core_purposes, []);
@@ -99,8 +104,10 @@ router.put('/:id', async (req, res) => {
     if (!userId) return;
 
     try {
-        const existing = await db('review_rules').where({ id: req.params.id, user_id: userId }).first();
-        if (!existing) return res.status(404).json({ error: '规则未找到或无权修改。' });
+        const existing = await db('review_rules').where({ id: req.params.id }).first();
+        if (!existing) return res.status(404).json({ error: '规则未找到。' });
+        if (existing.is_system) return res.status(403).json({ error: '系统默认规则不可修改。' });
+        if (existing.user_id !== userId) return res.status(403).json({ error: '规则未找到或无权修改。' });
 
         const { name, contract_type_keywords, review_points, core_purposes, prompt_rules, is_enabled } = req.body;
         const updates = {};
@@ -130,8 +137,12 @@ router.delete('/:id', async (req, res) => {
     if (!userId) return;
 
     try {
-        const deleted = await db('review_rules').where({ id: req.params.id, user_id: userId }).del();
-        if (!deleted) return res.status(404).json({ error: '规则未找到或无权删除。' });
+        const existing = await db('review_rules').where({ id: req.params.id }).first();
+        if (!existing) return res.status(404).json({ error: '规则未找到。' });
+        if (existing.is_system) return res.status(403).json({ error: '系统默认规则不可删除。' });
+        if (existing.user_id !== userId) return res.status(403).json({ error: '规则未找到或无权删除。' });
+
+        await db('review_rules').where({ id: req.params.id }).del();
         res.json({ deleted: true });
     } catch (error) {
         console.error('[Rules] Delete error:', error);
