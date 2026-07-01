@@ -128,14 +128,13 @@ export default defineComponent({
           token: sdkToken,
           refreshToken: getRefreshToken,
           commonOptions: {
-            isShowTopArea: false,   // 参考网站：false → URL 加 simple&hidecmb
-            isShowHeader: false,    // 参考网站：false
+            isShowTopArea: false,   // false → simple mode without top toolbar
+            isShowHeader: false,
             isBrowserViewFullscreen: false,
             isIframeViewFullscreen: false,
-            acceptVisualViewportResizeEvent: true,
           },
-          wpsOptions: {
-            isShowDocMap: true,
+          wordOptions: {
+            isShowDocMap: false,    // 审查页不需要目录大纲
             isBestScale: false,
           },
           // userProvider: SDK 内部 UserProvider 校验所需的回调
@@ -238,10 +237,45 @@ export default defineComponent({
       if (wpsInstance) {
         try { wpsInstance.destroy(); } catch {}
         wpsInstance = null;
+        wpsApplication = null;
+        appResolveQueue = [];
       }
-      wpsApplication = null;
-      appResolveQueue = [];
       initEditor();
+    };
+
+    // 保存文档（SDK v2.0.7 原生 save 方法）
+    // 对应星法2.0的"保存文档"操作，内部通过 /v3/3rd/notify 回调通知后端
+    const save = async () => {
+      if (!wpsInstance) return;
+      try {
+        if (typeof wpsInstance.save === 'function') {
+          await wpsInstance.save();
+          console.log('[WPS] Document saved via SDK save()');
+        } else {
+          console.warn('[WPS] wpsInstance.save() not available');
+        }
+      } catch (error) {
+        console.error('[WPS] save() error:', error);
+      }
+    };
+
+    // 更新 token（token 即将过期时由后端刷新后调用此方法）
+    const setToken = async (tokenData) => {
+      if (!wpsInstance) return;
+      try {
+        if (typeof wpsInstance.setToken === 'function') {
+          await wpsInstance.setToken({
+            token: tokenData.token || tokenData,
+            timeout: tokenData.timeout || 600 * 1000,
+            hasRefreshTokenConfig: Boolean(wpsInstance.tokenData),
+          });
+          console.log('[WPS] Token updated via setToken()');
+        } else {
+          console.warn('[WPS] wpsInstance.setToken() not available');
+        }
+      } catch (error) {
+        console.error('[WPS] setToken() error:', error);
+      }
     };
 
     // 暴露方法给父组件（Options API 方式：在 return 中暴露）
@@ -484,6 +518,8 @@ export default defineComponent({
       loadingText,
       retryInit,
       getApplication,
+      save,
+      setToken,
       // 星法2.0 书签 API
       batchCreateFixBookmarks,
       batchCreateRiskBookmarks,

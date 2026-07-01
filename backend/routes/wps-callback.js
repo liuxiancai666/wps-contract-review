@@ -10,6 +10,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const db = require('../database');
 
 const router = express.Router();
@@ -19,6 +20,8 @@ const WPS_APP_ID = process.env.WPS_APP_ID || '';
 const WPS_APP_SECRET = process.env.WPS_APP_SECRET || '';
 // 回调外网基础 URL（WPS 服务器可达），从环境变量读取，或自动推断
 const WPS_CALLBACK_BASE = process.env.WPS_CALLBACK_BASE || '';
+// JWT 签名密钥（与 services/wpsEditor.js 保持一致）
+const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET || 'change-me';
 // 文件上传目录
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
 
@@ -438,6 +441,39 @@ router.get('/v3/3rd/gateway', (req, res) => {
     status: 'ok',
     timestamp: Date.now(),
   }));
+});
+
+// ========== 8.5 Token 刷新接口（供 SDK refreshToken 回调使用） ==========
+// GET /v3/3rd/token/refresh?file_id=contract-146
+router.get('/v3/3rd/token/refresh', async (req, res) => {
+  try {
+    const fileId = req.query.file_id || req.query.fileId;
+    if (!fileId) return res.status(400).json({ error: 'file_id is required' });
+
+    // 根据 fileId 从 contracts 表查找合同
+    const contractId = fileId.replace('contract-', '');
+    const contract = await db('contracts').where({ id: contractId }).first();
+    if (!contract) return res.status(404).json({ error: 'Contract not found' });
+
+    // 生成新的 JWT token（与 services/wpsEditor.js 保持一致）
+    const tokenPayload = {
+      userId: contract.user_id || 1,
+      contractId: contract.id,
+      documentKey: contract.document_key,
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 86400,
+    };
+    const token = jwt.sign(tokenPayload, WPS_TOKEN_SECRET);
+
+    res.json(ok({
+      token,
+      timeout: 600 * 1000,
+      expires_in: 600,
+    }));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] token refresh error:', error);
+    res.status(500).json({ error: 'Token refresh failed' });
+  }
 });
 
 // ========== 8. 水印接口 ==========
