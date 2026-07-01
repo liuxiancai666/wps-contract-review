@@ -13,6 +13,7 @@ const AdmZip = require('adm-zip');
 const PDFDocument = require('pdfkit');
 const { createWorker } = require('tesseract.js');
 const db = require('../database');
+const { authMiddleware } = require('./auth');
 const { searchVectorDocumentsMulti, splitIntoParagraphGroups } = require('../services/vectorStore');
 const { getTemplateById, matchTemplate } = require('../services/reviewTemplates');
 const { extractCompanyNames, searchCompanyInfo } = require('../services/webSearch');
@@ -24,12 +25,35 @@ const CONTRACT_CHUNK_MAX = Math.max(0, Number(process.env.CONTRACT_CHUNK_MAX || 
 
 const router = express.Router();
 
+// 所有 /api/contracts 路由都需要 JWT 认证（WPS 回调路由在 wps-callback.js 中独立挂载在 /v3/3rd，不受影响）
+router.use(authMiddleware);
+
 const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET || '';
 const APP_HOST = process.env.APP_HOST;
 const BACKEND_URL_FOR_DOCKER = process.env.BACKEND_URL_FOR_DOCKER || APP_HOST;
 
 const ALLOWED_EXTENSIONS = ['.docx', '.doc', '.pdf'];
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
+
+// ========== 辅助：安全发送文件（防止路径遍历攻击） ==========
+const safeSendFile = (res, filePath) => {
+    try {
+        const realPath = fs.realpathSync(filePath);
+        const realUploads = fs.realpathSync(UPLOADS_DIR);
+        if (!realPath.startsWith(realUploads + path.sep)) {
+            console.error('[contracts] Blocked path traversal attempt:', filePath);
+            return false;
+        }
+        if (!fs.existsSync(realPath)) {
+            return false;
+        }
+        res.sendFile(realPath);
+        return true;
+    } catch {
+        return false;
+    }
+};
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -128,6 +152,9 @@ const wrapContractContent = (text) => [
 ].join('\n');
 
 const getRequestUserId = (req) => {
+    // 优先从 JWT token 读取（经过 authMiddleware 验证）
+    if (req.user?.id) return Number(req.user.id);
+    // 降级：尝试从 X-User-ID 头读取（部分内部调用仍使用）
     const raw = req.header('X-User-ID') || req.body?.userId || req.query?.userId;
     const id = Number(raw);
     return Number.isInteger(id) && id > 0 ? id : null;
@@ -1106,8 +1133,10 @@ const normalizeAnalysisResult = (result) => {
 
 router.post('/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).send('No file uploaded.');
-    const { userId, groupId } = req.body;
-    if (!userId) return res.status(400).json({ error: 'User ID is required for upload.' });
+    // userId 强制来自 JWT token（经过 authMiddleware 验证），不接受 req.body.userId
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'User ID is required for upload.' });
+    const { groupId } = req.body;
 
     try {
         const contractRecord = await db.transaction(async (trx) => {
@@ -2432,7 +2461,7 @@ router.get('/:id/export-annotated-docx', async (req, res) => {
     if (annotations.length === 0) {
         // 无批注时直接返回原文件
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-        return res.sendFile(contract.storage_path);
+        if (!safeSendFile(res, contract.storage_path)) return res.status(404).json({ error: 'File not found.' });
     }
 
     // 生成临时文件写入批注
@@ -2451,7 +2480,7 @@ router.get('/:id/export-annotated-docx', async (req, res) => {
         console.error('[export-annotated-docx] insertReviewComments error:', err.message);
         // 降级：返回原文件
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-        res.sendFile(contract.storage_path);
+        if (!safeSendFile(res, contract.storage_path)) return res.status(404).json({ error: 'File not found.' });
     }
 });
 

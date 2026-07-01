@@ -31,7 +31,7 @@ const port = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors({
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: process.env.CORS_ORIGIN || process.env.APP_HOST || false,  // false=同源，APP_HOST指定前端域名
     credentials: true,
 }));
 app.use(express.json({ limit: '50mb' }));
@@ -131,6 +131,15 @@ app.use((err, req, res, next) => {
     return res.status(500).json({ error: '服务器处理请求时发生错误。' });
   }
   next();
+});
+
+// ========== 进程级异常处理（防止未捕获异常导致静默崩溃） ==========
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err.stack || err.message);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled rejection at:', promise, 'reason:', reason);
 });
 
 async function startServer() {

@@ -71,6 +71,21 @@ const verifyWpsSignature = (req, res, next) => {
 const ok = (data = null) => ({ code: 0, data, message: '' });
 const fail = (message, code = 1) => ({ code, data: null, message });
 
+// ========== 辅助：安全发送文件（防止路径遍历攻击） ==========
+const safeSendFile = (res, filePath, fallbackFilePath) => {
+    const realPath = fs.realpathSync(filePath);
+    const realUploads = fs.realpathSync(UPLOADS_DIR);
+    if (!realPath.startsWith(realUploads + path.sep)) {
+        console.error('[WPS-CALLBACK] Blocked path traversal attempt:', filePath);
+        return false;
+    }
+    if (!fs.existsSync(realPath)) {
+        return false;
+    }
+    res.sendFile(realPath);
+    return true;
+};
+
 // ========== 辅助：查询合同记录 ==========
 const findContract = async (fileId) => {
   // fileId format: "contract-77" — strip prefix to get numeric ID
@@ -224,7 +239,8 @@ router.get('/v3/3rd/files/:file_id/download/raw', async (req, res) => {
     }
     const fileName = contract.original_filename || `contract_${contract.id}.docx`;
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
-    res.sendFile(contract.storage_path);
+    const sent = safeSendFile(res, contract.storage_path);
+    if (!sent) return res.status(404).send('File not found on disk');
   } catch (error) {
     console.error('[WPS-CALLBACK] Raw download error:', error);
     res.status(500).send('Internal error');
@@ -297,7 +313,7 @@ router.get('/v3/3rd/users', verifyWpsSignature, async (req, res) => {
       let name = `用户 ${uid}`;
       let logined = true;
       try {
-        const db = require('../db');
+        const db = require('../database');
         const [row] = await db('users').where({ id: uid }).select('username', 'name');
         if (row) {
           name = row.name || row.username || name;
@@ -333,7 +349,7 @@ router.post('/v3/3rd/users', verifyWpsSignature, async (req, res) => {
       let name = `用户 ${uid}`;
       let logined = true;
       try {
-        const db = require('../db');
+        const db = require('../database');
         const [row] = await db('users').where({ id: uid }).select('username', 'name');
         if (row) {
           name = row.name || row.username || name;
@@ -365,7 +381,7 @@ router.get('/v3/3rd/users/:user_id', verifyWpsSignature, async (req, res) => {
     let name = `用户 ${userId}`;
     let logined = true;
     try {
-      const db = require('../db');
+      const db = require('../database');
       const [row] = await db('users').where({ id: userId }).select('username', 'name');
       if (row) name = row.name || row.username || name;
     } catch {}
@@ -490,7 +506,8 @@ router.put('/v3/3rd/files/:file_id/name', verifyWpsSignature, async (req, res) =
     if (!name) return res.status(400).json(fail('name is required'));
 
     console.log(`[WPS-CALLBACK] RenameFile: ${fileId} → ${name}`);
-    await db('contracts').where({ id: fileId }).update({
+    const numericId = Number(String(fileId).replace(/^contract-/, ''));
+    await db('contracts').where({ id: numericId }).update({
       original_filename: name,
       updated_at: db.fn.now(),
     });
@@ -725,7 +742,9 @@ router.get('/v3/3rd/files/:file_id/versions/:version/download/raw', async (req, 
     const currentVersionTs = Math.floor(new Date(contract.updated_at || Date.now()).getTime() / 1000);
 
     if (versionId === currentVersionTs) {
-      return res.sendFile(contract.storage_path);
+      const sent = safeSendFile(res, contract.storage_path);
+      if (!sent) return res.status(404).send('File not found on disk');
+      return;
     }
 
     const targetTimestamp = versionId * 1000;
