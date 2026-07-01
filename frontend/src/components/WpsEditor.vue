@@ -138,6 +138,32 @@ export default defineComponent({
             isShowDocMap: true,
             isBestScale: false,
           },
+          // userProvider: SDK 内部 UserProvider 校验所需的回调
+          // update=1 时 SDK 会调用此接口获取用户信息用于本地校验
+          userProvider: {
+            getUsers: async (params) => {
+              // 调用后端 /v3/3rd/users 接口（通过 nginx 代理）
+              const userIds = params?.userIds || [];
+              const query = userIds.map(id => `user_ids=${id}`).join('&');
+              const url = `/v3/3rd/users${query ? '?' + query : ''}`;
+              try {
+                const resp = await fetch(url);
+                if (!resp.ok) return [];
+                const data = await resp.json();
+                // 转换后端格式为 SDK 期望的格式
+                if (data.code === 0 && Array.isArray(data.result)) {
+                  return data.result.map(u => ({
+                    userId: u.uid || u.user_id || u.id,
+                    name: u.name || u.username || '用户',
+                    permission: u.permission || 1,
+                  }));
+                }
+                return [];
+              } catch {
+                return [];
+              }
+            },
+          },
           subscriptions: {
             ready: () => {
               loaded.value = true;

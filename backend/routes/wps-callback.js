@@ -185,9 +185,9 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
       'query:', JSON.stringify(req.query).slice(0, 100)
     );
 
-    // 【重要】update=1 时 SDK 本地校验 UserProvider，校验失败文档无法加载。
-    // 因此默认强制只读（update=0），让文档正常渲染。
-    // editEnabled 由数据库 edit_enabled 字段控制，仅 PDF 时为 false。
+    // 【重要】update=1 时 WPS 服务器要求在企业控制台登记 Provider 回调地址
+    // 若未登记，WPS 服务器返回 ProviderError，文档无法加载。
+    // 当前阶段：企业控制台配置未完成，强制只读模式让文档正常渲染。
     const forceReadOnly = true;
 
     res.json(ok({
