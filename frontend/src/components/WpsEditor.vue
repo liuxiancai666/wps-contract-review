@@ -29,8 +29,13 @@
 import { ref, onMounted, onUnmounted, watch, nextTick, defineComponent } from 'vue';
 
 /**
- * WPS WebOffice 编辑器组件 v2
- *
+ * WPS WebOffice 编辑器组件 v3 - 性能优化版
+ * 
+ * 优化点：
+ * 1. wpsApplication 缓存 - 避免重复获取
+ * 2. 应用实例获取队列 - 防止并发重复获取
+ * 3. ready事件中自动缓存application
+ * 
  * Props:
  * - config: WPS SDK init 配置对象
  * - customButtons: 额外自定义按钮订阅映射 { key: callback }
@@ -49,8 +54,13 @@ export default defineComponent({
     const loaded = ref(false);
     const sdkError = ref(null);
     const loadingText = ref('WPS 文档加载中...');
+    
     let wpsInstance = null;
     let wpsApplication = null;
+    
+    // 性能优化：Application获取队列，防止并发重复获取
+    let appResolveQueue = [];
+    let isAppResolving = false;
 
     const loadSDK = () => {
       if (typeof window.WebOfficeSDK === 'undefined') {
@@ -68,9 +78,14 @@ export default defineComponent({
       if (!props.config || !editorMount.value) return;
 
       if (wpsInstance) {
-        try { wpsInstance.destroy(); wpsApplication = null; } catch {}
+        try { wpsInstance.destroy(); } catch {}
         wpsInstance = null;
       }
+      
+      // 重置状态
+      wpsApplication = null;
+      appResolveQueue = [];
+      isAppResolving = false;
 
       try {
         loaded.value = false;
@@ -79,33 +94,24 @@ export default defineComponent({
 
         const SDK = window.WebOfficeSDK;
 
-        // 构建 subscriptions：包含 SDK 基础事件 + 自定义按钮回调
         const subscriptions = {
-          // SDK 基础事件
           ready: () => {
             loaded.value = true;
             emit('onDocumentReady');
-            wpsInstance.ready().then(app => { wpsApplication = app; }).catch(() => {});
-            if (typeof wpsInstance.advancedApiReady === 'function') {
-              wpsInstance.advancedApiReady().then(adv => { if (adv && !wpsApplication) wpsApplication = adv; }).catch(() => {});
-            }
+            // 预获取并缓存application
+            fetchAndCacheApplication();
           },
-          // 文档状态变化
           documentStateChange: (event) => {
             const changed = event?.data;
             if (typeof changed === 'boolean') emit('onDocumentStateChange', changed);
           },
         };
 
-        // 从配置的 headers 中自动构建按钮订阅
-        // 这些 subscribe 键名由 SDK 的 handleHeadersAndSubscriptionsConfig 生成：
-        // backBtn → 'wpsconfig_back_btn', otherMenuBtn items → 'wpsconfig_other_menu_btn_N'
         const h = props.config.headers;
         if (h?.backBtn?.subscribe) {
           subscriptions[h.backBtn.subscribe] = () => emit('onButtonAction', { action: 'back' });
         }
         if (h?.otherMenuBtn?.items) {
-          let customIdx = 0;
           h.otherMenuBtn.items.forEach((item) => {
             if (item.subscribe && typeof item.subscribe === 'string') {
               subscriptions[item.subscribe] = () => emit('onButtonAction', { action: item.subscribe, text: item.text });
@@ -117,7 +123,6 @@ export default defineComponent({
           ...props.config,
           mount: editorMount.value,
           subscriptions,
-          // refreshToken 回调：自动续期 Token，从 /api/contracts/{id}/editor-config 获取
           refreshToken: async () => {
             try {
               const fileId = props.config?.fileId || '';
@@ -131,9 +136,6 @@ export default defineComponent({
             }
           },
         };
-        // 移除 headers（SDK 的 userConfHandler 会读取 headers 生成内部订阅，
-        // 但我们已经在 subscriptions 中提供了回调，headers 中的 subscribe 字符串会被 SDK 忽略）
-        // 保留 headers 让 SDK 正确显示 UI 元素
 
         wpsInstance = SDK.init(initConfig);
         if (!wpsInstance) {
@@ -145,26 +147,53 @@ export default defineComponent({
       }
     };
 
-    const getApplication = async () => {
+    // 性能优化：统一获取Application，支持队列等待
+    const fetchAndCacheApplication = async () => {
       if (wpsApplication) return wpsApplication;
       if (!wpsInstance) return null;
-      try {
-        if (typeof wpsInstance.WpsApplication === 'function') {
-          const app = await wpsInstance.WpsApplication();
-          if (app) { wpsApplication = app; return app; }
-        }
-        if (typeof wpsInstance.ready === 'function') {
-          const app = await wpsInstance.ready();
-          if (app) { wpsApplication = app; return app; }
-        }
-        if (typeof wpsInstance.advancedApiReady === 'function') {
-          const app = await wpsInstance.advancedApiReady();
-          if (app) { wpsApplication = app; return app; }
-        }
-      } catch (error) {
-        console.error('[WPS Editor] Failed to get Application:', error);
+      
+      // 已在获取中，加入队列等待
+      if (isAppResolving) {
+        return new Promise((resolve, reject) => {
+          appResolveQueue.push({ resolve, reject });
+        });
       }
-      return null;
+      
+      isAppResolving = true;
+      
+      try {
+        let app = null;
+        if (typeof wpsInstance.WpsApplication === 'function') {
+          app = await wpsInstance.WpsApplication();
+        }
+        if (!app && typeof wpsInstance.advancedApiReady === 'function') {
+          app = await wpsInstance.advancedApiReady();
+        }
+        if (!app && typeof wpsInstance.ready === 'function') {
+          app = await wpsInstance.ready();
+        }
+        
+        wpsApplication = app;
+        
+        // resolve队列中的所有等待者
+        appResolveQueue.forEach(({ resolve }) => resolve(app));
+        appResolveQueue = [];
+        
+        return app;
+      } catch (error) {
+        // reject队列中的所有等待者
+        appResolveQueue.forEach(({ reject }) => reject(error));
+        appResolveQueue = [];
+        return null;
+      } finally {
+        isAppResolving = false;
+      }
+    };
+
+    // 对外暴露的getApplication - 使用缓存
+    const getApplication = async () => {
+      if (wpsApplication) return wpsApplication;
+      return fetchAndCacheApplication();
     };
 
     const save = async () => {
@@ -172,14 +201,10 @@ export default defineComponent({
       try { return await wpsInstance.save(); } catch { return null; }
     };
 
-    const advancedApiReady = async () => {
-      if (!wpsInstance || !wpsInstance.advancedApiReady) return null;
-      try { return await wpsInstance.advancedApiReady(); } catch { return null; }
-    };
-
     const retryInit = () => {
       sdkError.value = null;
       loaded.value = false;
+      wpsApplication = null;
       nextTick(() => initEditor());
     };
 
@@ -189,6 +214,7 @@ export default defineComponent({
         if (newVal && editorMount.value) {
           loaded.value = false;
           wpsApplication = null;
+          appResolveQueue = [];
           nextTick(() => initEditor());
         }
       },
@@ -202,12 +228,13 @@ export default defineComponent({
         try { wpsInstance.destroy(); } catch {}
         wpsInstance = null;
         wpsApplication = null;
+        appResolveQueue = [];
       }
     });
 
     return {
       editorMount, loaded, sdkError, loadingText,
-      getApplication, save, advancedApiReady, retryInit,
+      getApplication, save, retryInit,
     };
   },
 });

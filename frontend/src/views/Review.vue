@@ -2070,17 +2070,21 @@ export default {
       }
     });
 
-    // Load state from localStorage or from server if contract_id is in query
+    // Load state from localStorage or from server if contract_id is in query/params
     onMounted(() => {
       loadReviewTemplates();
+      // 支持两种方式获取合同ID：route.params.id 或 route.query.contract_id
+      const contractIdFromParams = route.params.id;
       const contractIdFromQuery = route.query.contract_id;
-      if (contractIdFromQuery) {
-        // If a contract_id is specified in the URL, it takes precedence.
+      const contractId = contractIdFromParams || contractIdFromQuery;
+      
+      if (contractId) {
+        // 如果URL中有合同ID，加载已有合同（查看模式）
         resetState();
         cameFromHistory.value = true; // Mark that we are in history-viewing mode
-        loadContractFromServer(contractIdFromQuery);
+        loadContractFromServer(contractId);
       } else {
-        // Otherwise, just try to load a session from localStorage.
+        // 否则从localStorage恢复或显示上传界面
         cameFromHistory.value = false;
         loadState();
       }
@@ -2821,51 +2825,71 @@ export default {
     };
 
     // 审查完成后，自动将 modification_suggestions 插入为 WPS 批注 + 书签
+    // 性能优化：一次性获取app，复用document引用
     const autoInsertAnnotations = async () => {
         if (isPdfContract || !wpsEditorRef.value || !reviewData.modification_suggestions?.length) return;
-        // 等待编辑器完全就绪（最多等 15 秒）
+        
+        // 等待编辑器就绪（最多等15秒，只检查一次）
+        let app = null;
         for (let i = 0; i < 15; i++) {
-            const app = await getWpsApplication();
+            app = await getWpsApplication();
             if (app) break;
             await new Promise(r => setTimeout(r, 1000));
         }
-        const app = await getWpsApplication();
+        app = await getWpsApplication();
         if (!app || !app.ActiveDocument?.Comments?.Add) return;
-        ElMessage.info(`正在自动插入 ${reviewData.modification_suggestions.length} 条批注到文档...`);
+        
+        const doc = app.ActiveDocument;
+        const suggestions = reviewData.modification_suggestions;
+        
+        ElMessage.info(`正在自动插入 ${suggestions.length} 条批注到文档...`);
+        
+        // 预获取document引用，减少属性访问
+        const hasBookmarks = doc.Bookmarks && typeof doc.Bookmarks.Add === 'function';
+        const hasComments = doc.Comments && typeof doc.Comments.Add === 'function';
+        
+        if (!hasComments) {
+            ElMessage.info('当前 WPS 版本不支持批注功能');
+            return;
+        }
+        
         let success = 0;
         let bookmarksCreated = 0;
         
-        for (let idx = 0; idx < reviewData.modification_suggestions.length; idx++) {
-            const item = reviewData.modification_suggestions[idx];
+        // 批量插入：减少API调用次数
+        for (let idx = 0; idx < suggestions.length; idx++) {
+            const item = suggestions[idx];
             const text = suggestionOriginal(item);
             if (!text) continue;
+            
             try {
-                const doc = app.ActiveDocument;
+                // 使用Find.Execute定位文本
                 const found = await doc.Selection.Find.Execute({ Text: text });
                 if (found) {
                     const bookmarkName = `risk_annotation_${idx}`;
                     const comment = `【AI审查】${item.title || '修改建议'}\n建议：${suggestionText(item)}\n理由：${suggestionReason(item)}`;
-                    await doc.Comments.Add(comment);
                     
-                    // 创建书签便于后续定位
-                    if (doc.Bookmarks && typeof doc.Bookmarks.Add === 'function') {
-                        const range = doc.Selection.Range;
+                    await doc.Comments.Add(comment);
+                    success++;
+                    
+                    // 创建书签（可选，失败不中断）
+                    if (hasBookmarks) {
                         try {
+                            const range = doc.Selection.Range;
                             await doc.Bookmarks.Add(bookmarkName, range);
                             bookmarksCreated++;
                         } catch (e) {
                             console.warn(`[Auto-Annotate] Bookmark failed for ${bookmarkName}:`, e.message);
                         }
                     }
-                    
-                    success++;
                 }
             } catch (e) {
                 console.warn('[Auto-Annotate] Failed for:', item.title, e.message);
             }
         }
+        
         if (success > 0) {
-            ElMessage.success(`已在文档中自动插入 ${success}/${reviewData.modification_suggestions.length} 条批注，其中 ${bookmarksCreated} 个书签`);
+            ElMessage.success(`已在文档中自动插入 ${success}/${suggestions.length} 条批注，其中 ${bookmarksCreated} 个书签`);
         } else {
             ElMessage.info('批注插入完成，部分原文在文档中未能准确定位。');
         }

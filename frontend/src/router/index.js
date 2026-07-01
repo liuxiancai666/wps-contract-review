@@ -28,6 +28,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/review/:id',
+    name: 'ReviewResult',
+    component: Review,
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/history',
     redirect: '/',
   },
