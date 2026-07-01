@@ -23,6 +23,20 @@ const { buildWpsEditorConfig } = require('../services/wpsEditor');
 // 合同正文段落 chunk 检索上限：0 = 不限；超过部分不再生成子 query，控制长合同的检索成本
 const CONTRACT_CHUNK_MAX = Math.max(0, Number(process.env.CONTRACT_CHUNK_MAX || 30));
 
+// 知识检索配额（按合同类型调整）：limit = 总配额，quotaA/B = 双通道分配
+const KNOWLEDGE_QUOTAS = {
+  '建设工程': { limit: 15, quotaA: 10, quotaB: 5 },
+  '技术开发合同': { limit: 12, quotaA: 8, quotaB: 4 },
+  '技术转让/许可合同': { limit: 12, quotaA: 8, quotaB: 4 },
+  '股权转让协议': { limit: 10, quotaA: 7, quotaB: 3 },
+  '融资租赁合同': { limit: 10, quotaA: 7, quotaB: 3 },
+  '房屋租赁合同': { limit: 10, quotaA: 7, quotaB: 3 },
+  'default': { limit: 8, quotaA: 5, quotaB: 3 },
+};
+
+// 全局风险评分权重（severity 加权而非简单计数）
+const RISK_WEIGHTS = { '高': 10, '中': 3, '低': 1 };
+
 const router = express.Router();
 
 // 所有 /api/contracts 路由都需要 JWT 认证（WPS 回调路由在 wps-callback.js 中独立挂载在 /v3/3rd，不受影响）
@@ -1003,8 +1017,12 @@ const getRelevantKnowledge = async (options, limit = 8) => {
     let channelBQueries = splitIntoParagraphGroups(options.text || '', { groupSize: 2, maxChars: 500, minChars: 5 });
     if (CONTRACT_CHUNK_MAX > 0) channelBQueries = channelBQueries.slice(0, CONTRACT_CHUNK_MAX);
 
-    const quotaA = Math.max(1, Math.round((limit * 2) / 3));
-    const quotaB = Math.max(0, limit - quotaA);
+    // 从合同类型获取知识配额，找不到则用 default
+    const contractType = options.contractType || '';
+    const quotaConfig = KNOWLEDGE_QUOTAS[contractType] || KNOWLEDGE_QUOTAS['default'];
+    const quotaA = quotaConfig.quotaA;
+    const quotaB = quotaConfig.quotaB;
+    const effectiveLimit = quotaConfig.limit;
 
     const [channelA, channelB] = await Promise.all([
         channelAQueries.length
@@ -1026,7 +1044,7 @@ const getRelevantKnowledge = async (options, limit = 8) => {
             : Promise.resolve([]),
     ]);
     
-    const result = mergeChannelsWithConfidence(channelA, channelB, limit).map(toRelevantKnowledgeItem);
+    const result = mergeChannelsWithConfidence(channelA, channelB, effectiveLimit).map(toRelevantKnowledgeItem);
     // 写入缓存
     knowledgeCache.set(cacheKey, { data: result, timestamp: Date.now() });
     return result;
@@ -1115,20 +1133,29 @@ const supplementKnownRiskPatterns = (analysisResult, plainText) => {
 
 const normalizeAnalysisResult = (result) => {
     const raw = result || {};
-    const highCount = Array.isArray(raw.dispute_points) ? raw.dispute_points.filter(p => String(p.severity || '').includes('高') || String(p.severity || '').includes('high')).length : 0;
-    const medCount = Array.isArray(raw.dispute_points) ? raw.dispute_points.filter(p => String(p.severity || '').includes('中') || String(p.severity || '').includes('medium')).length : 0;
-    const totalCount = Array.isArray(raw.dispute_points) ? raw.dispute_points.length : 0;
+    const points = raw.dispute_points || [];
+    const highCount = points.filter(p => String(p.severity || '').includes('高') || String(p.severity || '').includes('high')).length;
+    const medCount = points.filter(p => String(p.severity || '').includes('中') || String(p.severity || '').includes('medium')).length;
+    const lowCount = points.filter(p => String(p.severity || '').includes('低') || String(p.severity || '').includes('low')).length;
+    const totalCount = points.length;
+    // 加权风险评分：高=10、中=3、低=1；多个中风险叠加可超过单个高风险
+    const riskScore = points.reduce((sum, p) => {
+        const sev = String(p.severity || '').trim();
+        return sum + (RISK_WEIGHTS[sev] || 0);
+    }, 0);
     let overall_risk_level = typeof raw.overall_risk_level === 'string' ? raw.overall_risk_level.trim() : '';
     if (!overall_risk_level || !['高','中','低','high','medium','low'].includes(overall_risk_level)) {
-        if (highCount >= 3) overall_risk_level = '高'; else if (highCount >= 1) overall_risk_level = '中'; else if (medCount >= 1) overall_risk_level = '中'; else overall_risk_level = '低';
+        if (riskScore >= 20) overall_risk_level = '高';
+        else if (riskScore >= 5) overall_risk_level = '中';
+        else overall_risk_level = '低';
     }
     let overall_summary = typeof raw.overall_summary === 'string' ? raw.overall_summary.trim() : '';
     if (!overall_summary && totalCount > 0) {
         const levelMap = { '高': '高风险', '中': '中等风险', '低': '低风险', 'high': '高风险', 'medium': '中等风险', 'low': '低风险' };
         const levelLabel = levelMap[overall_risk_level] || '风险';
-        overall_summary = `本合同经 AI 深度审查，共识别出 ${totalCount} 项需关注条款，其中高风险 ${highCount} 项、中风险 ${medCount} 项。整体评定为${levelLabel}合同，建议优先处理高风险条款，重点关注试用期工资、合同解除权、竞业限制等核心权益条款。`;
+        overall_summary = `本合同经 AI 深度审查，共识别出 ${totalCount} 项需关注条款，其中高风险 ${highCount} 项、中风险 ${medCount} 项、低风险 ${lowCount} 项（综合风险评分：${riskScore}）。整体评定为${levelLabel}合同，建议优先处理高风险条款，重点关注试用期工资、合同解除权、竞业限制等核心权益条款。`;
     }
-    return { overall_summary, overall_risk_level, dispute_points: Array.isArray(raw.dispute_points) ? raw.dispute_points : [], missing_clauses: Array.isArray(raw.missing_clauses) ? raw.missing_clauses : [], party_review: Array.isArray(raw.party_review) ? raw.party_review : [], modification_suggestions: Array.isArray(raw.modification_suggestions) ? raw.modification_suggestions : [], breach_cost_analysis: Array.isArray(raw.breach_cost_analysis) ? raw.breach_cost_analysis : [], seal_analysis: Array.isArray(raw.seal_analysis) ? raw.seal_analysis : [], relevant_laws: Array.isArray(raw.relevant_laws) ? raw.relevant_laws : [], company_review: Array.isArray(raw.company_review) ? raw.company_review : [] };
+    return { overall_summary, overall_risk_level, dispute_points: points, missing_clauses: Array.isArray(raw.missing_clauses) ? raw.missing_clauses : [], party_review: Array.isArray(raw.party_review) ? raw.party_review : [], modification_suggestions: Array.isArray(raw.modification_suggestions) ? raw.modification_suggestions : [], breach_cost_analysis: Array.isArray(raw.breach_cost_analysis) ? raw.breach_cost_analysis : [], seal_analysis: Array.isArray(raw.seal_analysis) ? raw.seal_analysis : [], relevant_laws: Array.isArray(raw.relevant_laws) ? raw.relevant_laws : [], company_review: Array.isArray(raw.company_review) ? raw.company_review : [] };
 };
 
 router.post('/upload', upload.single('file'), async (req, res) => {
@@ -1545,6 +1572,7 @@ const batchReviewSections = async (batches, template, userPerspective, relevantK
     const knowledgeContext = relevantKnowledge.length > 0
         ? relevantKnowledge.map((item, idx) => `[${idx + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n')
         : '未检索到直接依据。';
+    const clauseChecklist = (template.missing_clause_checklist || []).join('；');
     const buildBatchPrompt = (batchContent, batchIdx, totalBatches) => `你是资深法务专家，请对以下合同章节（第 ${batchIdx + 1}/${totalBatches} 组）进行深度专项审查，并只输出 JSON。
 
 审查模板：${template.name}
@@ -1562,20 +1590,35 @@ ${knowledgeContext}
 ${batchContent.slice(0, 3000)}
 ---
 
+【severity 判定标准】（必须严格遵守）：
+  · 高（红色）：违反法律强制性规定（如劳动法、合同法禁止性条款）、导致合同无效或部分无效、剥夺对方核心权利、2N赔偿风险、格式霸王条款
+  · 中（橙色）：明显不公平、加重一方责任、模糊表述存在重大争议风险、程序性违规
+  · 低（绿色）：措辞不够严谨、建议优化但不影响合同效力
+  · 评分必须同时满足：title + original_clause + legal_reference + dispute_rationale 四个字段完整，非简单套用标签
+
+【修改建议格式规范】（每条 modification_suggestions 必须严格包含以下字段）：
+  · original_text: 原文中连续完整的 1-3 个句子（不可截断单词，须包含主谓宾完整结构，用于前端原文定位高亮）
+  · highlight_segment: 原文中需要修改的具体短语（ ≤20 字，用于前端定位锚点）
+  · suggested_text: 可直接复制粘贴到合同的完整替换段落（包含必要上下文，若无法给出则填空字符串 ""，禁止只写"建议修改"等描述性文字）
+  · reason: 修改理由（简明，1-2 句）
+  · plain_language: 大白话解释（1-2 句）
+  · severity: 复制对应 dispute_points 的 severity 值（高/中/低）
+
+【缺失条款检查】：请逐一核对以下标准条款是否在合同中体现，若缺失请在 missing_clauses 中列出：
+${clauseChecklist || '合同标的、价款支付、履行期限、违约责任、争议解决、通知方式、不可抗力'}
+
 硬性要求：
 - 必须识别所有类型的风险（违法条款/霸王条款/不公平条款/缺失条款/程序性违规），即使是常见条款也不能跳过。
 - 重点关注：单方解释权、无偿解除、强制加班、限制生育、押金扣押、单方变更权等典型霸王条款。
 - 如果该章节无任何风险，请在 dispute_points 中返回一个空数组 []。
-- 【核心要求】所有高风险（severity: "高"）的 dispute_points 条目，必须同时在 modification_suggestions 中输出一条对应条目，包含 original_text（原文完整句子）和 suggested_text（可直接替换的完整推荐文本）。如果无法给出推荐修改，至少填入 original_text（原文摘要）和 suggested_text（留空字符串），不可缺省。
-- modification_suggestions 中的每个条目必须同时包含 original_text（原文完整句子）和 suggested_text（推荐替换文本），不允许只有描述性文字而无实际替换内容。
-- 【severity 传递】请在 modification_suggestions 的每条记录中添加 severity 字段（复制对应 dispute_points 的 severity 值），方便前端展示风险等级标签。
+- 【核心要求】所有高风险（severity: "高"）的 dispute_points 条目，必须同时在 modification_suggestions 中输出一条对应条目，且 suggested_text 不得为空字符串（不可缺省）。
 - 只输出 JSON，不输出 markdown 包裹。
 
 输出 JSON 结构：
 {
   "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
   "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
-  "modification_suggestions": [{"title":"建议标题","original_text":"原文完整句子（必须）","suggested_text":"推荐替换文本（必须）","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语","severity":"高/中/低（复制对应风险点的值）"}]
+  "modification_suggestions": [{"title":"建议标题","original_text":"原文完整句子（必须）","highlight_segment":"修改锚点（≤20字）","suggested_text":"推荐替换文本（必须，若无则空字符串）","reason":"修改理由","plain_language":"大白话说明","severity":"高/中/低"}]
 }`;
     const totalBatches = batches.length;
     const prompts = batches.map((batch, idx) => {
@@ -1609,8 +1652,20 @@ const batchReviewSectionsWithProgress = async (batches, template, userPerspectiv
     const knowledgeContext = relevantKnowledge.length > 0
         ? relevantKnowledge.map((item, idx) => `[${idx + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n')
         : '未检索到直接依据。';
-    const buildBatchPrompt = (batchContent, batchIdx, totalBatches) => `你是资深法务专家，请对以下合同章节（第 ${batchIdx + 1}/${totalBatches} 组）进行深度专项审查，并只输出 JSON。
 
+    const clauseChecklist = (template.missing_clause_checklist || []).join('；');
+
+    // 构建跨 batch 上下文（前序已识别风险标题，避免重复）
+    const buildCrossBatchContext = (allDisputePointsSoFar) => {
+        if (!allDisputePointsSoFar.length) return '';
+        const titles = allDisputePointsSoFar.map(p => p.title).slice(-8);
+        return `\n\n【前序章节已识别风险】（避免重复，下方风险若已在列表中出现请跳过）：\n${titles.join('；')}。`;
+    };
+
+    const buildBatchPrompt = (batchContent, batchIdx, totalBatches, allDisputePointsSoFar) => {
+        const crossContext = buildCrossBatchContext(allDisputePointsSoFar);
+        return `你是资深法务专家，请对以下合同章节（第 ${batchIdx + 1}/${totalBatches} 组）进行深度专项审查，并只输出 JSON。
+${crossContext}
 审查模板：${template.name}
 合同类型：${template.name}
 用户立场：${userPerspective}
@@ -1626,21 +1681,38 @@ ${knowledgeContext}
 ${batchContent.slice(0, 3000)}
 ---
 
+【severity 判定标准】（必须严格遵守）：
+  · 高（红色）：违反法律强制性规定（如劳动法、合同法禁止性条款）、导致合同无效或部分无效、剥夺对方核心权利、2N赔偿风险、格式霸王条款
+  · 中（橙色）：明显不公平、加重一方责任、模糊表述存在重大争议风险、程序性违规
+  · 低（绿色）：措辞不够严谨、建议优化但不影响合同效力
+  · 评分必须同时满足：title + original_clause + legal_reference + dispute_rationale 四个字段完整，非简单套用标签
+
+【修改建议格式规范】（每条 modification_suggestions 必须严格包含以下字段）：
+  · original_text: 原文中连续完整的 1-3 个句子（不可截断单词，须包含主谓宾完整结构，用于前端原文定位高亮）
+  · highlight_segment: 原文中需要修改的具体短语（ ≤20 字，用于前端定位锚点，建议从 original_text 中提取最具识别性的片段）
+  · suggested_text: 可直接复制粘贴到合同的完整替换段落（包含必要上下文，若无法给出则填空字符串 ""，禁止只写"建议修改"等描述性文字）
+  · reason: 修改理由（简明，1-2 句）
+  · plain_language: 大白话解释（1-2 句）
+  · severity: 复制对应 dispute_points 的 severity 值（高/中/低）
+
+【缺失条款检查】：请逐一核对以下标准条款是否在合同中体现，若缺失请在 missing_clauses 中列出：
+${clauseChecklist || '合同标的、价款支付、履行期限、违约责任、争议解决、通知方式、不可抗力'}
+
 硬性要求：
 - 必须识别所有类型的风险（违法条款/霸王条款/不公平条款/缺失条款/程序性违规），即使是常见条款也不能跳过。
 - 重点关注：单方解释权、无偿解除、强制加班、限制生育、押金扣押、单方变更权等典型霸王条款。
 - 如果该章节无任何风险，请在 dispute_points 中返回一个空数组 []。
-- 【核心要求】所有高风险（severity: "高"）的 dispute_points 条目，必须同时在 modification_suggestions 中输出一条对应条目，包含 original_text（原文完整句子）和 suggested_text（可直接替换的完整推荐文本）。如果无法给出推荐修改，至少填入 original_text（原文摘要）和 suggested_text（留空字符串），不可缺省。
-- modification_suggestions 中的每个条目必须同时包含 original_text（原文完整句子）和 suggested_text（推荐替换文本），不允许只有描述性文字而无实际替换内容。
-- 【severity 传递】请在 modification_suggestions 的每条记录中添加 severity 字段（复制对应 dispute_points 的 severity 值），方便前端展示风险等级标签。
+- 【核心要求】所有高风险（severity: "高"）的 dispute_points 条目，必须同时在 modification_suggestions 中输出一条对应条目，且 suggested_text 不得为空字符串（不可缺省）。
 - 只输出 JSON，不输出 markdown 包裹。
 
 输出 JSON 结构：
 {
   "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
   "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
-  "modification_suggestions": [{"title":"建议标题","original_text":"原文完整句子（必须）","suggested_text":"推荐替换文本（必须）","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语","severity":"高/中/低（复制对应风险点的值）"}]
+  "modification_suggestions": [{"title":"建议标题","original_text":"原文完整句子（必须）","highlight_segment":"修改锚点（≤20字）","suggested_text":"推荐替换文本（必须，若无则空字符串）","reason":"修改理由","plain_language":"大白话说明","severity":"高/中/低"}]
 }`;
+    };
+
     const totalBatches = batches.length;
     const allDisputePoints = [], allMissingClauses = [], allModificationSuggestions = [];
     const seenClauseKeys = new Set();
@@ -1658,7 +1730,7 @@ ${batchContent.slice(0, 3000)}
         const batch = batches[idx];
         let content = String(batch.content || batch.combinedContent || '');
         const titleContext = batch.titles?.length ? `所属章节：${batch.titles.join('、')}\n\n` : '';
-        const prompt = buildBatchPrompt(content.length >= 50 ? titleContext + content : content, idx, totalBatches);
+        const prompt = buildBatchPrompt(content.length >= 50 ? titleContext + content : content, idx, totalBatches, allDisputePoints);
         try {
             const result = await callJsonLLMFn(prompt);
             if (result) {
@@ -2022,6 +2094,19 @@ router.post('/review-text', async (req, res) => {
 审查立场：${perspective || '未指定'}
 专项问题：${question || '识别该段文本的法律风险、可修改点，并给出可替换文本。'}
 
+【severity 判定标准】：
+  · 高：违反法律强制性规定、导致合同无效、剥夺对方核心权利、2N赔偿风险
+  · 中：明显不公平、加重一方责任、模糊表述存在争议风险
+  · 低：措辞不够严谨、建议优化但不影响合同效力
+
+【修改建议格式规范】：
+  · original_text: 原文中连续完整的 1-3 个句子（不可截断单词，须包含主谓宾完整结构）
+  · highlight_segment: 原文中需要修改的具体短语（ ≤20 字，用于前端定位锚点）
+  · suggested_text: 可直接复制粘贴到合同的完整替换段落（若无需修改则填空字符串 ""，禁止只写"建议修改"等描述性文字）
+  · reason: 修改理由（简明，1-2 句）
+  · plain_language: 大白话解释（1-2 句）
+  · severity: 高/中/低
+
 可引用依据（只能引用以下内容，不得虚构）：
 ${relevantKnowledge.map((item, index) => `[${index + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n') || '未检索到直接依据。'}
 
@@ -2037,8 +2122,10 @@ ${wrapContractContent(text)}
 
 输出 JSON：
 {
+  "severity": "高/中/低",
   "risk_summary": "风险结论",
   "suggested_text": "可直接替换原文的完整文本；如无需修改则为空字符串",
+  "highlight_segment": "修改锚点（≤20字）",
   "reason": "专业理由",
   "plain_language": "大白话说明",
   "citations": [{"source_type":"law/case","title":"依据名称","clause":"条号或片段","content":"引用内容"}]}`;
