@@ -143,6 +143,18 @@ async function resetAndRebuildDatabase() {
             table.index(['contract_id', 'item_type', 'item_index']);
         });
         console.log('[DB Init] New `review_comments` table created successfully.');
+    } else {
+        // 列迁移：确保 action_type 列存在（旧表可能缺少此列）
+        const cols = await db.raw(`SELECT column_name FROM information_schema.columns WHERE table_name = 'review_comments'`);
+        const existingCols = new Set(cols.rows.map(r => r.column_name));
+        if (!existingCols.has('action_type')) {
+            console.log('[DB Init] Adding action_type column to review_comments...');
+            await db.schema.raw("ALTER TABLE review_comments ADD COLUMN action_type VARCHAR NOT NULL DEFAULT 'comment'");
+        }
+        if (!existingCols.has('is_resolved')) {
+            console.log('[DB Init] Adding is_resolved column to review_comments...');
+            await db.schema.raw("ALTER TABLE review_comments ADD COLUMN is_resolved BOOLEAN DEFAULT false");
+        }
     }
 
     const hasReviewRulesTable = await db.schema.hasTable('review_rules');

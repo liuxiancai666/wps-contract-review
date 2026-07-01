@@ -2431,19 +2431,26 @@ router.post('/:id/comments', async (req, res) => {
     }
 
     try {
-        const [id] = await db('review_comments').insert({
+        const now = new Date();
+        await db('review_comments').insert({
             contract_id: contract.id,
-            user_id: Number(userId),
+            user_id: userId,
             item_type,
             item_index,
             action_type,
             comment_text: comment_text || null,
             is_resolved: false,
-        }).returning('id');
-        const row = await db('review_comments').where({ id }).first();
-        res.json(row);
+            created_at: now,
+            updated_at: now,
+        });
+        // 用 max(id) 获取刚插入的行的 id
+        const row = await db('review_comments')
+            .where({ contract_id: contract.id, user_id: userId, item_type, item_index, action_type })
+            .orderBy('id', 'desc')
+            .first();
+        res.status(201).json(row);
     } catch (error) {
-        console.error('[ERROR] Failed to add review comment:', error);
+        console.error('[ERROR] Failed to add review comment:', error.message, error.code, error.stack);
         res.status(500).json({ error: 'Failed to add comment.' });
     }
 });

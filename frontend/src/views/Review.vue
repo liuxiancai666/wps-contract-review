@@ -440,7 +440,10 @@
                                             :item-index="index"
                                             :comments="getAnnotations('dispute_point', index)"
                                             :summary="getAnnotationSummary('dispute_point', index)"
+                                            :current-user-id="userId"
+                                            :open-comment="commentingItemKey === 'dispute_point:' + index"
                                             @add-comment="handleAddAnnotation"
+                                            @refresh="commentingItemKey = null"
                                         />
                                         <span v-if="item.severity" :class="severityClass(item.severity)" class="px-2 py-0.5 text-xs font-bold rounded border whitespace-nowrap">{{ severityLabel(item.severity) }}</span>
                                     </div>
@@ -529,7 +532,10 @@
                                     :item-index="index"
                                     :comments="getAnnotations('missing_clause', index)"
                                     :summary="getAnnotationSummary('missing_clause', index)"
+                                    :current-user-id="userId"
+                                    :open-comment="commentingItemKey === 'missing_clause:' + index"
                                     @add-comment="handleAddAnnotation"
+                                    @refresh="commentingItemKey = null"
                                 />
                             </div>
                             <p class="mt-1 text-sm text-text-main">{{ item.description }}</p>
@@ -566,15 +572,18 @@
                                         :item-index="index"
                                         :comments="getAnnotations('suggestion', index)"
                                         :summary="getAnnotationSummary('suggestion', index)"
+                                        :current-user-id="userId"
+                                        :open-comment="commentingItemKey === 'suggestion:' + index"
                                         @add-comment="handleAddAnnotation"
+                                        @refresh="commentingItemKey = null"
                                     />
                                     <el-tooltip content="在文档中定位" placement="top">
-                                        <button @click="locateText(suggestionOriginal(item))" class="p-1 text-gray-400 hover:text-primary transition-colors">
+                                        <button @click="locateText(suggestionOriginal(item), 'suggestion', index)" class="p-1 text-gray-400 hover:text-primary transition-colors">
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                                         </button>
                                     </el-tooltip>
                                     <el-tooltip content="添加批注" placement="top">
-                                        <button @click="addDocComment(suggestionOriginal(item), suggestionReason(item))" class="p-1 text-gray-400 hover:text-primary transition-colors">
+                                        <button @click="addDocComment(suggestionOriginal(item), suggestionReason(item), 'suggestion', index)" class="p-1 text-gray-400 hover:text-primary transition-colors">
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" /></svg>
                                         </button>
                                     </el-tooltip>
@@ -1042,15 +1051,18 @@ export default {
     const versionHistoryDropdown = ref(null);
     const watermarkDropdown = ref(null);
     const visibleAnalysisProgress = computed(() => analysisProgress.value.slice(-6));
+    // 控制当前哪个建议项的批注面板应打开（key = "type:index"）
+    const commentingItemKey = ref(null);
     // 判断当前合同是否为 PDF（PDF 不支持原文改写/采纳）
     const isPdfContract = computed(() => {
         const name = String(contract.original_filename || '').toLowerCase();
         return name.endsWith('.pdf');
     });
     // WPS 编辑器模式：当前用户是否为合同所有者（edit 模式 vs simple 模式）
+    const userId = computed(() => getUserId());
     const editMode = computed(() => {
-        const userId = String(getUserId() || '');
-        return contract.value?.user_id?.toString() === userId ? 'edit' : 'simple';
+        const uid = String(userId.value || '');
+        return contract.value?.user_id?.toString() === uid ? 'edit' : 'simple';
     });
     // WPS 编辑器错误处理
     const onEditorError = (error) => {
@@ -2507,7 +2519,7 @@ export default {
         };
     };
 
-    const locateText = async (text) => {
+    const locateText = async (text, itemType = 'suggestion', itemIndex = -1) => {
         if (!text) {
             ElMessage.info('AI 未返回可定位的原文，请在文档中手动核对该建议。');
             return;
@@ -2515,77 +2527,103 @@ export default {
         try {
             const app = await getWpsApplication();
             if (!app) {
-                // 尝试等待 Application 就绪（最长5秒）
                 for (let i = 0; i < 5; i++) {
                     await new Promise(r => setTimeout(r, 1000));
                     const retry = await getWpsApplication();
-                    if (retry) { return await doLocateText(text, retry); }
+                    if (retry) { return await doLocateText(text, itemType, itemIndex, retry); }
                 }
-                ElMessage.info('WPS 文档尚未完全加载，请稍候再试。（左侧文档加载完成后可正常使用定位功能）');
+                ElMessage.info('WPS 文档尚未完全加载，请稍候再试。');
                 return;
             }
-            await doLocateText(text, app);
+            await doLocateText(text, itemType, itemIndex, app);
         } catch (error) {
             console.warn('[locateText] error:', error);
             ElMessage.info('文档定位暂时不可用，请手动在左侧文档中查找。');
         }
     };
 
-    const doLocateText = async (text, app) => {
+    const doLocateText = async (text, itemType, itemIndex, app) => {
         const doc = app.ActiveDocument;
         const selection = doc?.Selection;
-        
-        // 由于 WebOffice 的 Find.Execute API 不可用，无法精确定位文本
-        // 改用书签或段落导航
-        
-        // 方案1: 尝试通过书签定位（如果之前创建过）
-        const bookmarkIndex = reviewData.modification_suggestions?.findIndex(
-            item => suggestionOriginal(item) === text || suggestionText(item) === text
-        );
-        
-        if (bookmarkIndex !== -1 && doc?.Bookmarks) {
-            const bookmarkName = `risk_annotation_${bookmarkIndex}`;
+
+        // 获取 anchor_hint（用于精确定位，比完整原文更可靠）
+        let anchorHint = text;
+        if (itemType === 'suggestion' && itemIndex >= 0) {
+            const suggestion = reviewData.modification_suggestions?.[itemIndex];
+            if (suggestion?.anchor_hint) {
+                anchorHint = suggestion.anchor_hint;
+            }
+        }
+
+        // 方案1: 尝试通过书签定位（书签由后端预创建）
+        if (itemType === 'suggestion' && itemIndex >= 0 && doc?.Bookmarks) {
+            const bookmarkName = `suggestion_${itemIndex}`;
             try {
-                const bookmark = doc.Bookmarks.Item(bookmarkName);
-                if (bookmark && bookmark.Range) {
-                    await bookmark.Range.Select();
+                const bm = doc.Bookmarks.Item(bookmarkName);
+                if (bm?.Range) {
+                    await bm.Range.Select();
                     if (typeof selection?.ScrollIntoView === 'function') {
                         await selection.ScrollIntoView();
                     }
-                    await highlightCurrentRange('warning');
-                    ElMessage.success(`已通过书签定位到原文位置。`);
+                    await highlightCurrentRange('info');
+                    ElMessage.success(`已定位到建议 ${itemIndex + 1} 对应原文位置`);
                     return;
                 }
-            } catch {
-                // 书签不存在
-            }
+            } catch {}
         }
-        
-        // 方案2: 尝试使用 Range.GoTo 导航到文档开头
-        // 由于无法精确匹配，至少跳转到文档开头让用户可以手动查找
+
+        // 方案2: 尝试用 anchor_hint 文本搜索定位（WPS Range.Find）
         try {
-            if (doc?.Range && selection) {
-                // 选中文档开头
-                const startRange = doc.Range(0, Math.min(100, doc.Content?.End || 100));
-                if (startRange) {
-                    await startRange.Select();
-                    if (typeof selection.ScrollIntoView === 'function') {
+            if (doc?.Range) {
+                // anchor_hint 通常是 2-10 个字符的短文本片断，更容易匹配
+                const searchText = anchorHint.trim();
+                if (searchText.length >= 2) {
+                    // 尝试在文档中查找 anchor_hint
+                    const range = doc.Range(0, doc.Content.End || 0);
+                    const found = range.Find;
+                    if (found) {
+                        found.Text = searchText;
+                        found.Forward = true;
+                        found.Wrap = 1; // wdFindStop
+                        const success = found.Execute();
+                        if (success) {
+                            if (typeof selection?.ScrollIntoView === 'function') {
+                                await selection.ScrollIntoView();
+                            }
+                            await highlightCurrentRange('info');
+                            ElMessage.success(`已定位到："${searchText.substring(0, 10)}..."`);
+                            return;
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('[doLocateText] anchor_hint search failed:', e.message);
+        }
+
+        // 方案3: 书签不存在且搜索失败 → 跳转到 contract_start 书签
+        try {
+            if (doc?.Bookmarks) {
+                const startBm = doc.Bookmarks.Item('contract_start');
+                if (startBm?.Range) {
+                    await startBm.Range.Select();
+                    if (typeof selection?.ScrollIntoView === 'function') {
                         await selection.ScrollIntoView();
                     }
                     ElMessage.info({
-                        message: `已在文档开头高亮显示，请手动查找："${text.substring(0, 20)}..."`,
+                        message: `已跳转到文档开头，请手动查找："${anchorHint.substring(0, 12)}..."`,
                         duration: 4000
                     });
                     return;
                 }
             }
         } catch (e) {
-            console.warn('[doLocateText] Range navigation failed:', e.message);
+            console.warn('[doLocateText] contract_start fallback failed:', e.message);
         }
-        
-        // 方案3: 直接滚动到文档开头
+
+        // 方案4: 完全无法定位
         ElMessage.info({
-            message: `无法精确定位"${text.substring(0, 15)}..."，请在左侧文档中手动查找。`,
+            message: `无法定位"${anchorHint.substring(0, 10)}..."，请在左侧文档中手动查找。`,
             duration: 4000
         });
     };
@@ -3195,22 +3233,16 @@ export default {
         }
     };
 
-    // 由于 WPS WebOffice API 限制（Find.Execute 不可用 + 文档只读），
-    // 无法在文档中精确定位文本添加批注。改用数据库存储批注。
-    const addDocComment = async (text, comment) => {
+    // 添加批注：定位到对应原文位置，同时打开右侧批注输入面板
+    const addDocComment = async (text, comment, itemType = 'suggestion', itemIndex = -1) => {
         if (!text) {
             ElMessage.info('请在右侧面板的批注功能中添加意见。');
             return;
         }
-        
-        // 由于 WebOffice 的 Find API 不可用且文档可能是只读模式，
-        // 无法在 WPS 文档中精确添加批注。所有批注通过 ReviewAnnotations 组件
-        // 存储在数据库中，在右侧面板显示。
-        
-        ElMessage.info({
-            message: '批注功能请使用右侧面板的批注按钮，所有批注将保存在数据库中。',
-            duration: 3000
-        });
+        // 打开对应建议项的批注输入面板
+        commentingItemKey.value = `${itemType}:${itemIndex}`;
+        // 同时尝试在文档中定位（使用 anchor_hint）
+        await locateText(text, itemType, itemIndex);
     };
 
     const adoptSuggestion = (item) => {
@@ -3438,6 +3470,8 @@ export default {
       getAnnotations,
       getAnnotationSummary,
       handleAddAnnotation,
+      commentingItemKey,
+      userId,
       normalizeSeverity,
       severityLabel,
       severityClass,

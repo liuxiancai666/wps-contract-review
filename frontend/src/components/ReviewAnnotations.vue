@@ -92,7 +92,7 @@
 </template>
 
 <script>
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 
 export default {
   name: 'ReviewAnnotations',
@@ -101,6 +101,8 @@ export default {
     itemType: { type: String, required: true },
     itemIndex: { type: Number, required: true },
     comments: { type: Array, default: () => [] },
+    currentUserId: { type: [Number, String], default: null },
+    openComment: { type: Boolean, default: false },
     summary: {
       type: Object,
       default: () => ({ agree: 0, disagree: 0, comment: 0, resolved: false }),
@@ -112,11 +114,22 @@ export default {
     const showCommentsList = ref(false);
     const commentText = ref('');
 
+    // 监听 openComment prop（一次性触发：打开后自动归位）
+    watch(() => props.openComment, (val) => {
+      if (val) {
+        showCommentInput.value = true;
+      }
+    });
+
     const hasComments = computed(() => props.comments.length > 0);
 
     const myVote = computed(() => {
-      // 简化为：看是否有自己同类型的投票
-      return null;
+      if (!props.currentUserId) return null;
+      const uid = String(props.currentUserId);
+      const myComment = props.comments.find(
+        c => String(c.user_id) === uid && (c.action_type === 'agree' || c.action_type === 'disagree')
+      );
+      return myComment ? myComment.action_type : null;
     });
 
     const vote = (actionType) => {
