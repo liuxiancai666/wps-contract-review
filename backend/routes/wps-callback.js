@@ -647,4 +647,138 @@ router.post('/v3/3rd/notify', async (req, res) => {
   res.json(ok({ received: true }));
 });
 
+// ========== 缺失的 WPS v3 回调接口 ==========
+
+// 1. requestAuthVerify - 认证授权验证请求
+// WPS 在打开文档时若需要第三方认证（如 SAML/OAuth），会调用此接口获取认证跳转 URL
+// POST /v3/3rd/files/:file_id/requestAuthVerify
+router.post('/v3/3rd/files/:file_id/requestAuthVerify', verifyWpsSignature, async (req, res) => {
+  try {
+    const { file_id } = req.params;
+    const { need_login: needLogin, auth_type: authType } = req.body || {};
+    console.log(`[WPS-CALLBACK] requestAuthVerify for file ${file_id}, needLogin=${needLogin}, authType=${authType}`);
+
+    // 返回第三方认证 URL，WPS 会据此引导用户完成认证后再继续
+    // 当前实现：若已登录用户则直接放行，未登录则返回需要登录
+    // 实际生产环境应接入企业 SSO/SAML/OAuth
+    const contract = await findContract(file_id);
+    if (!contract) {
+      return res.status(404).json(fail('File not found'));
+    }
+
+    // 返回认证跳转地址（空字符串表示无需认证，直接放行）
+    // 格式参考：{ redirect_url: "https://your-sso.com/auth?file_id=xxx" }
+    res.json(ok({
+      redirect_url: '',  // 空字符串 = 无需认证，直接继续
+      message: 'auth not required',
+    }));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] requestAuthVerify error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// 2. userAuthVerify - 获取用户认证信息
+// GET /v3/3rd/files/:file_id/userAuthVerify
+router.get('/v3/3rd/files/:file_id/userAuthVerify', verifyWpsSignature, async (req, res) => {
+  try {
+    const contract = await findContract(req.params.file_id);
+    if (!contract) return res.status(404).json(fail('File not found'));
+    res.json(ok({
+      need_auth: 0,  // 0 = 不需要额外认证
+      auth_type: '',
+    }));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] userAuthVerify error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// 3. uploadNotify - 上传完成通知回调
+// POST /v3/3rd/upload/notify
+router.post('/v3/3rd/upload/notify', verifyWpsSignature, async (req, res) => {
+  try {
+    const { file_id, upload_session, result } = req.body || {};
+    console.log(`[WPS-CALLBACK] uploadNotify: file_id=${file_id}, session=${upload_session}, result=${result}`);
+    res.json(ok({ received: true }));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] uploadNotify error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// 4. taskResult - 异步任务结果回调
+// POST /v3/3rd/files/:file_id/taskResult
+router.post('/v3/3rd/files/:file_id/taskResult', verifyWpsSignature, async (req, res) => {
+  try {
+    const { task_type: taskType, task_id: taskId, result_code: resultCode, result_info: resultInfo } = req.body || {};
+    console.log(`[WPS-CALLBACK] taskResult: file=${req.params.file_id}, task=${taskType}, id=${taskId}, code=${resultCode}`);
+    res.json(ok({ received: true }));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] taskResult error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// 5. batchTask - 批量任务回调
+// POST /v3/3rd/files/:file_id/batchTask
+router.post('/v3/3rd/files/:file_id/batchTask', verifyWpsSignature, async (req, res) => {
+  try {
+    const { batch_type: batchType, task_ids: taskIds } = req.body || {};
+    console.log(`[WPS-CALLBACK] batchTask: file=${req.params.file_id}, type=${batchType}, tasks=${JSON.stringify(taskIds)||''}`);
+    res.json(ok({ received: true, task_ids: taskIds || [] }));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] batchTask error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// 6. downloadNotify - 下载通知回调
+// POST /v3/3rd/files/:file_id/download/notify
+router.post('/v3/3rd/files/:file_id/download/notify', verifyWpsSignature, async (req, res) => {
+  try {
+    const { file_id, user_id: userId, client_type: clientType } = req.body || {};
+    console.log(`[WPS-CALLBACK] downloadNotify: file=${file_id}, user=${userId}, client=${clientType}`);
+    res.json(ok({ received: true }));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] downloadNotify error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// 7. export - 文档导出回调
+// GET /v3/3rd/files/:file_id/export
+router.get('/v3/3rd/files/:file_id/export', verifyWpsSignature, async (req, res) => {
+  try {
+    const { type = 'pdf' } = req.query;  // type: pdf, docx, etc.
+    const contract = await findContract(req.params.file_id);
+    if (!contract) return res.status(404).json(fail('File not found'));
+
+    // 返回导出文件的下载地址（WPS 会调用此 URL 获取转换后的文件）
+    // 注意：当前实现仅返回原文件，实际生产需调用转换服务
+    const exportUrl = `${WPS_CALLBACK_BASE}/v3/3rd/files/${req.params.file_id}/download/raw`;
+    res.json(ok({
+      url: exportUrl,
+      file_type: type,
+      digest: '',
+      digest_type: 'sha1',
+    }));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] export error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
+// POST /v3/3rd/files/:file_id/export - WPS 触发导出时回调通知
+router.post('/v3/3rd/files/:file_id/export', verifyWpsSignature, async (req, res) => {
+  try {
+    const { type = 'pdf', task_id: taskId } = req.body || {};
+    console.log(`[WPS-CALLBACK] export notify: file=${req.params.file_id}, type=${type}, task=${taskId}`);
+    res.json(ok({ received: true }));
+  } catch (error) {
+    console.error('[WPS-CALLBACK] export notify error:', error);
+    res.status(500).json(fail(error.message));
+  }
+});
+
 module.exports = router;

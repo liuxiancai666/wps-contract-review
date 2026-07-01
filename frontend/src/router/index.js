@@ -34,6 +34,11 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    // 兼容旧链接 /contracts/:id → 重定向到 /review?contract_id=:id
+    path: '/contracts/:id',
+    redirect: (to) => ({ path: '/review', query: { contract_id: to.params.id } }),
+  },
+  {
     path: '/history',
     redirect: '/',
   },

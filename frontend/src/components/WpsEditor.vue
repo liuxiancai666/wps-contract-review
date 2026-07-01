@@ -129,6 +129,7 @@ export default defineComponent({
           fileId: wpsConfig.fileId || `contract-${numericId}`,
           mode: wpsConfig.mode || props.mode || 'simple',
           mount: '#file-views-wps',
+          callbackUrl: wpsConfig.callbackUrl,  // WPS 请求文件操作的回调地址（公网）
           token: getTokenFromCookie(),
           refreshToken: getRefreshToken,
           commonOptions: {

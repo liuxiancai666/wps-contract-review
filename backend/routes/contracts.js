@@ -2887,17 +2887,19 @@ router.get('/:id/wps-config', async (req, res) => {
 
     // WPS AppID 从环境变量读取
     const WPS_APP_ID = process.env.WPS_APP_ID || 'SX20260630QNEJSR';
-
-    // mode: 是否有编辑权限（edit_enabled 或 contract 编辑权限）
+    const WPS_CALLBACK_BASE = process.env.WPS_CALLBACK_BASE || 'http://82.157.138.176:8085';
     const canEdit = contract.edit_enabled === 1 || contract.user_id === userId;
     const mode = canEdit ? 'edit' : 'simple';
+    const fileId = `contract-${contractId}`;
 
     res.json({
         appId: WPS_APP_ID,
-        fileSuffix: officeType,  // 参考网站用 fileSuffix 存 officeType
+        fileSuffix: officeType,
         mode,
-        fileId: `contract-${contractId}`,
+        fileId,
         originalFilename: contract.original_filename,
+        // callbackUrl：WPS SDK 请求文件操作的回调地址（公网可达）
+        callbackUrl: `${WPS_CALLBACK_BASE}/v3/3rd/files/${fileId}`,
     });
 });
 
