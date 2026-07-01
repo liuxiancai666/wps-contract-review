@@ -37,14 +37,15 @@
     <div v-if="showCommentInput" class="fixed inset-0 z-50 flex items-center justify-center bg-black/30" @click.self="showCommentInput = false">
       <div class="bg-white rounded-lg shadow-xl p-4 w-96 max-w-full mx-4" @click.stop>
         <p class="text-sm font-medium text-text-dark mb-2">添加批注</p>
-        <el-input
+        <!-- 降级方案：textarea 直接写在模板中，绕过 el-input 组件问题 -->
+        <textarea
           v-model="commentText"
-          type="textarea"
-          :rows="3"
+          class="w-full border border-border-color rounded px-3 py-2 text-sm resize-none focus:outline-none focus:border-primary"
+          rows="3"
           placeholder="输入您的批注意见…"
           maxlength="500"
-          show-word-limit
         />
+        <div class="mt-1 text-xs text-text-light text-right">{{ commentText.length }}/500</div>
         <div class="mt-3 flex justify-end gap-2">
           <button @click="showCommentInput = false" class="px-3 py-1.5 text-xs text-text-light border border-border-color rounded hover:bg-gray-50">取消</button>
           <button @click="submitComment" :disabled="!commentText.trim()" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark disabled:opacity-50">
@@ -121,18 +122,28 @@ export default {
       }
     });
 
+    // 监听 comments 变化（新批注提交后）→ 强制关闭所有弹窗，防止残留遮挡
+    watch(() => props.comments.length, () => {
+      showCommentInput.value = false;
+      showCommentsList.value = false;
+    });
+
     const hasComments = computed(() => props.comments.length > 0);
 
+    // props.comments 按 id DESC（最新在前），取第一条即最新投票
     const myVote = computed(() => {
       if (!props.currentUserId) return null;
       const uid = String(props.currentUserId);
-      const myComment = props.comments.find(
+      const myVoteComment = props.comments.find(
         c => String(c.user_id) === uid && (c.action_type === 'agree' || c.action_type === 'disagree')
       );
-      return myComment ? myComment.action_type : null;
+      return myVoteComment ? myVoteComment.action_type : null;
     });
 
     const vote = (actionType) => {
+      // 关闭所有弹窗，再提交
+      showCommentInput.value = false;
+      showCommentsList.value = false;
       emit('add-comment', {
         item_type: props.itemType,
         item_index: props.itemIndex,
@@ -143,14 +154,16 @@ export default {
 
     const submitComment = () => {
       if (!commentText.value.trim()) return;
+      const text = commentText.value.trim();
+      showCommentInput.value = false;
+      showCommentsList.value = false;
+      commentText.value = '';
       emit('add-comment', {
         item_type: props.itemType,
         item_index: props.itemIndex,
         action_type: 'comment',
-        comment_text: commentText.value.trim(),
+        comment_text: text,
       });
-      commentText.value = '';
-      showCommentInput.value = false;
     };
 
     const formatTime = (ts) => {

@@ -1563,6 +1563,8 @@ export default {
         try {
             await api.addReviewComment(contract.id, payload);
             ElMessage.success(payload.action_type === 'comment' ? '批注已添加' : '已记录反馈');
+            // 重置 commentingItemKey，防止批注面板重复打开
+            commentingItemKey.value = null;
             await loadAnnotations();
         } catch (err) {
             ElMessage.error('反馈提交失败，请重试');

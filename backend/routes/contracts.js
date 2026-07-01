@@ -2432,11 +2432,35 @@ router.post('/:id/comments', async (req, res) => {
 
     try {
         const now = new Date();
+        const userIdNum = Number(userId);
+        const itemIndexNum = Number(item_index);
+
+        // 对于 agree/disagree：同类型投票 toggle（重复点击取消），不同类型切换
+        if (action_type === 'agree' || action_type === 'disagree') {
+            // 检查用户是否已对此条目投过同类型票
+            const existing = await db('review_comments')
+                .where({ contract_id: contract.id, user_id: userIdNum, item_type, item_index: itemIndexNum, action_type })
+                .first();
+            if (existing) {
+                // 重复点击 → 取消投票（删除）
+                await db('review_comments').where({ id: existing.id }).delete();
+                const row = await db('review_comments')
+                    .where({ contract_id: contract.id, user_id: userIdNum, item_type, item_index: itemIndexNum })
+                    .orderBy('id', 'desc').first();
+                return res.status(200).json(row || { deleted: true });
+            }
+            // 不同类型切换：先删除对方的旧票
+            const oppositeType = action_type === 'agree' ? 'disagree' : 'agree';
+            await db('review_comments')
+                .where({ contract_id: contract.id, user_id: userIdNum, item_type, item_index: itemIndexNum, action_type: oppositeType })
+                .delete();
+        }
+
         await db('review_comments').insert({
             contract_id: contract.id,
-            user_id: userId,
+            user_id: userIdNum,
             item_type,
-            item_index,
+            item_index: itemIndexNum,
             action_type,
             comment_text: comment_text || null,
             is_resolved: false,
@@ -2445,7 +2469,7 @@ router.post('/:id/comments', async (req, res) => {
         });
         // 用 max(id) 获取刚插入的行的 id
         const row = await db('review_comments')
-            .where({ contract_id: contract.id, user_id: userId, item_type, item_index, action_type })
+            .where({ contract_id: contract.id, user_id: userIdNum, item_type, item_index: itemIndexNum, action_type })
             .orderBy('id', 'desc')
             .first();
         res.status(201).json(row);
@@ -2465,7 +2489,7 @@ router.get('/:id/comments', async (req, res) => {
     try {
         const rows = await db('review_comments')
             .where({ contract_id: contract.id })
-            .orderBy('created_at', 'asc')
+            .orderBy('id', 'desc')  // id DESC = 最新记录在前
             .select();
         // 按 item_type + item_index 分组
         const grouped = {};
