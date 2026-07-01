@@ -2430,14 +2430,13 @@ export default {
     };
 
     const doLocateText = async (text, app) => {
-        const selection = app.ActiveDocument?.Selection;
-        if (!selection?.Find) {
-            ElMessage.info('当前 WPS 版本不支持文档内定位功能。');
-            return;
-        }
-        
-        // 方案1: 尝试通过书签定位（更快更准）
         const doc = app.ActiveDocument;
+        const selection = doc?.Selection;
+        
+        // 由于 WebOffice 的 Find.Execute API 不可用，无法精确定位文本
+        // 改用书签或段落导航
+        
+        // 方案1: 尝试通过书签定位（如果之前创建过）
         const bookmarkIndex = reviewData.modification_suggestions?.findIndex(
             item => suggestionOriginal(item) === text || suggestionText(item) === text
         );
@@ -2448,43 +2447,45 @@ export default {
                 const bookmark = doc.Bookmarks.Item(bookmarkName);
                 if (bookmark && bookmark.Range) {
                     await bookmark.Range.Select();
-                    if (typeof selection.ScrollIntoView === 'function') {
+                    if (typeof selection?.ScrollIntoView === 'function') {
                         await selection.ScrollIntoView();
                     }
-                    // 高亮显示找到的文本
                     await highlightCurrentRange('warning');
                     ElMessage.success(`已通过书签定位到原文位置。`);
                     return;
                 }
             } catch {
-                // 书签不存在，继续使用Find
+                // 书签不存在
             }
         }
         
-        // 方案2: 使用Find定位文本
-        const found = await selection.Find.Execute({ Text: text });
-        if (found) {
-            if (typeof selection.ScrollIntoView === 'function') {
-                await selection.ScrollIntoView();
-            }
-            // 高亮显示找到的文本
-            await highlightCurrentRange('risk');
-            ElMessage.success(`已定位到原文位置并高亮显示。`);
-        } else {
-            const sentences = text.split(/[。；;.!?]+/).filter(s => s.trim().length >= 6);
-            for (const sentence of sentences) {
-                const foundSentence = await selection.Find.Execute({ Text: sentence.trim() });
-                if (foundSentence) {
+        // 方案2: 尝试使用 Range.GoTo 导航到文档开头
+        // 由于无法精确匹配，至少跳转到文档开头让用户可以手动查找
+        try {
+            if (doc?.Range && selection) {
+                // 选中文档开头
+                const startRange = doc.Range(0, Math.min(100, doc.Content?.End || 100));
+                if (startRange) {
+                    await startRange.Select();
                     if (typeof selection.ScrollIntoView === 'function') {
                         await selection.ScrollIntoView();
                     }
-                    await highlightCurrentRange('warning');
-                    ElMessage.success(`已定位到附近原文并高亮显示。`);
+                    ElMessage.info({
+                        message: `已在文档开头高亮显示，请手动查找："${text.substring(0, 20)}..."`,
+                        duration: 4000
+                    });
                     return;
                 }
             }
-            ElMessage.info('未在文档中找到完全匹配的原文，请在文档中手动定位。');
+        } catch (e) {
+            console.warn('[doLocateText] Range navigation failed:', e.message);
         }
+        
+        // 方案3: 直接滚动到文档开头
+        ElMessage.info({
+            message: `无法精确定位"${text.substring(0, 15)}..."，请在左侧文档中手动查找。`,
+            duration: 4000
+        });
     };
 
     const replaceTextOnServer = async (originalText, suggestedText, item = {}) => {
@@ -2952,200 +2953,62 @@ export default {
     // 标记是否需要自动插入批注（从历史记录加载时）
     const needsAutoInsert = ref(false);
 
-    // 审查完成后，自动将 modification_suggestions 插入为 WPS 批注 + 书签
-    // 性能优化：一次性获取app，复用document引用
+    // 审查完成后，由于 WPS WebOffice API 限制（文档只读 + Find.Execute 不可用），
+    // 无法在文档中精确定位并插入批注。改用数据库存储批注，定位功能使用段落导航。
     const autoInsertAnnotations = async () => {
         const pdfCheck = isPdfContract.value;
-        console.log('[DEBUG] autoInsertAnnotations started, isPdfContract.value:', pdfCheck, typeof pdfCheck, 'contract.filename:', contract.original_filename, 'wpsEditorRef:', !!wpsEditorRef.value, 'suggestions:', reviewData.modification_suggestions?.length);
-        if (pdfCheck || !wpsEditorRef.value || !reviewData.modification_suggestions?.length) {
-            console.log('[DEBUG] autoInsertAnnotations early return, reason:', pdfCheck ? 'isPdfContract=true' : 'other');
+        console.log('[DEBUG] autoInsertAnnotations called, isPdfContract:', pdfCheck, 'suggestions:', reviewData.modification_suggestions?.length);
+        
+        // PDF 或没有建议时直接返回
+        if (pdfCheck || !reviewData.modification_suggestions?.length) {
             return;
         }
         
-        // 等待编辑器就绪（最多等15秒，只检查一次）
-        let app = null;
-        for (let i = 0; i < 15; i++) {
-            app = await getWpsApplication();
-            if (app) break;
-            await new Promise(r => setTimeout(r, 1000));
-        }
-        app = await getWpsApplication();
-        console.log('[DEBUG] getWpsApplication result:', !!app, 'ActiveDocument:', app?.ActiveDocument ? 'exists' : 'null', 'Comments.Add:', typeof app?.ActiveDocument?.Comments?.Add);
-        if (!app || !app.ActiveDocument?.Comments?.Add) {
-            console.log('[DEBUG] autoInsertAnnotations - no app or Comments.Add not available');
-            return;
-        }
+        // 由于以下限制，不尝试在 WPS 文档中插入批注：
+        // 1. 历史合同文档以只读模式打开 (wpsOptions.isReadOnly: false 但服务端可能限制)
+        // 2. WebOffice 的 Find.Execute API 不可用，无法精确定位文本
+        // 3. Comments.Add(doc.Content, comment) 会添加批注到文档开头而非对应文本位置
+        // 
+        // 所有批注通过 ReviewAnnotations 组件存储在数据库中，右侧面板显示
         
-        const doc = app.ActiveDocument;
-        const suggestions = reviewData.modification_suggestions;
+        ElMessage.info({
+            message: `已加载 ${reviewData.modification_suggestions.length} 条审查建议，请在右侧面板查看详情。`,
+            duration: 3000
+        });
         
-        ElMessage.info(`正在自动插入 ${suggestions.length} 条批注到文档...`);
-        
-        // 预获取document引用，减少属性访问
-        const hasBookmarks = doc.Bookmarks && typeof doc.Bookmarks.Add === 'function';
-        const hasComments = doc.Comments && typeof doc.Comments.Add === 'function';
-        
-        if (!hasComments) {
-            ElMessage.info('当前 WPS 版本不支持批注功能');
-            return;
-        }
-        
-        let success = 0;
-        let bookmarksCreated = 0;
-        let globalComments = 0; // 无法定位时添加的全局批注数
-
-        // 检查 Find API 是否可用
-        const testFind = doc.Content?.Find;
-        const findAvailable = testFind && typeof testFind.Execute === 'function';
-
-        // 批量插入：减少API调用次数
-        for (let idx = 0; idx < suggestions.length; idx++) {
-            const item = suggestions[idx];
-            const text = suggestionOriginal(item);
-            if (!text) continue;
-
-            const comment = `【AI审查 ${idx + 1}】\n标题：${item.title || '修改建议'}\n原文：${text}\n建议：${suggestionText(item)}\n理由：${suggestionReason(item)}`;
-
-            try {
-                if (findAvailable) {
-                    // 使用findTextRange定位文本
-                    const range = await findTextRange(text);
-                    if (range) {
-                        const bookmarkName = `risk_annotation_${idx}`;
-
-                        // 添加批注 - 需要传入 Range 参数
-                        if (doc.Comments?.Add) {
-                            try {
-                                // 使用找到的 range 添加批注
-                                await doc.Comments.Add(range, comment);
-                                success++;
-                                console.log(`[Auto-Annotate] Comments.Add at range succeeded`);
-                            } catch (e) {
-                                console.warn(`[Auto-Annotate] Comments.Add at range failed:`, e.message || 'unknown error');
-                            }
-                        }
-
-                        // 创建书签（可选，失败不中断）
-                        if (hasBookmarks) {
-                            try {
-                                await doc.Bookmarks.Add(bookmarkName, range);
-                                bookmarksCreated++;
-                            } catch (e) {
-                                console.warn(`[Auto-Annotate] Bookmark failed for ${bookmarkName}:`, e.message);
-                            }
-                        }
-                    } else {
-                        // 无法定位，但在文档末尾添加全局批注
-                        console.warn(`[Auto-Annotate] Text not found, adding global comment: "${text.substring(0, 30)}..."`);
-                        if (doc.Comments?.Add) {
-                            try {
-                                // 使用 Content range 添加批注
-                                const contentRange = doc.Content;
-                                await doc.Comments.Add(contentRange, comment);
-                                globalComments++;
-                                console.log(`[Auto-Annotate] Global Comments.Add succeeded`);
-                            } catch (e) {
-                                console.warn(`[Auto-Annotate] Global Comments.Add failed:`, e.message || 'unknown error');
-                            }
-                        }
-                    }
-                } else {
-                    // Find API 不可用，直接在文档末尾添加批注
-                    console.log(`[Auto-Annotate] Find API unavailable, adding global comment for: "${text.substring(0, 30)}..."`);
-                    if (doc.Comments?.Add) {
-                        try {
-                            // WPS WebOffice 可能需要 Range 参数
-                            // 尝试在文档末尾添加批注
-                            const contentRange = doc.Content;
-                            if (contentRange) {
-                                await doc.Comments.Add(contentRange, comment);
-                                globalComments++;
-                                console.log(`[Auto-Annotate] Comments.Add with Range succeeded`);
-                            } else {
-                                await doc.Comments.Add(comment);
-                                globalComments++;
-                                console.log(`[Auto-Annotate] Comments.Add without Range succeeded`);
-                            }
-                        } catch (e) {
-                            console.warn(`[Auto-Annotate] Comments.Add failed:`, e.message || 'unknown error');
-                        }
-                    } else {
-                        console.warn(`[Auto-Annotate] Comments.Add not available`);
-                    }
-                }
-            } catch (e) {
-                console.warn('[Auto-Annotate] Failed for:', item.title, e.message);
+        // 可选：在文档开头创建书签，方便快速跳转
+        try {
+            const app = await getWpsApplication();
+            if (!app?.ActiveDocument) return;
+            
+            const doc = app.ActiveDocument;
+            if (doc.Bookmarks && typeof doc.Bookmarks.Add === 'function') {
+                // 在文档开头创建书签
+                const range = doc.Range(0, 0);
+                await doc.Bookmarks.Add('contract_start', range);
+                console.log('[Bookmark] Created: contract_start');
             }
-        }
-
-        if (success > 0 || globalComments > 0) {
-            ElMessage.success(`已在文档中插入 ${success + globalComments} 条批注（其中 ${success} 条精确定位，${globalComments} 条全局批注）`);
-        } else {
-            ElMessage.info('批注插入完成（当前WPS版本不支持批注定位功能）');
+        } catch (e) {
+            console.warn('[Auto-Annotate] Bookmark creation skipped:', e.message);
         }
     };
 
+    // 由于 WPS WebOffice API 限制（Find.Execute 不可用 + 文档只读），
+    // 无法在文档中精确定位文本添加批注。改用数据库存储批注。
     const addDocComment = async (text, comment) => {
         if (!text) {
-            ElMessage.info('AI 未返回可批注定位的原文，请手动添加批注。');
+            ElMessage.info('请在右侧面板的批注功能中添加意见。');
             return;
         }
-        if (!ensureEditorReady()) return;
-        try {
-            const app = await getWpsApplication();
-            if (!app) {
-                ElMessage.warning('WPS 编辑器 JSAPI 尚未就绪，请在文档加载完成后重试。');
-                return;
-            }
-            
-            // Step 1: 先用 Find 定位文本并选中
-            const range = await findTextRange(text);
-            if (!range) {
-                ElMessage.info('定位原文失败，无法添加批注。');
-                return;
-            }
-            
-            // Step 2: 使用 WPS JSAPI Comments 接口添加批注
-            // 注意: WPS WebOffice SDK v2 的 Comments.Add 接受 (Text, Range?) 参数
-            // Range 通过 postMessage 代理返回，直接传代理 Range 对象会导致序列化失败。
-            // Find.Execute 已选中目标文本，不传 Range 参数即可锁定到当前选区。
-            const doc = app.ActiveDocument;
-            if (!doc || !doc.Comments || typeof doc.Comments.Add !== 'function') {
-                ElMessage.info('当前 WPS 版本不支持批注添加功能。');
-                return;
-            }
-            
-            // 使用 Comments.Add 直接在当前选区添加批注（Find.Execute 已选中目标文本）
-            const commentText = comment || 'AI 审查建议';
-            await doc.Comments.Add(commentText);
-            
-            // Step 3: 为刚添加的批注创建书签（使用当前批注数量作为索引）
-            try {
-                const commentCount = await doc.Comments.Count;
-                const bookmarkName = `manual_comment_${commentCount}`;
-                if (doc.Bookmarks && typeof doc.Bookmarks.Add === 'function') {
-                    const selRange = doc.Selection.Range;
-                    await doc.Bookmarks.Add(bookmarkName, selRange);
-                    console.log(`[Bookmark] Created for manual comment: ${bookmarkName}`);
-                }
-            } catch (e) {
-                console.warn('[WPS Connector] addDocComment bookmark creation failed:', e.message);
-            }
-            
-            ElMessage.success('已在文档中选中位置添加批注。');
-        } catch (error) {
-            console.warn('[WPS Connector] addDocComment error:', error);
-            // Fallback: 使用 Selection 方式批注
-            try {
-                const doc = (await getWpsApplication())?.ActiveDocument;
-                if (doc?.Comments?.Add) {
-                    await doc.Comments.Add(comment || 'AI 审查建议');
-                    ElMessage.success('已在当前光标位置添加批注。');
-                    return;
-                }
-            } catch {}
-            ElMessage.error('添加批注失败：WPS 批注接口暂时不可用。');
-        }
+        
+        // 由于 WebOffice 的 Find API 不可用且文档可能是只读模式，
+        // 无法在 WPS 文档中精确添加批注。所有批注通过 ReviewAnnotations 组件
+        // 存储在数据库中，在右侧面板显示。
+        
+        ElMessage.info({
+            message: '批注功能请使用右侧面板的批注按钮，所有批注将保存在数据库中。',
+            duration: 3000
+        });
     };
 
     const adoptSuggestion = (item) => {
