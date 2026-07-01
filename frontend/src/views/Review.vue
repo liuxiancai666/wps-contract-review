@@ -1371,13 +1371,23 @@ export default {
     const suggestionTitle = (item, index) => firstText(item.title, item.clause, `修改建议 ${index + 1}`);
 
     const suggestionOriginal = (item) => {
-      const direct = firstText(item.original_text, item.original_clause);
-      if (direct) return direct;
+      // 优先使用 anchor_hint（更可能在文档中找到）
+      const hint = item.anchor_hint?.trim();
+      if (hint && hint.length >= 4) return hint;
+
+      // 其次使用 original_text（但需要清理多余空白）
+      const original = item.original_text?.replace(/\s+/g, ' ').trim();
+      if (original && original.length >= 4) return original;
+
+      // 尝试 original_clause
+      const clause = item.original_clause?.replace(/\s+/g, ' ').trim();
+      if (clause && clause.length >= 4) return clause;
+
+      // 回退到 clause/title 的前50字符
       const title = firstText(item.clause, item.title);
-      const relatedRisk = (reviewData.dispute_points || []).find((risk) => {
-        return firstText(risk.type, risk.title).includes(title) || title.includes(firstText(risk.type, risk.title));
-      });
-      return firstText(relatedRisk?.original_clause, title);
+      if (title) return title.substring(0, Math.min(50, title.length));
+
+      return null;
     };
 
     const suggestionText = (item) => firstText(item.suggested_text, item.modification);
@@ -1793,8 +1803,10 @@ export default {
         if (isEditorReady.value) startAutoForceSave();
         
         // 如果是从历史记录加载的合同，且有未插入的批注，自动插入
+        console.log('[DEBUG] onDocumentReady - needsAutoInsert:', needsAutoInsert.value, 'modification_suggestions:', reviewData.modification_suggestions?.length);
         if (needsAutoInsert.value && reviewData.modification_suggestions?.length > 0) {
           needsAutoInsert.value = false; // 重置标志
+          console.log('[DEBUG] Calling autoInsertAnnotations...');
           // 延迟一下确保文档完全就绪
           await new Promise(r => setTimeout(r, 1000));
           await autoInsertAnnotations();
@@ -1876,8 +1888,10 @@ export default {
             Object.assign(reviewData, contractData.reviewData || {});
 
             // 标记需要自动插入批注（当文档加载完成后）
+            console.log('[DEBUG] loadContractFromServer - reviewData.modification_suggestions:', reviewData.modification_suggestions?.length);
             if (reviewData.modification_suggestions?.length > 0) {
                 needsAutoInsert.value = true;
+                console.log('[DEBUG] needsAutoInsert set to TRUE');
             }
 
             // Save this loaded state to localStorage so a refresh works correctly
@@ -2194,38 +2208,133 @@ export default {
 
     const findTextRange = async (text) => {
       if (!text || text.length < 2) return null;
+      console.log('[DEBUG] findTextRange searching:', text.substring(0, 50));
       try {
         const app = await getWpsApplication();
-        if (!app) return null;
-        
-        // Use WPS JSAPI Selection.Find to locate text
-        // WPS Application.Selection.Find supports Execute method
-        const selection = app.ActiveDocument?.Selection;
-        if (!selection) return null;
-        
-        const find = selection.Find;
-        if (!find) return null;
-        
+        if (!app) {
+          console.log('[DEBUG] findTextRange: no app');
+          return null;
+        }
+
+        const doc = app.ActiveDocument;
+        if (!doc) {
+          console.log('[DEBUG] findTextRange: no ActiveDocument');
+          return null;
+        }
+
+        // 尝试多种Find方式
+        let find = null;
+        let searchRange = null;
+
+        // 方式1: Selection.Find (桌面Word方式)
+        const selection = doc.Selection;
+        console.log('[DEBUG] Selection:', !!selection, 'Find:', !!selection?.Find);
+        if (selection?.Find) {
+          find = selection.Find;
+          searchRange = selection;
+          console.log('[DEBUG] 使用 Selection.Find');
+        }
+
+        // 方式2: Content.Find (有些版本支持)
+        if (!find && doc.Content?.Find) {
+          find = doc.Content.Find;
+          searchRange = doc.Content;
+          console.log('[DEBUG] 使用 Content.Find');
+        }
+
+        // 方式3: 尝试 GoTo + Find 组合
+        if (!find) {
+          try {
+            if (doc.Content?.Select) {
+              await doc.Content.Select();
+              const newSelection = doc.Selection;
+              if (newSelection?.Find) {
+                find = newSelection.Find;
+                searchRange = newSelection;
+                console.log('[DEBUG] 使用 Content.Select + Selection.Find');
+              }
+            }
+          } catch (e) {
+            console.warn('[WPS] Content.Select尝试失败:', e.message);
+          }
+        }
+
+        if (!find) {
+          console.warn('[WPS] 未找到可用的Find接口，尝试使用Range遍历');
+          // Fallback: 使用 Range 遍历文档
+          try {
+            // 获取文档内容范围
+            if (doc.Content?.Start !== undefined && doc.Content?.End !== undefined) {
+              const start = doc.Content.Start;
+              const end = doc.Content.End;
+              console.log('[DEBUG] 文档范围:', start, '-', end);
+              
+              // 创建整个文档范围的Range
+              const fullRange = doc.Range(start, end);
+              if (fullRange) {
+                const fullText = fullRange.Text || '';
+                if (fullText.includes(text)) {
+                  console.log('[DEBUG] Range遍历找到文本在文档中');
+                  // 选中整个文档以便后续操作
+                  fullRange.Select();
+                  return fullRange;
+                } else {
+                  console.log('[DEBUG] 文本不在文档中，当前查找:', text.substring(0, 30));
+                  console.log('[DEBUG] 文档内容片段:', fullText.substring(0, 200));
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('[WPS] Range遍历失败:', e.message);
+          }
+          return null;
+        }
+
+        console.log('[DEBUG] 执行 Find.Execute');
         // Execute find - this searches for the text and selects it if found
-        const found = await find.Execute({ Text: text });
+        // WPS WebOffice 可能需要不同的参数格式
+        let found = false;
+        try {
+          found = await find.Execute({ Text: text });
+        } catch (e1) {
+          console.warn('[DEBUG] Execute({Text}) 失败:', e1.message);
+          try {
+            found = await find.Execute({ FindText: text });
+          } catch (e2) {
+            console.warn('[DEBUG] Execute({FindText}) 失败:', e2.message);
+            try {
+              found = await find.Execute(text);
+            } catch (e3) {
+              console.warn('[DEBUG] Execute(text) 失败:', e3.message);
+            }
+          }
+        }
+        console.log('[DEBUG] Find.Execute result:', found);
         if (found) {
           // Text was found and selected - return the Range object
-          return selection.Range;
+          return searchRange?.Range || selection?.Range;
         }
-        
+
         // Try with normalized text
-        const normalized = text.replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/\s+/g, '');
+        const normalized = text.replace(/[""]/g, '"').replace(/['']/g, "'").replace(/\s+/g, '');
         if (normalized !== text && normalized.length >= 4) {
+          console.log('[DEBUG] 尝试 normalized:', normalized.substring(0, 50));
           // Try fuzzy find by searching just the first 30 chars
           const shortText = text.slice(0, Math.min(30, text.length));
           const foundShort = await find.Execute({ Text: shortText });
-          if (foundShort) return selection.Range;
-          
+          if (foundShort) {
+            console.log('[DEBUG] shortText found');
+            return selection.Range;
+          }
+
           // Try first sentence
           const firstSentence = text.split(/[。；;.!?]/)[0];
           if (firstSentence && firstSentence.length >= 4) {
             const foundSentence = await find.Execute({ Text: firstSentence.trim() });
-            if (foundSentence) return selection.Range;
+            if (foundSentence) {
+              console.log('[DEBUG] firstSentence found');
+              return selection.Range;
+            }
           }
         }
         return null;
@@ -2846,7 +2955,12 @@ export default {
     // 审查完成后，自动将 modification_suggestions 插入为 WPS 批注 + 书签
     // 性能优化：一次性获取app，复用document引用
     const autoInsertAnnotations = async () => {
-        if (isPdfContract || !wpsEditorRef.value || !reviewData.modification_suggestions?.length) return;
+        const pdfCheck = isPdfContract.value;
+        console.log('[DEBUG] autoInsertAnnotations started, isPdfContract.value:', pdfCheck, typeof pdfCheck, 'contract.filename:', contract.original_filename, 'wpsEditorRef:', !!wpsEditorRef.value, 'suggestions:', reviewData.modification_suggestions?.length);
+        if (pdfCheck || !wpsEditorRef.value || !reviewData.modification_suggestions?.length) {
+            console.log('[DEBUG] autoInsertAnnotations early return, reason:', pdfCheck ? 'isPdfContract=true' : 'other');
+            return;
+        }
         
         // 等待编辑器就绪（最多等15秒，只检查一次）
         let app = null;
@@ -2856,7 +2970,11 @@ export default {
             await new Promise(r => setTimeout(r, 1000));
         }
         app = await getWpsApplication();
-        if (!app || !app.ActiveDocument?.Comments?.Add) return;
+        console.log('[DEBUG] getWpsApplication result:', !!app, 'ActiveDocument:', app?.ActiveDocument ? 'exists' : 'null', 'Comments.Add:', typeof app?.ActiveDocument?.Comments?.Add);
+        if (!app || !app.ActiveDocument?.Comments?.Add) {
+            console.log('[DEBUG] autoInsertAnnotations - no app or Comments.Add not available');
+            return;
+        }
         
         const doc = app.ActiveDocument;
         const suggestions = reviewData.modification_suggestions;
@@ -2874,43 +2992,96 @@ export default {
         
         let success = 0;
         let bookmarksCreated = 0;
-        
+        let globalComments = 0; // 无法定位时添加的全局批注数
+
+        // 检查 Find API 是否可用
+        const testFind = doc.Content?.Find;
+        const findAvailable = testFind && typeof testFind.Execute === 'function';
+
         // 批量插入：减少API调用次数
         for (let idx = 0; idx < suggestions.length; idx++) {
             const item = suggestions[idx];
             const text = suggestionOriginal(item);
             if (!text) continue;
-            
+
+            const comment = `【AI审查 ${idx + 1}】\n标题：${item.title || '修改建议'}\n原文：${text}\n建议：${suggestionText(item)}\n理由：${suggestionReason(item)}`;
+
             try {
-                // 使用Find.Execute定位文本
-                const found = await doc.Selection.Find.Execute({ Text: text });
-                if (found) {
-                    const bookmarkName = `risk_annotation_${idx}`;
-                    const comment = `【AI审查】${item.title || '修改建议'}\n建议：${suggestionText(item)}\n理由：${suggestionReason(item)}`;
-                    
-                    await doc.Comments.Add(comment);
-                    success++;
-                    
-                    // 创建书签（可选，失败不中断）
-                    if (hasBookmarks) {
-                        try {
-                            const range = doc.Selection.Range;
-                            await doc.Bookmarks.Add(bookmarkName, range);
-                            bookmarksCreated++;
-                        } catch (e) {
-                            console.warn(`[Auto-Annotate] Bookmark failed for ${bookmarkName}:`, e.message);
+                if (findAvailable) {
+                    // 使用findTextRange定位文本
+                    const range = await findTextRange(text);
+                    if (range) {
+                        const bookmarkName = `risk_annotation_${idx}`;
+
+                        // 添加批注 - 需要传入 Range 参数
+                        if (doc.Comments?.Add) {
+                            try {
+                                // 使用找到的 range 添加批注
+                                await doc.Comments.Add(range, comment);
+                                success++;
+                                console.log(`[Auto-Annotate] Comments.Add at range succeeded`);
+                            } catch (e) {
+                                console.warn(`[Auto-Annotate] Comments.Add at range failed:`, e.message || 'unknown error');
+                            }
                         }
+
+                        // 创建书签（可选，失败不中断）
+                        if (hasBookmarks) {
+                            try {
+                                await doc.Bookmarks.Add(bookmarkName, range);
+                                bookmarksCreated++;
+                            } catch (e) {
+                                console.warn(`[Auto-Annotate] Bookmark failed for ${bookmarkName}:`, e.message);
+                            }
+                        }
+                    } else {
+                        // 无法定位，但在文档末尾添加全局批注
+                        console.warn(`[Auto-Annotate] Text not found, adding global comment: "${text.substring(0, 30)}..."`);
+                        if (doc.Comments?.Add) {
+                            try {
+                                // 使用 Content range 添加批注
+                                const contentRange = doc.Content;
+                                await doc.Comments.Add(contentRange, comment);
+                                globalComments++;
+                                console.log(`[Auto-Annotate] Global Comments.Add succeeded`);
+                            } catch (e) {
+                                console.warn(`[Auto-Annotate] Global Comments.Add failed:`, e.message || 'unknown error');
+                            }
+                        }
+                    }
+                } else {
+                    // Find API 不可用，直接在文档末尾添加批注
+                    console.log(`[Auto-Annotate] Find API unavailable, adding global comment for: "${text.substring(0, 30)}..."`);
+                    if (doc.Comments?.Add) {
+                        try {
+                            // WPS WebOffice 可能需要 Range 参数
+                            // 尝试在文档末尾添加批注
+                            const contentRange = doc.Content;
+                            if (contentRange) {
+                                await doc.Comments.Add(contentRange, comment);
+                                globalComments++;
+                                console.log(`[Auto-Annotate] Comments.Add with Range succeeded`);
+                            } else {
+                                await doc.Comments.Add(comment);
+                                globalComments++;
+                                console.log(`[Auto-Annotate] Comments.Add without Range succeeded`);
+                            }
+                        } catch (e) {
+                            console.warn(`[Auto-Annotate] Comments.Add failed:`, e.message || 'unknown error');
+                        }
+                    } else {
+                        console.warn(`[Auto-Annotate] Comments.Add not available`);
                     }
                 }
             } catch (e) {
                 console.warn('[Auto-Annotate] Failed for:', item.title, e.message);
             }
         }
-        
-        if (success > 0) {
-            ElMessage.success(`已在文档中自动插入 ${success}/${suggestions.length} 条批注，其中 ${bookmarksCreated} 个书签`);
+
+        if (success > 0 || globalComments > 0) {
+            ElMessage.success(`已在文档中插入 ${success + globalComments} 条批注（其中 ${success} 条精确定位，${globalComments} 条全局批注）`);
         } else {
-            ElMessage.info('批注插入完成，部分原文在文档中未能准确定位。');
+            ElMessage.info('批注插入完成（当前WPS版本不支持批注定位功能）');
         }
     };
 
