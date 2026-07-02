@@ -55,18 +55,13 @@ Thumbs.db
 CLAUDE.md
 
 report.md
-# Database
+# SQLite database files
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+backend/one-api.db
 
-# Hermes / Docker compose
-milvus-compose.yml
-services-compose.yml
-.env
-backend/uploads/
-backend/reanalyze.js
 
-# node_modules (symlinked to data disk)
-frontend/node_modules
-backend/node_modules
+# 测试输出
+frontend/test-results/
+frontend/tests/

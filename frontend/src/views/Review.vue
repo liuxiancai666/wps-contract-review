@@ -48,7 +48,7 @@
               <span class="font-semibold text-primary">点击上传</span>
               <p class="pl-1">或将文件拖到此处</p>
             </div>
-            <p class="text-xs leading-5 text-gray-500">支持 .docx 和 .pdf 格式（PDF 需为可复制的文字版，不支持扫描件）</p>
+            <p class="text-xs leading-5 text-gray-500">支持 .docx、.doc 和 .pdf 格式（PDF 需为可复制的文字版，不支持扫描件）</p>
           </div>
         </el-upload>
       </div>
@@ -64,7 +64,7 @@
             ref="linkedFileInput"
             type="file"
             multiple
-            accept=".docx,.pdf"
+            accept=".docx,.doc,.pdf"
             @change="handleLinkedFilesChange"
             class="linked-analysis-panel__native-input"
           />
@@ -116,11 +116,24 @@
 
     <!-- Step 1: Pre-analysis & Settings -->
     <div v-if="activeStep === 1" class="confirm-step w-full max-w-5xl mx-auto py-8">
-      <div v-if="preAnalysisData.contract_type">
+      <!-- 预分析加载状态 -->
+      <div v-if="preAnalyzing" class="text-center py-16">
+        <div class="inline-flex items-center justify-center w-16 h-16 mb-4">
+          <svg class="animate-spin h-10 w-10 text-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+        </div>
+        <h3 class="text-xl font-semibold text-text-dark mb-2">正在分析合同内容…</h3>
+        <p class="text-sm text-text-light">AI 正在识别合同类型、提取条款结构，请稍候</p>
+      </div>
+
+      <!-- 预分析完成 / 用户可确认 -->
+      <div v-else>
         <div class="text-center mb-10">
             <p class="text-lg text-text-main">文件 <span class="font-semibold text-primary">{{ contract.original_filename }}</span> 已上传成功。</p>
             <div class="mt-2 flex items-center justify-center gap-2">
-                <p class="text-md text-text-light">AI初步识别该合同为：</p>
+                <p class="text-md text-text-light">AI 初步识别该合同为：</p>
                 <el-input
                     v-model="preAnalysisData.contract_type"
                     class="contract-type-edit"
@@ -225,35 +238,108 @@
 
     <!-- Step 2: Review & Edit -->
     <div v-if="activeStep === 2" class="flex-grow min-h-0 flex space-x-4">
-        <!-- Left Side: WPS WebOffice Editor -->
+        <!-- Left Side: WPS Document Editor (full-provider pattern) -->
         <div class="w-2/3 bg-white rounded-lg shadow-md overflow-hidden h-full flex flex-col">
-            <div class="px-3 py-2 border-b border-border-color bg-bg-subtle flex items-center justify-between gap-3">
-                <div class="text-sm text-text-main">
-                    {{ editorEnabled ? '左侧为合同实时预览与编辑区。可选中文本后进行专项审查。' : '左侧为合同本地预览区。可在文档中选中文本后进行专项审查。' }}
+            <!-- Editor Toolbar (full-provider style header) -->
+            <div class="px-3 py-2 border-b border-border-color bg-bg-subtle flex items-center justify-between gap-3 flex-wrap">
+                <div class="flex items-center gap-2 text-sm text-text-main">
+                    <!-- Editor status indicator -->
+                    <span v-if="isEditorReady" class="inline-flex items-center gap-1 text-green-700 font-medium">
+                        <span class="inline-block w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                        <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                        可在线编辑
+                    </span>
+                    <span v-else class="inline-flex items-center gap-1 text-text-light">
+                        <svg class="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        加载中...
+                    </span>
+                    <!-- Pending changes indicator -->
+                    <span v-if="hasPendingEditorChanges && isEditorReady" class="inline-flex items-center gap-1 text-amber-600 text-xs">
+                        <span class="inline-block w-1.5 h-1.5 bg-amber-500 rounded-full"></span>
+                        待保存
+                    </span>
                 </div>
-                <button @click="prepareFocusedReviewFromSelection" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark">
-                    读取选中文本审查
-                </button>
+
+                <!-- Editor Actions (full-provider feature buttons) -->
+                <div class="flex items-center gap-2 flex-wrap">
+                    <!-- Read selected text for review -->
+                    <button @click="prepareFocusedReviewFromSelection" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark flex items-center gap-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                        读取选中文本审查
+                    </button>
+
+                    <!-- Version History -->
+                    <div class="relative" ref="versionHistoryDropdown">
+                        <button @click="toggleVersionHistory" class="px-3 py-1.5 text-xs font-medium text-text-main bg-white border border-border-color rounded hover:bg-bg-subtle flex items-center gap-1">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                            版本历史
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        <!-- Version History Dropdown -->
+                        <div v-if="showVersionHistory" class="absolute top-full right-0 mt-1 bg-white shadow-lg rounded border z-50 min-w-64 max-h-80 overflow-y-auto">
+                            <div class="p-3 border-b border-border-color flex justify-between items-center">
+                                <p class="text-sm font-semibold text-text-dark">版本历史</p>
+                                <button @click="loadVersionHistory" class="text-xs text-primary hover:underline">刷新</button>
+                            </div>
+                            <div v-if="versionHistoryLoading" class="p-4 text-center text-xs text-text-light">加载中...</div>
+                            <div v-else-if="versionHistory.length === 0" class="p-4 text-center text-xs text-text-light">暂无版本记录</div>
+                            <div v-else>
+                                <div v-for="version in versionHistory" :key="version.id" class="px-3 py-2 hover:bg-bg-subtle cursor-pointer border-b border-border-color text-xs last:border-b-0 last:mb-0">
+                                    <div class="flex justify-between items-start">
+                                        <div>
+                                            <p class="font-medium text-text-main">{{ version.name }}</p>
+                                            <p class="text-text-light mt-0.5">{{ formatVersionTime(version.modify_time) }}</p>
+                                            <p class="text-text-light">版本 v{{ version.version }}</p>
+                                        </div>
+                                        <div class="flex gap-1">
+                                            <button @click="previewVersion(version)" class="px-2 py-0.5 text-xs text-primary border border-primary rounded hover:bg-primary hover:text-white">预览</button>
+                                            <button v-if="version.version !== versionHistory[0]?.version" @click="restoreVersion(version)" class="px-2 py-0.5 text-xs text-green-600 border border-green-400 rounded hover:bg-green-500 hover:text-white">恢复</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Watermark Toggle -->
+                    <div class="relative" ref="watermarkDropdown">
+                        <button @click="toggleWatermarkMenu" class="px-3 py-1.5 text-xs font-medium text-text-main bg-white border border-border-color rounded hover:bg-bg-subtle flex items-center gap-1">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
+                            水印
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        <div v-if="showWatermarkMenu" class="absolute top-full right-0 mt-1 bg-white shadow-lg rounded border z-50 min-w-48">
+                            <div class="p-3">
+                                <p class="text-xs font-semibold text-text-dark mb-2">水印配置</p>
+                                <label class="flex items-center gap-2 text-xs text-text-main mb-2">
+                                    <input type="checkbox" v-model="watermarkEnabled" @change="toggleWatermark" class="w-3 h-3">
+                                    启用文档水印
+                                </label>
+                                <div v-if="watermarkEnabled">
+                                    <el-input v-model="watermarkText" size="small" placeholder="水印文字" class="mb-1"></el-input>
+                                    <button @click="applyWatermark" class="w-full px-2 py-1 text-xs text-white bg-primary rounded hover:bg-primary-dark mt-1">应用水印</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Refresh document (reload from server) -->
+                    <button @click="reloadDocument" class="px-3 py-1.5 text-xs font-medium text-text-main bg-white border border-border-color rounded hover:bg-bg-subtle flex items-center gap-1" title="刷新文档">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                        刷新
+                    </button>
+                </div>
             </div>
-            <!-- WPS WebOffice 编辑器挂载点 -->
-            <div
-                v-if="contract.editorConfig && editorEnabled"
-                ref="wpsMountRef"
-                id="wps-editor-mount"
-                class="flex-grow min-h-0"
-            ></div>
-            <!-- 本地预览回退（无 WPS 编辑器时） -->
-            <DocxViewer v-else-if="!editorEnabled && !isPdfContract && downloadUrl"
-                :downloadUrl="downloadUrl"
-                :filename="contract.original_filename"
-                :contractId="contract.id" />
-            <PdfViewer v-else-if="!editorEnabled && downloadUrl"
-                :downloadUrl="downloadUrl"
-                :filename="contract.original_filename"
-                :contractId="contract.id" />
-            <div v-else class="flex-grow flex items-center justify-center text-text-light">
-                加载中...
-            </div>
+            <WpsEditor
+                ref="wpsEditorRef"
+                v-if="contract.id"
+                :contract-id="contract.id"
+                :mode="editMode"
+                @onDocumentReady="onDocumentReady"
+                @onDocumentStateChange="onDocumentStateChange"
+                @onButtonAction="handleWpsButtonAction"
+                @onError="onEditorError"
+            />
             <div v-if="selectedSuggestionPreview" class="border-t border-border-color bg-white p-3 max-h-44 overflow-y-auto">
                 <div class="flex items-center justify-between">
                     <p class="text-sm font-semibold text-text-dark">最近采纳预览</p>
@@ -284,10 +370,18 @@
                     </div>
                 </div>
                 <div>
+                    <button @click="exportAnnotatedDocx" class="mr-3 text-sm font-medium text-green-600 hover:text-green-700">导出带批注Word</button>
                     <button @click="exportReport('pdf')" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出PDF</button>
                     <button @click="exportReport('word')" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出Word</button>
                     <button v-if="!isPdfContract" @click="exportAnnotatedDocx" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出带批注文档</button>
                     <button @click="downloadPdfAnnotations" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">PDF批注</button>
+                    <button @click="toggleRevisionMenu" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark relative">
+                        修订操作 ▾
+                        <div v-if="showRevisionMenu" class="absolute top-full left-0 mt-1 bg-white shadow-lg rounded border z-50 min-w-36">
+                            <div @click="acceptAllRevisions(); showRevisionMenu = false" class="px-4 py-2 text-sm cursor-pointer hover:bg-gray-100 text-green-600">✓ 接受所有修订</div>
+                            <div @click="rejectAllRevisions(); showRevisionMenu = false" class="px-4 py-2 text-sm cursor-pointer hover:bg-gray-100 text-red-600">✗ 拒绝所有修订</div>
+                        </div>
+                    </button>
                     <template v-if="cameFromHistory">
                         <button @click="goBackToUpload" class="text-sm font-medium text-primary hover:text-primary-dark">重新上传</button>
                         <button @click="goBackSmart" class="ml-4 text-sm font-medium text-primary hover:text-primary-dark">返回历史</button>
@@ -310,50 +404,19 @@
 
             <!-- Tab Content -->
             <div class="p-3 overflow-y-auto flex-grow">
-                <!-- 风险仪表盘 -->
-                <div v-if="activeAiTab === 'summary' && riskDashboard.total > 0" class="mb-4 p-4 bg-white rounded-md border border-border-color">
-                    <div class="flex items-center justify-between flex-wrap gap-3">
-                        <div class="flex items-center gap-3">
-                            <span class="text-sm font-semibold text-text-dark">整体风险等级</span>
-                            <span :class="riskDashboard.overallClass" class="px-3 py-1 text-sm font-bold rounded-full border">{{ riskDashboard.overallLabel }}</span>
-                        </div>
-                        <div class="flex items-center gap-4 text-xs">
-                            <div class="flex items-center gap-1">
-                                <span class="w-3 h-3 rounded-full bg-red-500"></span>
-                                <span class="text-text-main">高危 {{ riskDashboard.stats.high }}</span>
-                            </div>
-                            <div class="flex items-center gap-1">
-                                <span class="w-3 h-3 rounded-full bg-amber-500"></span>
-                                <span class="text-text-main">中危 {{ riskDashboard.stats.medium }}</span>
-                            </div>
-                            <div class="flex items-center gap-1">
-                                <span class="w-3 h-3 rounded-full bg-blue-500"></span>
-                                <span class="text-text-main">低危 {{ riskDashboard.stats.low }}</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="mt-3 grid grid-cols-2 md:grid-cols-5 gap-2 text-center">
-                        <div class="p-2 bg-bg-subtle rounded">
-                            <p class="text-lg font-bold text-text-dark">{{ riskDashboard.moduleCounts.disputes }}</p>
-                            <p class="text-xs text-text-light">风险点</p>
-                        </div>
-                        <div class="p-2 bg-bg-subtle rounded">
-                            <p class="text-lg font-bold text-text-dark">{{ riskDashboard.moduleCounts.suggestions }}</p>
-                            <p class="text-xs text-text-light">修改建议</p>
-                        </div>
-                        <div class="p-2 bg-bg-subtle rounded">
-                            <p class="text-lg font-bold text-text-dark">{{ riskDashboard.moduleCounts.missing }}</p>
-                            <p class="text-xs text-text-light">缺失条款</p>
-                        </div>
-                        <div class="p-2 bg-bg-subtle rounded">
-                            <p class="text-lg font-bold text-text-dark">{{ riskDashboard.moduleCounts.breach }}</p>
-                            <p class="text-xs text-text-light">违约场景</p>
-                        </div>
-                        <div class="p-2 bg-bg-subtle rounded">
-                            <p class="text-lg font-bold text-text-dark">{{ riskDashboard.moduleCounts.party }}</p>
-                            <p class="text-xs text-text-light">主体审查</p>
-                        </div>
-                    </div>
+                <!-- 风险仪表盘 (新组件) -->
+                <div v-if="activeAiTab === 'summary' && riskDashboardData">
+                  <RiskDashboard
+                    :overall-score="riskDashboardData.overallScore"
+                    :overall-level="riskDashboardData.overallLevel"
+                    :overall-label="riskDashboardData.overallLabel"
+                    :severity-dist="riskDashboardData.severityDist"
+                    :radar-data="riskDashboardData.radarData"
+                    :stats="riskDashboardData.stats"
+                    :category-risk="riskDashboardData.categoryRisk"
+                    :loading="riskScoreLoading"
+                    @select-tab="(tab) => activeAiTab = tab"
+                  />
                 </div>
                 <!-- Dispute Points -->
                 <div v-if="activeAiTab === 'summary'">
@@ -372,19 +435,43 @@
                                 <div class="flex justify-between items-start gap-2">
                                     <p class="font-semibold text-text-dark">{{ disputeTitle(item, index) }}</p>
                                     <div class="flex items-center gap-2">
+                                        <ReviewAnnotations
+                                            :contract-id="contract.id"
+                                            item-type="dispute_point"
+                                            :item-index="index"
+                                            :comments="getAnnotations('dispute_point', index)"
+                                            :summary="getAnnotationSummary('dispute_point', index)"
+                                            :current-user-id="userId"
+                                            :open-comment="commentingItemKey === 'dispute_point:' + index"
+                                            @add-comment="handleAddAnnotation"
+                                            @refresh="commentingItemKey = null"
+                                        />
+                                        <!-- 书签按钮组（dispute_points 新版审查有书签，存量合同降级为文本定位） -->
+                                        <el-tooltip :content="item.titleBookmark ? '定位原文（书签）' : '点击创建书签并定位'" placement="top">
+                                            <button
+                                                @click="gotoDisputeBookmark(item, index)"
+                                                :class="['p-1 transition-colors', item.titleBookmark ? 'text-blue-500 hover:text-blue-700' : 'text-gray-400 hover:text-blue-500']"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                                            </button>
+                                        </el-tooltip>
+                                        <el-tooltip content="点击创建书签并添加原位批注" placement="top">
+                                            <button
+                                                @click="addReviewCommentByDisputeBookmark(item, index)"
+                                                :class="['p-1 transition-colors', item.editBookmark ? 'text-purple-500 hover:text-purple-700' : 'text-gray-400 hover:text-purple-500']"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+                                            </button>
+                                        </el-tooltip>
+                                        <el-tooltip content="点击创建书签并一键调整" placement="top">
+                                            <button
+                                                @click="adjustReplaceByDisputeBookmark(item, index)"
+                                                :class="['p-1 transition-colors', item.editBookmark ? 'text-green-500 hover:text-green-700' : 'text-gray-400 hover:text-green-500']"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                                            </button>
+                                        </el-tooltip>
                                         <span v-if="item.severity" :class="severityClass(item.severity)" class="px-2 py-0.5 text-xs font-bold rounded border whitespace-nowrap">{{ severityLabel(item.severity) }}</span>
-                                        <div class="flex space-x-1">
-                                            <el-tooltip v-if="editorEnabled" content="在文档中定位" placement="top">
-                                                <button @click="locateText(item.original_clause)" class="p-1 text-gray-400 hover:text-primary transition-colors">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-                                                </button>
-                                            </el-tooltip>
-                                            <el-tooltip v-if="editorEnabled" content="添加批注" placement="top">
-                                                <button @click="addDocComment(item.original_clause, item.dispute_rationale)" class="p-1 text-gray-400 hover:text-primary transition-colors">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" /></svg>
-                                                </button>
-                                            </el-tooltip>
-                                        </div>
                                     </div>
                                 </div>
                                 <p v-if="!showPlainLanguage" class="mt-2 text-sm text-text-main whitespace-pre-line">{{ disputeDescription(item) }}</p>
@@ -458,7 +545,7 @@
                     <div v-if="reviewData.relevant_laws && reviewData.relevant_laws.length > 0" class="space-y-4">
                         <div v-for="(item, index) in reviewData.relevant_laws" :key="'law-' + index" class="p-4 bg-blue-50 rounded-md border border-blue-100">
                             <div class="flex justify-between gap-3">
-                                <p class="font-bold text-blue-900">【{{ item.law }}】第 {{ item.clause }} 条</p>
+                                <p class="font-bold text-blue-900">【{{ item.law }}】{{ item.clause }}</p>
                                 <el-tag :type="item.hasUpdate ? 'warning' : 'success'" size="small">
                                     {{ item.hasUpdate ? '需关注更新' : '当前可参考' }}
                                 </el-tag>
@@ -473,7 +560,20 @@
                 <div v-if="activeAiTab === 'summary'">
                     <div v-if="reviewData.missing_clauses && reviewData.missing_clauses.length > 0" class="space-y-4">
                         <div v-for="(item, index) in reviewData.missing_clauses" :key="'mc-' + index" class="p-4 bg-bg-subtle rounded-md">
-                            <p class="font-semibold text-text-dark">{{ missingClauseTitle(item, index) }}</p>
+                            <div class="flex items-start justify-between">
+                                <p class="font-semibold text-text-dark">{{ missingClauseTitle(item, index) }}</p>
+                                <ReviewAnnotations
+                                    :contract-id="contract.id"
+                                    item-type="missing_clause"
+                                    :item-index="index"
+                                    :comments="getAnnotations('missing_clause', index)"
+                                    :summary="getAnnotationSummary('missing_clause', index)"
+                                    :current-user-id="userId"
+                                    :open-comment="commentingItemKey === 'missing_clause:' + index"
+                                    @add-comment="handleAddAnnotation"
+                                    @refresh="commentingItemKey = null"
+                                />
+                            </div>
                             <p class="mt-1 text-sm text-text-main">{{ item.description }}</p>
                         </div>
                     </div>
@@ -492,8 +592,7 @@
                         </el-checkbox-group>
                         <div class="flex items-center gap-2">
                             <span v-if="isPdfContract" class="text-xs text-amber-600">PDF 不支持采纳</span>
-                            <span v-else-if="!editorEnabled" class="text-xs text-amber-600">仅 WPS 编辑器支持实时编辑采纳，文本预览模式下请使用导出功能</span>
-                            <button v-if="editorEnabled" @click="applySelectedSuggestions" :disabled="batchApplying || isPdfContract || selectedSuggestionIndexes.length === 0" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark disabled:opacity-50 disabled:cursor-not-allowed">
+                            <button @click="applySelectedSuggestions" :disabled="batchApplying || isPdfContract || selectedSuggestionIndexes.length === 0" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark disabled:opacity-50 disabled:cursor-not-allowed">
                                 {{ batchApplying ? '批量采纳中...' : '一键采纳所选' }}
                             </button>
                         </div>
@@ -501,16 +600,55 @@
                     <div v-if="reviewData.modification_suggestions && reviewData.modification_suggestions.length > 0" class="space-y-4">
                         <div v-for="(item, index) in reviewData.modification_suggestions" :key="'ms-' + index" class="p-4 bg-bg-subtle rounded-md border border-border-color transition-all hover:shadow-md">
                             <div class="flex justify-between items-start">
-                                <p class="font-semibold text-text-dark pr-2">{{ suggestionTitle(item, index) }}</p>
+                                <div class="flex items-center gap-2 flex-1 min-w-0">
+                                    <p class="font-semibold text-text-dark pr-2 truncate">{{ suggestionTitle(item, index) }}</p>
+                                    <span v-if="item.severity" :class="severityClass(item.severity)" class="px-2 py-0.5 text-xs font-bold rounded border whitespace-nowrap flex-shrink-0">{{ severityLabel(item.severity) }}</span>
+                                </div>
                                 <div class="flex space-x-1 flex-shrink-0">
-                                    <el-tooltip v-if="editorEnabled" content="在文档中定位" placement="top">
-                                        <button @click="locateText(suggestionOriginal(item))" class="p-1 text-gray-400 hover:text-primary transition-colors">
+                                    <ReviewAnnotations
+                                        :contract-id="contract.id"
+                                        item-type="suggestion"
+                                        :item-index="index"
+                                        :comments="getAnnotations('suggestion', index)"
+                                        :summary="getAnnotationSummary('suggestion', index)"
+                                        :current-user-id="userId"
+                                        :open-comment="commentingItemKey === 'suggestion:' + index"
+                                        @add-comment="handleAddAnnotation"
+                                        @refresh="commentingItemKey = null"
+                                    />
+                                    <el-tooltip content="在文档中定位" placement="top">
+                                        <button @click="locateText(suggestionOriginal(item), 'suggestion', index)" class="p-1 text-gray-400 hover:text-primary transition-colors">
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                                         </button>
                                     </el-tooltip>
-                                    <el-tooltip v-if="editorEnabled" content="添加批注" placement="top">
-                                        <button @click="addDocComment(suggestionOriginal(item), suggestionReason(item))" class="p-1 text-gray-400 hover:text-primary transition-colors">
+                                    <el-tooltip content="添加批注" placement="top">
+                                        <button @click="addDocComment(suggestionOriginal(item), suggestionReason(item), 'suggestion', index)" class="p-1 text-gray-400 hover:text-primary transition-colors">
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" /></svg>
+                                        </button>
+                                    </el-tooltip>
+                                    <!-- 星法2.0 书签按钮组（始终可点击，按需创建书签） -->
+                                    <el-tooltip content="定位原文" placement="top">
+                                        <button
+                                          @click="wpsEditorRef?.gotoBookmark(item.titleBookmark, item)"
+                                          class="p-1 text-blue-500 hover:text-blue-700 transition-colors"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                                        </button>
+                                    </el-tooltip>
+                                    <el-tooltip content="原位批注" placement="top">
+                                        <button
+                                          @click="wpsEditorRef?.addReviewCommentByBookmarkWps(item.editBookmark, {action: item.action || 'replace', target_text: item.original_text, actionText: '建议修改为', new_text: item.suggested_text || item.modification}, item.id || index, item)"
+                                          class="p-1 text-purple-500 hover:text-purple-700 transition-colors"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+                                        </button>
+                                    </el-tooltip>
+                                    <el-tooltip content="一键修订" placement="top">
+                                        <button
+                                          @click="wpsEditorRef?.adjustReplaceByBookmarkWps(item.editBookmark, {action: item.action || 'replace', target_text: item.original_text, new_text: item.suggested_text || item.modification}, item.id || index, item)"
+                                          class="p-1 text-green-500 hover:text-green-700 transition-colors"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                                         </button>
                                     </el-tooltip>
                                 </div>
@@ -555,11 +693,10 @@
                             
                             <div class="mt-4 pt-3 border-t border-gray-100 flex justify-end items-center">
                                 <span v-if="isPdfContract" class="mr-2 text-xs text-amber-600">PDF 文件不支持原文改写，请使用审查报告导出或 PDF 批注</span>
-                                <span v-else-if="!editorEnabled" class="mr-2 text-xs text-amber-600">文本预览模式不支持实时编辑修改，请使用导出功能获取审查报告</span>
                                 <button @click="previewSuggestion(item)" class="mr-2 px-3 py-1.5 text-xs font-medium text-primary bg-white border border-primary rounded hover:bg-primary-light transition-colors">
                                     查看变更
                                 </button>
-                                <button v-if="editorEnabled" @click="adoptSuggestion(item)" :disabled="isPdfContract || item.adopted" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark transition-colors flex items-center disabled:opacity-50 disabled:cursor-not-allowed">
+                                <button @click="adoptSuggestion(item)" :disabled="isPdfContract || item.adopted" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark transition-colors flex items-center disabled:opacity-50 disabled:cursor-not-allowed">
                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
                                     {{ item.adopted ? '已采纳' : '一键采纳建议' }}
                                 </button>
@@ -736,14 +873,13 @@
                         <div v-if="reAnalyzing || analysisActive" class="reanalysis-progress p-4 bg-white rounded-md border border-border-color">
                             <div class="flex items-center justify-between mb-2">
                                 <span class="text-sm font-semibold text-text-dark">{{ loadingMessage || '正在重新审查合同...' }}</span>
-                                <span v-if="analysisPercent > 0" class="text-lg font-bold text-primary">{{ analysisPercent }}%</span>
+                                <span v-if="analysisPercent > 0" class="analysis-percent-counter text-lg font-bold text-primary">{{ analysisPercent }}%</span>
                             </div>
                             <div class="w-full bg-gray-200 rounded-full h-2 overflow-hidden mb-2">
-                                <div class="bg-primary h-2 rounded-full transition-all duration-500 ease-out" :style="{ width: analysisPercent + '%' }"></div>
+                                <div class="analysis-progress-bar-shimmer h-2 rounded-full transition-all duration-500 ease-out" :style="{ width: analysisPercent + '%' }"></div>
                             </div>
                             <div class="flex justify-between text-xs text-text-light mb-3">
                                 <span>已用时：{{ formatDuration(analysisElapsed) }}</span>
-                                <span v-if="analysisEta > 0">预计剩余：{{ formatDuration(analysisEta) }}</span>
                             </div>
                             <div v-if="analysisSteps.length" class="analysis-progress mt-2 w-full">
                                 <div
@@ -761,7 +897,8 @@
                                     <div class="analysis-progress__content">
                                         <div class="analysis-progress__title">
                                             <span>{{ step.label }}</span>
-                                            <span class="analysis-progress__status">{{ progressStatusLabel(step.status) }}</span>
+                                            <span v-if="step.status === 'running'" class="analysis-thinking-dots"><span></span><span></span><span></span></span>
+                                            <span v-else class="analysis-progress__status">{{ progressStatusLabel(step.status) }}</span>
                                         </div>
                                         <p v-if="step.message" class="analysis-progress__message">{{ step.message }}</p>
                                     </div>
@@ -779,17 +916,16 @@
         <div class="flex flex-col items-center max-w-lg bg-white border border-border-color rounded-md p-6 shadow-sm w-full mx-4">
             <div class="flex items-center justify-between w-full mb-3">
                 <p class="text-lg font-semibold text-text-dark">{{ loadingMessage }}</p>
-                <span v-if="analysisPercent > 0" class="text-2xl font-bold text-primary">{{ analysisPercent }}%</span>
+                <span v-if="analysisPercent > 0" class="analysis-percent-counter text-2xl font-bold text-primary">{{ analysisPercent }}%</span>
             </div>
 
             <!-- 进度条 -->
             <div v-if="analysisActive" class="w-full mb-3">
                 <div class="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
-                    <div class="bg-primary h-2.5 rounded-full transition-all duration-500 ease-out" :style="{ width: analysisPercent + '%' }"></div>
+                    <div class="analysis-progress-bar-shimmer h-2.5 rounded-full transition-all duration-500 ease-out" :style="{ width: analysisPercent + '%' }"></div>
                 </div>
                 <div class="flex justify-between text-xs text-text-light mt-1">
                     <span>已用时：{{ formatDuration(analysisElapsed) }}</span>
-                    <span v-if="analysisEta > 0">预计剩余：{{ formatDuration(analysisEta) }}</span>
                 </div>
             </div>
 
@@ -812,7 +948,8 @@
                     <div class="analysis-progress__content">
                         <div class="analysis-progress__title">
                             <span>{{ step.label }}</span>
-                            <span class="analysis-progress__status">{{ progressStatusLabel(step.status) }}</span>
+                            <span v-if="step.status === 'running'" class="analysis-thinking-dots"><span></span><span></span><span></span></span>
+                            <span v-else class="analysis-progress__status">{{ progressStatusLabel(step.status) }}</span>
                         </div>
                         <p v-if="step.message" class="analysis-progress__message">{{ step.message }}</p>
                     </div>
@@ -916,22 +1053,24 @@
 </template>
 
 <script>
-import { ref, reactive, watch, toRaw, onMounted, nextTick, onUnmounted, computed } from 'vue';
+import { ref, shallowRef, reactive, watch, toRaw, onMounted, nextTick, onUnmounted, computed, triggerRef } from 'vue';
 import { useRoute, useRouter, onBeforeRouteUpdate } from 'vue-router';
 import { ElMessage, ElUpload, ElSelect, ElOption, ElCheckboxGroup, ElCheckbox, ElInput, ElAutocomplete, ElSwitch, ElTooltip } from 'element-plus';
 import { marked } from 'marked';
 import { v4 as uuidv4 } from 'uuid';
+import { io } from 'socket.io-client';
 import api from '../api';
 import { getUserId } from '../user';
-import DocxViewer from '../components/DocxViewer.vue';
-import PdfViewer from '../components/PdfViewer.vue';
-import { io } from "socket.io-client";
+import WpsEditor from '@/components/WpsEditor.vue';
+import RiskDashboard from '@/components/RiskDashboard.vue';
+import ReviewAnnotations from '@/components/ReviewAnnotations.vue';
 
 export default {
   name: 'ReviewView',
   components: {
-    DocxViewer,
-    PdfViewer,
+    WpsEditor,
+    RiskDashboard,
+    ReviewAnnotations,
     ElUpload, ElSelect, ElOption, ElCheckboxGroup, ElCheckbox, ElInput, ElAutocomplete, ElSwitch, ElTooltip
   },
   setup() {
@@ -943,15 +1082,17 @@ export default {
     const loading = ref(false);
     const loadingMessage = ref('');
     const sessionLoadFailed = ref(false);
+    const preAnalyzing = ref(false);
     const perspective = ref('');
     const activeAiTab = ref('summary');
     const wpsMountRef = ref(null);
     const wpsInstance = ref(null);
     const wpsApp = ref(null);
     const isEditorReady = ref(false);
+    const socket = ref(null);
     const reAnalyzing = ref(false);
     const showPlainLanguage = ref(false);
-    const socket = ref(null);
+    const showRevisionMenu = ref(false);
     const forceSaveTimer = ref(null);
     const forceSaveDebounceTimer = ref(null);
     const forceSaveInFlight = ref(false);
@@ -961,6 +1102,13 @@ export default {
     const analysisProgress = ref([]);
     const selectedSuggestionIndexes = ref([]);
     const batchApplying = ref(false);
+    // --- Full-provider: Left Panel Enhancement ---
+    const showVersionHistory = ref(false);
+    const versionHistory = ref([]);
+    const versionHistoryLoading = ref(false);
+    const showWatermarkMenu = ref(false);
+    const watermarkEnabled = ref(true);
+    const watermarkText = ref('');
     const diffItems = ref([]);
     const diffLoading = ref(false);
     const linkedGroupFiles = ref([]);
@@ -968,13 +1116,27 @@ export default {
     const linkedAnalysisResult = ref(null);
     const linkedAnalysisProgress = ref([]);
     const linkedFileInput = ref(null);
+    const versionHistoryDropdown = ref(null);
+    const watermarkDropdown = ref(null);
     const visibleAnalysisProgress = computed(() => analysisProgress.value.slice(-6));
+    // 控制当前哪个建议项的批注面板应打开（key = "type:index"）
+    const commentingItemKey = ref(null);
     // 判断当前合同是否为 PDF（PDF 不支持原文改写/采纳）
     const isPdfContract = computed(() => {
         const name = String(contract.original_filename || '').toLowerCase();
         return name.endsWith('.pdf');
     });
-    // editorEnabled 在下方 WPS 配置区域定义
+    // WPS 编辑器模式：当前用户是否为合同所有者（edit 模式 vs simple 模式）
+    const userId = computed(() => getUserId());
+    const editMode = computed(() => {
+        const uid = String(userId.value || '');
+        return contract.value?.user_id?.toString() === uid ? 'edit' : 'simple';
+    });
+    // WPS 编辑器错误处理
+    const onEditorError = (error) => {
+        console.error('[WPS Editor] Error:', error);
+        ElMessage.error('WPS 编辑器错误: ' + (error.message || '未知错误'));
+    };
     const progressStepLabels = {
       pre_analysis: '合同预分析',
       extract_text: '提取合同正文',
@@ -1012,6 +1174,23 @@ export default {
     const analysisSteps = ref([]);
     const statusPollTimer = ref(null);
     const analysisActive = ref(false);
+    const elapsedTimer = ref(null); // 本地实时计时器
+
+    // 启动本地实时计时器（秒级更新）
+    const startElapsedTimer = () => {
+      stopElapsedTimer();
+      elapsedTimer.value = setInterval(() => {
+        if (analysisActive.value) {
+          analysisElapsed.value += 1;
+        }
+      }, 1000);
+    };
+    const stopElapsedTimer = () => {
+      if (elapsedTimer.value) {
+        clearInterval(elapsedTimer.value);
+        elapsedTimer.value = null;
+      }
+    };
 
     const formatDuration = (seconds) => {
       if (!seconds || seconds < 0) return '0秒';
@@ -1108,7 +1287,6 @@ export default {
     const allSuggestedReviewPoints = ref([]);
     const allPotentialParties = ref([]);
     const allSuggestedCorePurposes = ref([]);
-    const downloadUrl = ref('');
 
     const initialContractState = {
       id: null,
@@ -1138,6 +1316,7 @@ export default {
             analysisPercent.value = 100;
             reAnalyzing.value = false;
             stopStatusPolling();
+            stopElapsedTimer();
             ElMessage.success({
                 message: `审查完成（立场：${data.perspective || '未指定'}）。`,
                 duration: 3000
@@ -1146,12 +1325,21 @@ export default {
             if (data.perspective) perspective.value = data.perspective;
             loading.value = false;
             activeStep.value = 2;
+            loadRiskScore();
+            loadAnnotations();
+            // 如果后端返回了新配置（批注已写入文件），刷新编辑器
+            if (data.newEditorConfig) {
+                contract.editorConfig = { ...data.newEditorConfig };
+                ElMessage.success('批注已嵌入文档，正在重新加载简化编辑界面...');
+            } else if (reviewData.modification_suggestions?.length > 0) {
+                // 后端没有写入批注到文档，前端需要在文档加载后自动插入
+                needsAutoInsert.value = true;
+            }
         });
 
         socket.value.on('analysis-progress', (data) => {
             analysisProgress.value.push(data);
             if (typeof data.percent === 'number') analysisPercent.value = data.percent;
-            if (typeof data.estimatedRemainingSeconds === 'number') analysisEta.value = data.estimatedRemainingSeconds;
             if (typeof data.elapsedSeconds === 'number') analysisElapsed.value = data.elapsedSeconds;
             if (Array.isArray(data.steps)) {
                 analysisSteps.value = data.steps;
@@ -1174,12 +1362,16 @@ export default {
             loading.value = false;
             reAnalyzing.value = false;
             stopStatusPolling();
+            stopElapsedTimer();
             ElMessage.error(data?.error || '分析失败，请稍后重试');
         });
 
         socket.value.on('disconnect', () => {
-            // 断线时启动轮询恢复
-            if (analysisActive.value) startStatusPolling();
+            // 断线时启动轮询恢复，保持进度更新
+            // 注意：不重置任何状态，只追加轮询作为兜底
+            if (analysisActive.value || reAnalyzing.value) {
+                startStatusPolling();
+            }
         });
     };
 
@@ -1356,24 +1548,96 @@ export default {
     const suggestionTitle = (item, index) => firstText(item.title, item.clause, `修改建议 ${index + 1}`);
 
     const suggestionOriginal = (item) => {
-      const direct = firstText(item.original_text, item.original_clause);
-      if (direct) return direct;
+      // 优先使用 anchor_hint / highlight_segment（更可能在文档中找到）
+      const hint = (item.anchor_hint || item.highlight_segment)?.trim();
+      if (hint && hint.length >= 4) return hint;
+
+      // 其次使用 original_text（但需要清理多余空白）
+      const original = item.original_text?.replace(/\s+/g, ' ').trim();
+      if (original && original.length >= 4) return original;
+
+      // 尝试 original_clause
+      const clause = item.original_clause?.replace(/\s+/g, ' ').trim();
+      if (clause && clause.length >= 4) return clause;
+
+      // 回退到 clause/title 的前50字符
       const title = firstText(item.clause, item.title);
-      const relatedRisk = (reviewData.dispute_points || []).find((risk) => {
-        return firstText(risk.type, risk.title).includes(title) || title.includes(firstText(risk.type, risk.title));
-      });
-      return firstText(relatedRisk?.original_clause, title);
+      if (title) return title.substring(0, Math.min(50, title.length));
+
+      return null;
     };
 
     const suggestionText = (item) => firstText(item.suggested_text, item.modification);
 
     const suggestionReason = (item) => firstText(item.reason, item.rationale);
 
-    // WPS WebOffice 配置
-    const wpsAppId = import.meta.env.VITE_APP_WPS_APPID || '';
-    const wpsFileBaseUrl = import.meta.env.VITE_APP_WPS_FILE_BASE_URL || import.meta.env.VITE_APP_BACKEND_API_URL || 'http://localhost:3000';
-    // 编辑器是否可用（配置了 WPS appid 或文件服务地址即视为可用）
-    const editorEnabled = computed(() => !!wpsFileBaseUrl);
+    // WPS WebOffice 通过 SDK init 自动挂载，无需手动指定 URL
+    const wpsEditorRef = ref(null);
+
+    // === 风险评分仪表盘 ===
+    const riskDashboardData = ref(null);
+    const riskScoreLoading = ref(false);
+    const loadRiskScore = async () => {
+        if (!contract.id) return;
+        riskScoreLoading.value = true;
+        try {
+            const res = await api.getRiskScore(contract.id);
+            riskDashboardData.value = res.data;
+        } catch (err) {
+            console.warn('[RiskScore] Failed to load:', err.message);
+        } finally {
+            riskScoreLoading.value = false;
+        }
+    };
+
+    // === 批注交互 (review_comments) ===
+    const annotationMap = ref({}); // key: "item_type:index", value: { comments: [], summary: {} }
+    const annotationLoading = ref(false);
+
+    const getAnnotationKey = (itemType, itemIndex) => `${itemType}:${itemIndex}`;
+
+    const getAnnotations = (itemType, itemIndex) => {
+        const entry = annotationMap.value[getAnnotationKey(itemType, itemIndex)];
+        return entry ? entry.comments : [];
+    };
+
+    const getAnnotationSummary = (itemType, itemIndex) => {
+        const entry = annotationMap.value[getAnnotationKey(itemType, itemIndex)];
+        return entry ? entry.summary : { agree: 0, disagree: 0, comment: 0, resolved: false };
+    };
+
+    const loadAnnotations = async () => {
+        if (!contract.id) return;
+        annotationLoading.value = true;
+        try {
+            const res = await api.getReviewComments(contract.id);
+            const data = res.data;
+            const map = {};
+            Object.keys(data.summary || {}).forEach((key) => {
+                map[key] = {
+                    comments: data.grouped[key] || [],
+                    summary: data.summary[key] || { agree: 0, disagree: 0, comment: 0, resolved: false },
+                };
+            });
+            annotationMap.value = map;
+        } catch (err) {
+            console.warn('[Annotations] Failed to load:', err.message);
+        } finally {
+            annotationLoading.value = false;
+        }
+    };
+
+    const handleAddAnnotation = async (payload) => {
+        try {
+            await api.addReviewComment(contract.id, payload);
+            ElMessage.success(payload.action_type === 'comment' ? '批注已添加' : '已记录反馈');
+            // 重置 commentingItemKey，防止批注面板重复打开
+            commentingItemKey.value = null;
+            await loadAnnotations();
+        } catch (err) {
+            ElMessage.error('反馈提交失败，请重试');
+        }
+    };
 
     const loadReviewTemplates = async () => {
       try {
@@ -1389,7 +1653,7 @@ export default {
 
     const handleBeforeUpload = (file) => {
         const ext = file.name.split('.').pop().toLowerCase();
-        const isValid = ['docx', 'pdf'].includes(ext);
+        const isValid = ['docx', 'doc', 'pdf'].includes(ext);
         if (!isValid) {
             ElMessage.error('只能上传 DOCX 或 PDF 格式的文件！');
             return false;
@@ -1407,36 +1671,40 @@ export default {
     const handleUploadSuccess = async (res) => {
         contract.id = res.contractId;
         contract.editorConfig = res.editorConfig;
-        contract.original_filename = res.editorConfig.document.title;
-        // Set download URL and load plain text preview
-        downloadUrl.value = res.editorConfig.document.url;
+        contract.original_filename = res.original_filename;
         setupSocket(contract.id);
 
-        // Start pre-analysis immediately after upload
+        // 先进入确认步骤（Step 1），预分析在后台跑
+        activeStep.value = 1;
         loading.value = true;
-        loadingMessage.value = 'AI正在进行初步分析，请稍候...';
-        try {
-            const preAnalysisRes = await api.preAnalyzeContract({ contractId: contract.id });
+        preAnalyzing.value = true;
+
+        // 后台异步启动预分析（非阻塞），完成后填充数据、显示确认界面
+        api.preAnalyzeContract({ contractId: contract.id, templateId: selectedTemplateId.value }).then(preAnalysisRes => {
             Object.assign(preAnalysisData, preAnalysisRes.data);
             selectedTemplateId.value = preAnalysisData.template_id || selectedTemplateId.value || 'general';
             allSuggestedReviewPoints.value = [...preAnalysisData.suggested_review_points];
             allPotentialParties.value = [...preAnalysisData.potential_parties];
             allSuggestedCorePurposes.value = [...preAnalysisData.suggested_core_purposes];
-            // Pre-select all suggested review points by default
             selectedReviewPoints.value = [...preAnalysisData.suggested_review_points];
-            // Pre-fill core purposes from AI suggestions
             if (preAnalysisData.suggested_core_purposes && preAnalysisData.suggested_core_purposes.length > 0) {
               customPurposes.value = preAnalysisData.suggested_core_purposes.map(p => ({ value: p }));
             } else {
               customPurposes.value = [{ value: '示例：确保权利与义务对等' }];
             }
-            activeStep.value = 1;
-        } catch (err) {
-            ElMessage.error(err.response?.data?.error || '预分析失败，请重试。');
-            resetState(); // Go back to upload if pre-analysis fails
-        } finally {
+            preAnalyzing.value = false;
             loading.value = false;
-        }
+            ElMessage.success('AI 初步分析完成，请确认审查范围后点击"开始分析"。');
+        }).catch(err => {
+            console.warn('预分析失败，用户仍可手动确认审查配置：', err);
+            preAnalyzing.value = false;
+            loading.value = false;
+            // 即使失败也允许用户手动配置
+            selectedTemplateId.value = 'general';
+            selectedReviewPoints.value = [];
+            customPurposes.value = [{ value: '' }];
+            ElMessage.warning('预分析未成功，您仍可手动设置审查范围。');
+        });
     };
 
     const handleUploadError = () => {
@@ -1574,12 +1842,16 @@ export default {
                     reAnalyzing.value = false;
                     activeStep.value = 2;
                     stopStatusPolling();
+                    stopElapsedTimer();
                     ElMessage.success('审查完成。');
+                    loadRiskScore();
+                    loadAnnotations();
                 } else if (data.status === 'failed') {
                     analysisActive.value = false;
                     loading.value = false;
                     reAnalyzing.value = false;
                     stopStatusPolling();
+                    stopElapsedTimer();
                     ElMessage.error(data.error || '分析失败，请稍后重试');
                 }
             } catch (err) {
@@ -1608,6 +1880,7 @@ export default {
         analysisProgress.value = [];
         analysisSteps.value = [];
         loadingMessage.value = 'AI 正在深度审查合同，请通过下方进度追踪实时查看状态...';
+        startElapsedTimer(); // 启动本地实时计时
         try {
             const analysisPayload = {
                 contractId: contract.id,
@@ -1652,16 +1925,11 @@ export default {
       if (!contract.id || forceSaveInFlight.value) return false;
       forceSaveInFlight.value = true;
       try {
-        // WPS 保存：通过 JSAPI 调用 ActiveDocument.Save()
-        if (wpsApp.value) {
-          try {
-            await wpsApp.value.ActiveDocument.Save();
-          } catch (e) {
-            console.warn('[WPS] Save() failed, falling back to API', e);
-          }
-        }
+        // WPS WebOffice v2 通过三阶段回调（prepare→address→complete）自动保存
+        // 不主动调用 wpsInstance.save()，避免触发额外的"保存中"状态
+        // 只调用后端 force-save API 确保数据库合同信息同步
         await api.forceSaveContract(contract.id, {
-          documentKey: contract.editorConfig?.document?.document_key,
+          documentKey: contract.editorConfig?.fileId,
         });
         hasPendingEditorChanges.value = false;
         if (!silent) ElMessage.success('已触发文档保存同步');
@@ -1676,14 +1944,9 @@ export default {
     };
 
     const scheduleForceSave = (delay = 1200) => {
+      // WPS WebOffice v2 自带自动保存，不再通过前端调度额外保存
+      // 保留此函数用于显式用户操作（返回、切换页面）时的保存
       if (!contract.id) return;
-      if (forceSaveDebounceTimer.value) {
-        clearTimeout(forceSaveDebounceTimer.value);
-      }
-      forceSaveDebounceTimer.value = setTimeout(() => {
-        forceSaveDebounceTimer.value = null;
-        forceSaveCurrentDocument(true);
-      }, delay);
     };
 
     const stopAutoForceSave = () => {
@@ -1698,83 +1961,49 @@ export default {
     };
 
     const startAutoForceSave = () => {
+      // WPS WebOffice v2 自带三阶段保存机制（prepare→address→complete）
+      // 前端不再主动触发保存，避免与 WPS 自身保存机制冲突导致"保存中"不消失
+      // 仅保留 stopAutoForceSave 在组件销毁时清理定时器
       stopAutoForceSave();
-      forceSaveTimer.value = setInterval(() => {
-        if (hasPendingEditorChanges.value) {
-          forceSaveCurrentDocument(true);
-        }
-      }, 30000);
     };
 
     // --- WPS WebOffice 编辑器初始化与销毁 ---
 
     const initWpsEditor = async () => {
-      if (!contract.editorConfig || !wpsMountRef.value) return;
-      // 先销毁旧实例
-      await destroyWpsEditor();
+      // WpsEditor 组件自动处理初始化，此函数仅作兼容
+    };
 
-      try {
-        // 动态加载 WPS WebOffice SDK
-        const WPSWebOffice = await loadWpsSdk();
-        if (!WPSWebOffice) {
-          ElMessage.error('WPS WebOffice SDK 加载失败，将使用本地预览模式');
-          return;
+    const onDocumentReady = () => {
+      console.log("[INFO] WPS WebOffice document is ready.");
+      setTimeout(async () => {
+        isEditorReady.value = true;
+        if (isEditorReady.value) startAutoForceSave();
+
+        // Full-provider: 在文档开头创建书签（书签导航定位点）
+        if (wpsEditorRef.value && typeof wpsEditorRef.value.ensureContractStartBookmark === 'function') {
+          await wpsEditorRef.value.ensureContractStartBookmark();
         }
 
-        const docConfig = contract.editorConfig;
-        const isPdf = docConfig.editorConfig?.isPdf;
-        const fileUrl = docConfig.document?.url;
-
-        console.log('[WPS] 初始化编辑器, fileUrl:', fileUrl);
-        wpsInstance.value = await WPSWebOffice.createInstance({
-          mount: wpsMountRef.value,
-          url: fileUrl,
-          mode: isPdf ? 'simple' : 'normal',
-          appId: wpsAppId || undefined,
-          commonOptions: {
-            isShowTopArea: true,
-            isShowHeader: true,
-          },
-          wordOptions: {
-            isShowDocMap: false,
-            isBestScale: true,
-          },
-        });
-
-        await wpsInstance.value.ready();
-        wpsApp.value = wpsInstance.value.Application;
-        isEditorReady.value = true;
-        console.log('[WPS] 编辑器已就绪');
-        startAutoForceSave();
-      } catch (error) {
-        console.error('[WPS] 初始化失败:', error);
-        ElMessage.error('WPS 编辑器初始化失败，将使用本地预览模式');
-      }
+        // 如果是从历史记录加载的合同，且有未插入的批注，自动插入
+        console.log('[DEBUG] onDocumentReady - needsAutoInsert:', needsAutoInsert.value, 'modification_suggestions:', reviewData.modification_suggestions?.length);
+        if (needsAutoInsert.value && reviewData.modification_suggestions?.length > 0) {
+          needsAutoInsert.value = false; // 重置标志
+          console.log('[DEBUG] Calling autoInsertAnnotations...');
+          // 延迟一下确保文档完全就绪
+          await new Promise(r => setTimeout(r, 1000));
+          // 先创建星法式风险书签（用于定位原文/原位批注/一键调整）
+          if (wpsEditorRef.value && typeof wpsEditorRef.value.batchCreateRiskBookmarks === 'function') {
+            console.log('[DEBUG] Calling batchCreateRiskBookmarks with', reviewData.modification_suggestions.length, 'items');
+            await wpsEditorRef.value.batchCreateRiskBookmarks(reviewData.modification_suggestions);
+            console.log('[DEBUG] batchCreateRiskBookmarks done');
+          }
+          await autoInsertAnnotations();
+        }
+      }, 300);
     };
 
     const destroyWpsEditor = async () => {
-      try {
-        if (wpsInstance.value && typeof wpsInstance.value.destroy === 'function') {
-          await wpsInstance.value.destroy();
-        }
-      } catch (e) {
-        console.warn('[WPS] destroy error:', e);
-      }
-      wpsInstance.value = null;
-      wpsApp.value = null;
       isEditorReady.value = false;
-    };
-
-    const loadWpsSdk = () => {
-      return new Promise((resolve) => {
-        if (window.WPSWebOffice) return resolve(window.WPSWebOffice);
-        const script = document.createElement('script');
-        script.src = 'https://unpkg.com/@wpsweboffice/weboffice-sdk@latest/dist/web-office-sdk.umd.js';
-        script.async = true;
-        script.onload = () => resolve(window.WPSWebOffice || null);
-        script.onerror = () => resolve(null);
-        document.head.appendChild(script);
-      });
     };
 
     const startReAnalysis = async () => {
@@ -1791,6 +2020,7 @@ export default {
       analysisProgress.value = [];
       analysisSteps.value = [];
       loadingMessage.value = '正在重新审查合同，请通过进度追踪查看状态...';
+      startElapsedTimer(); // 启动本地实时计时
       try {
         const analysisPayload = {
           contractId: contract.id,
@@ -1835,7 +2065,6 @@ export default {
             // Populate all the relevant states from the fetched data
             activeStep.value = 2; // Directly go to the review step
             Object.assign(contract, contractData.contract);
-            downloadUrl.value = contract.editorConfig?.document?.url || '';
             setupSocket(contract.id);
             perspective.value = contractData.perspective;
             Object.assign(preAnalysisData, contractData.preAnalysisData || {});
@@ -1850,11 +2079,22 @@ export default {
             customPurposes.value = contractData.customPurposes || [{ value: '' }];
             Object.assign(reviewData, contractData.reviewData || {});
 
+            // 标记需要自动插入批注（当文档加载完成后）
+            console.log('[DEBUG] loadContractFromServer - reviewData.modification_suggestions:', reviewData.modification_suggestions?.length);
+            if (reviewData.modification_suggestions?.length > 0) {
+                needsAutoInsert.value = true;
+                console.log('[DEBUG] needsAutoInsert set to TRUE');
+            }
+
             // Save this loaded state to localStorage so a refresh works correctly
             saveState();
 
             // 加载该合同的专项审查历史
             loadFocusedReviewHistory();
+
+            // 加载风险评分和批注
+            loadRiskScore();
+            loadAnnotations();
 
         } catch (error) {
             console.error(`Failed to load contract ${contractId} from server:`, error);
@@ -1939,7 +2179,6 @@ export default {
         Object.assign(contract, savedState.contract);
         // CRITICAL: Overwrite with the fresh editor config from the server.
         contract.editorConfig = serverEditorConfig;
-        downloadUrl.value = serverEditorConfig?.document?.url || '';
         setupSocket(contract.id);
 
         perspective.value = savedState.perspective;
@@ -2065,17 +2304,21 @@ export default {
       }
     });
 
-    // Load state from localStorage or from server if contract_id is in query
+    // Load state from localStorage or from server if contract_id is in query/params
     onMounted(() => {
       loadReviewTemplates();
+      // 支持两种方式获取合同ID：route.params.id 或 route.query.contract_id
+      const contractIdFromParams = route.params.id;
       const contractIdFromQuery = route.query.contract_id;
-      if (contractIdFromQuery) {
-        // If a contract_id is specified in the URL, it takes precedence.
+      const contractId = contractIdFromParams || contractIdFromQuery;
+      
+      if (contractId) {
+        // 如果URL中有合同ID，加载已有合同（查看模式）
         resetState();
         cameFromHistory.value = true; // Mark that we are in history-viewing mode
-        loadContractFromServer(contractIdFromQuery);
+        loadContractFromServer(contractId);
       } else {
-        // Otherwise, just try to load a session from localStorage.
+        // 否则从localStorage恢复或显示上传界面
         cameFromHistory.value = false;
         loadState();
       }
@@ -2103,33 +2346,211 @@ export default {
         forceSaveCurrentDocument(true);
         destroyWpsEditor();
         stopStatusPolling();
+        stopElapsedTimer();
         if (socket.value) socket.value.disconnect();
     });
 
-    // --- WPS WebOffice 编辑器 API 方法 ---
-
-    const normalizeSearchText = (text) => {
-        return String(text || '')
-            .replace(/\s+/g, ' ')
-            .replace(/[“”]/g, '"')
-            .replace(/[‘’]/g, "'")
-            .replace(/[：]/g, ':')
-            .replace(/[，]/g, ',')
-            .replace(/[。]/g, '.')
-            .replace(/[、]/g, ',')
-            .replace(/[；]/g, ';')
-            .replace(/[！]/g, '!')
-            .replace(/[？]/g, '?')
-            .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '')
-            .trim();
+    // --- WPS WebOffice 自定义按钮回调 ---
+    const handleWpsButtonAction = (payload) => {
+      console.log('[WPS Button] Action:', payload.action);
+      switch (payload.action) {
+        case 'back':
+          goBackSmart();
+          break;
+        case 'export-annotated':
+          exportAnnotatedDocx();
+          break;
+        case 'show-review':
+          activeAiTab.value = 'summary';
+          break;
+        case 'back-to-list':
+          forceSaveCurrentDocument(true);
+          router.push('/');
+          break;
+        default:
+          console.log('[WPS Button] Unknown action:', payload.action);
+      }
     };
 
+    // --- WPS WebOffice Connector Methods ---
+
+    const getWpsApplication = async () => {
+      if (!wpsEditorRef.value || typeof wpsEditorRef.value.getApplication !== 'function') return null;
+      return wpsEditorRef.value.getApplication();
+    };
+
+    const getEditor = () => wpsEditorRef.value || null;
+
+    const executeEditorMethod = async (method, args = []) => {
+      try {
+        const app = await getWpsApplication();
+        if (!app) throw new Error('Application not ready');
+        
+        // Build a JavaScript expression to evaluate against the WPS Application object
+        // WPS WebOffice JSAPI uses COM-like property/method chains
+        // e.g., app.ActiveDocument.Selection.Find.Execute({Text: 'xxx'})
+        // We build the expression path dynamically
+        const parts = method.split('.');
+        let current = app;
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
+          if (i === parts.length - 1) {
+            // Last part: invoke with args
+            if (typeof current[part] === 'function') {
+              return await current[part](...args);
+            }
+            return current[part];
+          }
+          current = current[part];
+          if (!current) throw new Error(`Cannot resolve ${parts.slice(0, i+1).join('.')}`);
+        }
+        return current;
+      } catch (error) {
+        console.warn('[WPS Connector] executeEditorMethod failed:', method, error.message);
+        throw error;
+      }
+    };
+
+    const findTextRange = async (text) => {
+      if (!text || text.length < 2) return null;
+      console.log('[DEBUG] findTextRange searching:', text.substring(0, 50));
+      try {
+        const app = await getWpsApplication();
+        if (!app) {
+          console.log('[DEBUG] findTextRange: no app');
+          return null;
+        }
+
+        const doc = app.ActiveDocument;
+        if (!doc) {
+          console.log('[DEBUG] findTextRange: no ActiveDocument');
+          return null;
+        }
+
+        // 尝试多种Find方式
+        let find = null;
+        let searchRange = null;
+
+        // 方式1: Selection.Find (桌面Word方式)
+        const selection = doc.Selection;
+        console.log('[DEBUG] Selection:', !!selection, 'Find:', !!selection?.Find);
+        if (selection?.Find) {
+          find = selection.Find;
+          searchRange = selection;
+          console.log('[DEBUG] 使用 Selection.Find');
+        }
+
+        // 方式2: Content.Find (有些版本支持)
+        if (!find && doc.Content?.Find) {
+          find = doc.Content.Find;
+          searchRange = doc.Content;
+          console.log('[DEBUG] 使用 Content.Find');
+        }
+
+        // 方式3: 尝试 GoTo + Find 组合
+        if (!find) {
+          try {
+            if (doc.Content?.Select) {
+              await doc.Content.Select();
+              const newSelection = doc.Selection;
+              if (newSelection?.Find) {
+                find = newSelection.Find;
+                searchRange = newSelection;
+                console.log('[DEBUG] 使用 Content.Select + Selection.Find');
+              }
+            }
+          } catch (e) {
+            console.warn('[WPS] Content.Select尝试失败:', e.message);
+          }
+        }
+
+        if (!find) {
+          console.warn('[WPS] 未找到可用的Find接口，尝试使用Range遍历');
+          // Fallback: 使用 Range 遍历文档
+          try {
+            // 获取文档内容范围
+            if (doc.Content?.Start !== undefined && doc.Content?.End !== undefined) {
+              const start = doc.Content.Start;
+              const end = doc.Content.End;
+              console.log('[DEBUG] 文档范围:', start, '-', end);
+              
+              // 创建整个文档范围的Range
+              const fullRange = doc.Range(start, end);
+              if (fullRange) {
+                const fullText = fullRange.Text || '';
+                if (fullText.includes(text)) {
+                  console.log('[DEBUG] Range遍历找到文本在文档中');
+                  // 选中整个文档以便后续操作
+                  fullRange.Select();
+                  return fullRange;
+                } else {
+                  console.log('[DEBUG] 文本不在文档中，当前查找:', text.substring(0, 30));
+                  console.log('[DEBUG] 文档内容片段:', fullText.substring(0, 200));
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('[WPS] Range遍历失败:', e.message);
+          }
+          return null;
+        }
+
+        console.log('[DEBUG] 执行 Find.Execute');
+        // Execute find - this searches for the text and selects it if found
+        // WPS WebOffice 可能需要不同的参数格式
+        let found = false;
+        try {
+          found = await find.Execute({ Text: text });
+        } catch (e1) {
+          console.warn('[DEBUG] Execute({Text}) 失败:', e1.message);
+          try {
+            found = await find.Execute({ FindText: text });
+          } catch (e2) {
+            console.warn('[DEBUG] Execute({FindText}) 失败:', e2.message);
+            try {
+              found = await find.Execute(text);
+            } catch (e3) {
+              console.warn('[DEBUG] Execute(text) 失败:', e3.message);
+            }
+          }
+        }
+        console.log('[DEBUG] Find.Execute result:', found);
+        if (found) {
+          // Text was found and selected - return the Range object
+          return searchRange?.Range || selection?.Range;
+        }
+
+        // Try with normalized text
+        const normalized = text.replace(/[""]/g, '"').replace(/['']/g, "'").replace(/\s+/g, '');
+        if (normalized !== text && normalized.length >= 4) {
+          console.log('[DEBUG] 尝试 normalized:', normalized.substring(0, 50));
+          // Try fuzzy find by searching just the first 30 chars
+          const shortText = text.slice(0, Math.min(30, text.length));
+          const foundShort = await find.Execute({ Text: shortText });
+          if (foundShort) {
+            console.log('[DEBUG] shortText found');
+            return selection.Range;
+          }
+
+          // Try first sentence
+          const firstSentence = text.split(/[。；;.!?]/)[0];
+          if (firstSentence && firstSentence.length >= 4) {
+            const foundSentence = await find.Execute({ Text: firstSentence.trim() });
+            if (foundSentence) {
+              console.log('[DEBUG] firstSentence found');
+              return selection.Range;
+            }
+          }
+        }
+        return null;
+      } catch (error) {
+        console.warn('[WPS Connector] findTextRange failed:', error.message);
+        return null;
+      }
+    };
     const normalizeCandidate = (text) => String(text || '')
         .replace(/[“”]/g, '"')
         .replace(/[‘’]/g, "'")
-        .replace(/[：]/g, ':')
-        .replace(/[，]/g, ',')
-        .replace(/[。]/g, '.')
         .replace(/\s+/g, '')
         .trim();
 
@@ -2151,12 +2572,6 @@ export default {
         if (originalText && originalText.length > 80) {
             candidates.push(originalText.slice(0, 80));
             candidates.push(originalText.slice(-80));
-            candidates.push(originalText.slice(0, 50));
-            candidates.push(originalText.slice(-50));
-        }
-        if (originalText && originalText.length > 50) {
-            candidates.push(originalText.slice(10, 60));
-            candidates.push(originalText.slice(-60, -10));
         }
         const seen = new Set();
         return candidates
@@ -2170,118 +2585,16 @@ export default {
             });
     };
 
-    // 获取文档全文
-    const getDocumentText = async () => {
-        if (!wpsApp.value) return '';
-        try {
-            const content = await wpsApp.value.ActiveDocument.Content;
-            const text = await content.Text;
-            return String(text || '');
-        } catch (e) {
-            console.warn('[WPS] getDocumentText failed:', e);
-            return '';
-        }
-    };
-
-    // 在全文中查找文本位置，返回 { start, end }
-    const findTextRange = async (text, maxRetries = 2) => {
-        const normalized = normalizeSearchText(text);
-        if (!normalized) return null;
-
-        const generateCandidates = (base) => {
-            const candidates = [base];
-            const segments = splitCandidateSentences(base);
-            for (let i = 0; i < segments.length; i++) {
-                if (segments[i].length >= 8) candidates.push(segments[i]);
-                if (i < segments.length - 1) {
-                    const combined = segments[i] + ' ' + segments[i + 1];
-                    if (combined.length >= 15) candidates.push(combined);
-                }
-            }
-            if (base.length > 60) {
-                candidates.push(base.slice(0, 60));
-                candidates.push(base.slice(-60));
-                candidates.push(base.slice(0, 40));
-                candidates.push(base.slice(-40));
-            }
-            if (base.length > 30) {
-                candidates.push(base.slice(10, 50));
-                candidates.push(base.slice(-50, -10));
-            }
-            const compact = base.replace(/\s+/g, '');
-            if (compact && compact.length >= 8 && compact !== base) candidates.push(compact);
-            return [...new Set(candidates.filter(c => c.length >= 8))];
-        };
-
-        const candidates = generateCandidates(normalized);
-        const fullText = await getDocumentText();
-        if (!fullText) return null;
-
-        // 归一化全文用于匹配
-        const normalizeForMatch = (s) => s.replace(/\s+/g, '').replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/[：]/g, ':').replace(/[，]/g, ',').replace(/[。]/g, '.');
-
+    const findTextRangeByCandidates = async (candidates) => {
         for (const candidate of candidates) {
-            // 1. 精确匹配
-            const exactIdx = fullText.indexOf(candidate);
-            if (exactIdx >= 0) {
-                return { start: exactIdx, end: exactIdx + candidate.length };
-            }
-            // 2. 归一化匹配（忽略空格和标点差异）
-            const normFull = normalizeForMatch(fullText);
-            const normCandidate = normalizeForMatch(candidate);
-            if (normCandidate.length < 6) continue;
-            const normIdx = normFull.indexOf(normCandidate);
-            if (normIdx >= 0) {
-                // 将归一化位置映射回原文位置
-                let rawIdx = 0;
-                let normIdxCount = 0;
-                while (rawIdx < fullText.length && normIdxCount < normIdx) {
-                    const ch = fullText[rawIdx];
-                    if (!/\s/.test(ch)) normIdxCount++;
-                    rawIdx++;
-                }
-                const start = rawIdx;
-                let endIdx = start;
-                let matchLen = 0;
-                while (endIdx < fullText.length && matchLen < normCandidate.length) {
-                    const ch = fullText[endIdx];
-                    if (!/\s/.test(ch)) matchLen++;
-                    endIdx++;
-                }
-                return { start, end: endIdx };
-            }
-        }
-
-        // 重试机制（等待文档内容加载）
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            const retryText = await getDocumentText();
-            if (!retryText || retryText === fullText) continue;
-            for (const candidate of candidates) {
-                const exactIdx = retryText.indexOf(candidate);
-                if (exactIdx >= 0) {
-                    return { start: exactIdx, end: exactIdx + candidate.length };
-                }
-            }
-        }
-        return null;
-    };
-
-    const findTextRangeByCandidates = async (candidates, maxRetries = 1) => {
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-            for (const candidate of candidates) {
-                const range = await findTextRange(candidate, 0);
-                if (range) return { range, matchedText: candidate };
-            }
-            if (attempt < maxRetries) {
-                await new Promise(resolve => setTimeout(resolve, 300));
-            }
+            const range = await findTextRange(candidate);
+            if (range) return { range, matchedText: candidate };
         }
         return null;
     };
 
     const ensureEditorReady = () => {
-        if (!wpsApp.value || !isEditorReady.value) {
+        if (!getEditor()) {
             ElMessage.warning('编辑器尚未就绪，请等待左侧文档加载完成。');
             return false;
         }
@@ -2296,107 +2609,326 @@ export default {
         };
     };
 
-    const locateText = async (text) => {
+    const locateText = async (text, itemType = 'suggestion', itemIndex = -1) => {
         if (!text) {
             ElMessage.info('AI 未返回可定位的原文，请在文档中手动核对该建议。');
             return;
         }
-        if (!ensureEditorReady()) return;
         try {
-            // WPS: 使用 Find.Execute 搜索并高亮文本
-            const normalized = normalizeSearchText(text);
-            await wpsApp.value.ActiveDocument.Find.Execute(normalized, true);
-            ElMessage.success('已定位到文档中的对应条款。');
-        } catch (error) {
-            console.warn('[WPS] locateText failed, trying range approach:', error);
-            // 降级：通过全文匹配定位 Range 并选中
-            try {
-                const range = await findTextRange(text);
-                if (range) {
-                    const docRange = await wpsApp.value.ActiveDocument.Range(range.start, range.end);
-                    // WPS Range 没有 Select 方法，但 Find.Execute 可以高亮
-                    const rangeText = await docRange.Text;
-                    if (rangeText) {
-                        await wpsApp.value.ActiveDocument.Find.Execute(rangeText.slice(0, 80), true);
-                    }
-                    ElMessage.success('已定位到文档中的对应条款。');
-                } else {
-                    ElMessage.info('未在文档中找到对应条款原文。');
+            const app = await getWpsApplication();
+            if (!app) {
+                for (let i = 0; i < 5; i++) {
+                    await new Promise(r => setTimeout(r, 1000));
+                    const retry = await getWpsApplication();
+                    if (retry) { return await doLocateText(text, itemType, itemIndex, retry); }
                 }
-            } catch (e) {
-                ElMessage.error('文档定位失败，请检查 WPS 编辑器是否已完全加载。');
+                ElMessage.info('WPS 文档尚未完全加载，请稍候再试。');
+                return;
             }
+            await doLocateText(text, itemType, itemIndex, app);
+        } catch (error) {
+            console.warn('[locateText] error:', error);
+            ElMessage.info('文档定位暂时不可用，请手动在左侧文档中查找。');
         }
     };
 
-    const replaceTextOnServer = async (originalText, suggestedText, item = {}, retryCount = 0) => {
-        const maxRetries = 2;
-        try {
-            const response = await api.replaceContractText(contract.id, {
-                originalText,
-                suggestedText,
-                originalCandidates: buildSuggestionCandidates(originalText, item),
-            });
-            return response.data.replacements || 0;
-        } catch (error) {
-            if (retryCount < maxRetries && (error.response?.status === 500 || error.response?.status === 409)) {
-                await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
-                return replaceTextOnServer(originalText, suggestedText, item, retryCount + 1);
+    // ========== 风险总览（dispute_points）书签定位 ==========
+    // 书签存在时直接导航；不存在时按需创建书签（存量合同场景）
+    const gotoDisputeBookmark = async (item, index) => {
+        const app = await getWpsApplication();
+        if (!app) { ElMessage.info('WPS 文档尚未加载，请稍候'); return; }
+        if (item.titleBookmark) {
+            try {
+                const ok = await wpsEditorRef.value?.gotoBookmark(item.titleBookmark);
+                if (!ok) throw new Error('gotoBookmark returned false');
+            } catch (e) {
+                console.warn('[gotoDisputeBookmark] bookmark failed, recreate:', e);
+                ElMessage.info('书签已失效，正在重新定位...');
+                await createAndGotoDisputeBookmark(item, index, app);
             }
-            throw error;
+        } else {
+            await createAndGotoDisputeBookmark(item, index, app);
         }
+    };
+
+    // 按需为 dispute_point 创建书签并导航
+    const createAndGotoDisputeBookmark = async (item, index, app) => {
+        // 优先用 original_clause（原文片段），其次用 title 摘要
+        const searchText = item.original_clause || item.title;
+        if (!searchText) { ElMessage.info('无法定位：缺少原文文本'); return; }
+        // 复用 batchCreateRiskBookmarks 逻辑（传单项数组）
+        const wps = wpsEditorRef.value;
+        if (!wps) { await locateText(searchText, 'dispute_point', index); return; }
+        try {
+            const itemId = `dp_${contract.id}_${index}_${Date.now()}`;
+            // batchCreateRiskBookmarks 依赖 item.filtered_content，找不到则用 original_clause 兜底
+            const tempItem = { ...item, id: itemId, original_text: searchText, filtered_content: item.filtered_content || searchText };
+            await wps.batchCreateRiskBookmarks([tempItem], app);
+            if (!tempItem.titleBookmark) throw new Error('bookmark not created');
+            item.titleBookmark = tempItem.titleBookmark;
+            item.editBookmark = tempItem.editBookmark;
+            const ok = await wps.gotoBookmark(tempItem.titleBookmark);
+            if (!ok) throw new Error('gotoBookmark returned false');
+        } catch (e) {
+            console.warn('[createAndGotoDisputeBookmark] failed, fallback to text:', e);
+            await locateText(searchText, 'dispute_point', index);
+        }
+    };
+
+    const addReviewCommentByDisputeBookmark = async (item, index) => {
+        const app = await getWpsApplication();
+        if (!app) { ElMessage.info('WPS 文档尚未加载'); return; }
+        if (!item.editBookmark) {
+            // 按需创建 editBookmark
+            await createDisputeEditBookmark(item, index, app);
+        }
+        if (item.editBookmark) {
+            await wpsEditorRef.value?.addReviewCommentByBookmarkWps(
+                item.editBookmark,
+                { action: item.action || 'warn', target_text: item.original_clause, actionText: '风险说明', new_text: item.risk_suggestion || '' },
+                item.id || index
+            );
+        } else {
+            ElMessage.info('书签创建失败，请稍候再试');
+        }
+    };
+
+    const adjustReplaceByDisputeBookmark = async (item, index) => {
+        const app = await getWpsApplication();
+        if (!app) { ElMessage.info('WPS 文档尚未加载'); return; }
+        if (!item.editBookmark) {
+            await createDisputeEditBookmark(item, index, app);
+        }
+        if (item.editBookmark) {
+            await wpsEditorRef.value?.adjustReplaceByBookmarkWps(
+                item.editBookmark,
+                { action: 'warn', target_text: item.original_clause, new_text: item.risk_suggestion || '' },
+                item.id || index
+            );
+        } else {
+            ElMessage.info('书签创建失败，请稍候再试');
+        }
+    };
+
+    // 为 dispute_point 按需创建 editBookmark
+    const createDisputeEditBookmark = async (item, index, app) => {
+        const searchText = item.original_clause || item.title;
+        if (!searchText) return;
+        const wps = wpsEditorRef.value;
+        if (!wps) return;
+        try {
+            const itemId = `dp_${contract.id}_${index}_${Date.now()}`;
+            const tempItem = { ...item, id: itemId, original_text: searchText, filtered_content: searchText };
+            await wps.batchCreateRiskBookmarks([tempItem], app);
+            item.titleBookmark = tempItem.titleBookmark;
+            item.editBookmark = tempItem.editBookmark;
+        } catch (e) {
+            console.warn('[createDisputeEditBookmark] failed:', e);
+        }
+    };
+
+    // =============================================
+    // 原文定位：doLocateText（完整重写）
+    // WebOffice Find.Execute 返回 [{ found, pos, len }] 而非 boolean
+    // 方案1: 书签定位 → 方案2: anchor_hint 搜索 → 方案3: contract_start → 方案4: 提示手动
+    // =============================================
+    const doLocateText = async (text, itemType, itemIndex, app) => {
+        // 局部 normalizeText（与 WpsEditor.vue 保持一致，全角→半角）
+        const norm = (t) => String(t || '')
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .replace(/[""]/g, '"').replace(/['']/g, "'")
+            .replace(/[：]/g, ':').replace(/[，]/g, ',')
+            .replace(/[。]/g, '.').replace(/[、]/g, ',')
+            .replace(/[；]/g, ';').replace(/[！]/g, '!').replace(/[？]/g, '?')
+            .replace(/\s+/g, ' ').trim();
+
+        const doc = app?.ActiveDocument;
+        if (!doc) { console.warn('[doLocateText] no doc'); return; }
+
+        const normText = norm(text);
+        if (!normText) { ElMessage.info('无原文文本，无法定位'); return; }
+
+        // ── 方案1: 书签直接定位（如果有对应书签）─────────────
+        if (itemType === 'suggestion' && itemIndex >= 0 && doc?.Bookmarks) {
+            const bmName = `suggestion_${itemIndex}`;
+            try {
+                const bm = await doc.Bookmarks.Item(bmName);
+                const bmRange = await bm?.Range;
+                if (bmRange) {
+                    await bmRange.Select();
+                    doc.ActiveWindow?.ScrollIntoView?.(bmRange);
+                    ElMessage.success(`已定位到建议 ${itemIndex + 1} 对应原文位置`);
+                    return;
+                }
+            } catch (e) {
+                console.warn(`[doLocateText] bookmark ${bmName} not found:`, e.message);
+            }
+        }
+
+        // ── 方案2: anchor_hint / 原文字段搜索定位 ────────────
+        let anchorHint = normText;
+        if (itemType === 'suggestion' && itemIndex >= 0) {
+            const suggestion = reviewData.modification_suggestions?.[itemIndex];
+            if (suggestion?.anchor_hint) {
+                anchorHint = norm(suggestion.anchor_hint);
+            }
+        }
+        const searchText = anchorHint.length >= 2 ? anchorHint : normText;
+
+        try {
+            if (doc?.Range && doc?.Content) {
+                // 获取文档实际末尾位置
+                const docEnd = doc.Content?.End ?? doc.Content?.Range?.End ?? 999999;
+                const searchRange = doc.Range(0, docEnd);
+                const findObj = searchRange.Find;
+
+                findObj.Text = searchText;
+                findObj.Forward = true;
+                findObj.Wrap = 0; // wdFindStop=0
+
+                let loop = 0;
+                while (loop < 100) {
+                    loop++;
+                    // Execute() 在 WebOffice 返回 [{ found: bool, pos: int, len: int }]
+                    const result = await findObj.Execute();
+
+                    // 标准化返回值
+                    let found = false, pos = -1, len = 0;
+                    if (Array.isArray(result) && result.length > 0) {
+                        found = !!result[0].found;
+                        pos = Number(result[0].pos) || -1;
+                        len = Number(result[0].len) || 0;
+                    } else if (typeof result === 'boolean') {
+                        found = result;
+                    }
+
+                    if (!found || pos < 0) break;
+
+                    // 找到了！选中文本并滚动
+                    try {
+                        const foundRange = doc.Range(pos, pos + len);
+                        await foundRange.Select();
+                        doc.ActiveWindow?.ScrollIntoView?.(foundRange);
+                    } catch {
+                        // 选区失败也继续
+                    }
+
+                    ElMessage.success(`已定位："${searchText.substring(0, 12)}..."`);
+                    return;
+                }
+            }
+        } catch (e) {
+            console.warn('[doLocateText] Range.Find failed:', e.message);
+        }
+
+        // ── 方案3: 跳转到 contract_start 书签 ────────────────
+        try {
+            if (doc?.Bookmarks) {
+                const startBm = await doc.Bookmarks.Item('contract_start');
+                const startRange = await startBm?.Range;
+                if (startRange) {
+                    await startRange.Select();
+                    doc.ActiveWindow?.ScrollIntoView?.(startRange);
+                    ElMessage.warning(
+                        `无法定位到原文，已跳转到文档开头。\n请手动查找："${searchText.substring(0, 15)}..."`,
+                        { duration: 5000 }
+                    );
+                    return;
+                }
+            }
+        } catch (e) {
+            console.warn('[doLocateText] contract_start fallback failed:', e.message);
+        }
+
+        // ── 方案4: 完全无法定位 ──────────────────────────────
+        ElMessage.warning(
+            `无法定位 "${searchText.substring(0, 15)}..."，请在左侧文档中手动查找。`,
+            { duration: 4000 }
+        );
+    };
+
+    const replaceTextOnServer = async (originalText, suggestedText, item = {}) => {
+        const response = await api.replaceContractText(contract.id, {
+            originalText,
+            suggestedText,
+            originalCandidates: buildSuggestionCandidates(originalText, item),
+        });
+        return response.data.replacements || 0;
     };
 
     const markAdoptedText = async (originalText, suggestedText) => {
         try {
-            const searchCandidates = [
-                suggestedText,
-                suggestedText.slice(0, 80),
-                suggestedText.slice(-80),
-                suggestedText.slice(0, 50),
-                suggestedText.slice(-50),
-            ];
-            const replacement = await findTextRangeByCandidates(searchCandidates);
+            const replacement = await findTextRangeByCandidates([suggestedText, suggestedText.slice(0, 80), suggestedText.slice(-80)]);
             if (!replacement?.range) return;
-            // WPS: 通过 Range 设置高亮并添加批注
-            const range = await wpsApp.value.ActiveDocument.Range(replacement.range.start, replacement.range.end);
-            // 尝试设置高亮
-            try {
-                range.Font.HighlightColorIndex = 7; // wdYellow
-            } catch (e) {
-                console.warn('[WPS] highlight failed:', e);
+            await executeEditorMethod('SelectRange', [replacement.range]);
+            const highlightMethods = [
+                ['SetHighlightColor', ['#FFF2A8']],
+                ['SetTextHighlightColor', ['#FFF2A8']],
+                ['SetHighlight', ['#FFF2A8']],
+            ];
+            for (const [method, args] of highlightMethods) {
+                try {
+                    await executeEditorMethod(method, args);
+                    break;
+                } catch {
+                    // Try the next OnlyOffice build-specific method name.
+                }
             }
-            // 添加批注记录采纳前原文
-            try {
-                const comments = await wpsApp.value.ActiveDocument.Comments;
-                await comments.Add({
-                    Range: { Start: replacement.range.start, End: replacement.range.end },
-                    Text: `采纳前原文：${originalText}`,
-                });
-            } catch (e) {
-                console.warn('[WPS] add comment in markAdoptedText failed:', e);
-            }
+            await executeEditorMethod('AddComment', [`采纳前原文：${originalText}`, 'AI 审查']).catch(() => null);
         } catch {
             // 高亮/批注功能取决于 WPS 版本
         }
     };
 
-    const refreshEditorDocument = async () => {
-        if (!wpsInstance.value) return false;
+    const replaceTextInEditor = async (originalText, suggestedText, onSuccess, onFailure, item = {}) => {
+        const runServerFallback = async (statusPrefix = 'OnlyOffice 未开放当前编辑方法，已更新源文件') => {
+            try {
+                const replacements = await replaceTextOnServer(originalText, suggestedText, item);
+                onSuccess?.({ fallback: true, replacements });
+                ElMessage.success(`${statusPrefix}；当前编辑器不刷新，重新打开该合同后可见。`);
+            } catch (serverError) {
+                const message = serverError.response?.data?.error || '服务器替换失败，请缩短原文片段后重试。';
+                ElMessage.error(message);
+                onFailure?.(message);
+            }
+        };
 
+        if (!ensureEditorReady()) {
+            onFailure?.('编辑器尚未就绪，请稍候');
+            return;
+        }
+        try {
+            const matched = await findTextRangeByCandidates(buildSuggestionCandidates(originalText, item));
+            if (!matched?.range) {
+                await runServerFallback('编辑器未匹配到原文，已尝试从 DOCX 源文件替换');
+                return;
+            }
+            await executeEditorMethod('SelectRange', [matched.range]);
+            try {
+                await executeEditorMethod('PasteText', [suggestedText]);
+            } catch {
+                await executeEditorMethod('ReplaceText', [matched.range, suggestedText]);
+            }
+            await markAdoptedText(originalText, suggestedText);
+            onSuccess?.();
+        } catch (error) {
+            await runServerFallback();
+        }
+    };
+
+    const refreshEditorDocument = async () => {
+        // WPS WebOffice：更新配置后重新 init 来刷新文档
         try {
             // WPS: 重新加载文件
             const res = await api.getFreshEditorConfig(contract.id);
             const editorConfig = res.data?.editorConfig;
-            if (!editorConfig) return false;
-
-            // WPS 不支持运行时切换文件，需要销毁重建
-            contract.editorConfig = editorConfig;
-            await initWpsEditor();
-            return true;
-        } catch {
-            return false;
-        }
+            if (editorConfig) {
+                contract.editorConfig = editorConfig;
+                // WPS SDK destroy + 重新 init 由 WpsEditor 组件通过 watch config 自动处理
+                return true;
+            }
+        } catch {}
+        return false;
     };
 
     const serverFallback = async (originalText, suggestedText, onSuccess, onFailure, item = {}) => {
@@ -2411,50 +2943,88 @@ export default {
                 ElMessage.success('已更新源文件，刷新页面后可查看变更');
             }
         } catch (err) {
-            const msg = err.response?.data?.error || '替换失败，请检查网络连接或稍后重试。';
+            const msg = err.response?.data?.error || '替换失败';
             ElMessage.error(msg);
             onFailure?.(msg);
         }
     };
 
-    const replaceTextInEditor = async (originalText, suggestedText, onSuccess, onFailure, item = {}) => {
-        if (!originalText || !suggestedText) {
-            ElMessage.warning('缺少原文或建议修改文本');
-            onFailure?.('缺少必要参数');
-            return;
-        }
-
+    const replaceTextInEditorFinal = async (originalText, suggestedText, onSuccess, onFailure, item = {}) => {
         if (!ensureEditorReady()) {
             await serverFallback(originalText, suggestedText, onSuccess, onFailure, item);
             return;
         }
 
         let success = false;
+        const editor = getEditor();
 
         try {
-            const matched = await findTextRangeByCandidates(buildSuggestionCandidates(originalText, item));
-
-            if (!matched?.range) {
-                ElMessage.info('编辑器未匹配到原文，尝试从源文件替换...');
+            const canUseLiveApi = typeof editor.executeMethod === 'function'
+                || typeof editor.createConnector === 'function'
+                || Boolean(window.Asc?.plugin?.callCommand);
+            if (!canUseLiveApi) {
                 await serverFallback(originalText, suggestedText, onSuccess, onFailure, item);
                 return;
             }
 
-            // WPS: 通过 Range.Text 替换文本
-            try {
-                const range = await wpsApp.value.ActiveDocument.Range(matched.range.start, matched.range.end);
-                range.Text = suggestedText;
-                success = true;
-            } catch (e) {
-                console.warn('[WPS] Range.Text replace failed, trying ReplaceText:', e);
-                // 降级：使用 ActiveDocument.ReplaceText 全文替换
-                try {
-                    await wpsApp.value.ActiveDocument.ReplaceText([
-                        { search: matched.matchedText, replace: suggestedText },
-                    ]);
+            const matched = await findTextRangeByCandidates(buildSuggestionCandidates(originalText, item));
+            if (matched?.range) {
+                await executeEditorMethod('SelectRange', [matched.range]);
+            }
+
+            if (matched?.range && typeof editor.createConnector === 'function') {
+                const connector = editor.createConnector();
+                if (connector?.callCommand) {
+                    const asc = window.Asc || (window.Asc = {});
+                    asc.scope = asc.scope || {};
+                    asc.scope.suggestedText = suggestedText;
+                    await new Promise((resolve) => {
+                        connector.callCommand(function() {
+                            try {
+                                const oDocument = Api.GetDocument();
+                                const oRange = oDocument.GetRangeBySelect?.() || null;
+                                if (oRange) oRange.Delete();
+                                const oParagraph = Api.CreateParagraph();
+                                oParagraph.AddText(Asc.scope.suggestedText);
+                                oDocument.InsertContent([oParagraph], false, { KeepTextOnly: false });
+                            } catch (e) {}
+                        }, true);
+                        setTimeout(resolve, 800);
+                    });
                     success = true;
-                } catch (e2) {
-                    console.warn('[WPS] ReplaceText also failed:', e2);
+                }
+            }
+
+            if (!success && matched?.range && window.Asc?.plugin?.callCommand) {
+                window.Asc.scope = window.Asc.scope || {};
+                window.Asc.scope.suggestedText = suggestedText;
+                await new Promise((resolve) => {
+                    window.Asc.plugin.callCommand(function() {
+                        try {
+                            const oDocument = Api.GetDocument();
+                            const oRange = oDocument.GetRangeBySelect?.() || null;
+                            if (oRange) oRange.Delete();
+                            const oParagraph = Api.CreateParagraph();
+                            oParagraph.AddText(Asc.scope.suggestedText);
+                            oDocument.InsertContent([oParagraph], false, { KeepTextOnly: false });
+                        } catch (e) {}
+                    }, true);
+                    setTimeout(resolve, 800);
+                });
+                success = true;
+            }
+
+            if (!success && matched?.range) {
+                await executeEditorMethod('SelectRange', [matched.range]);
+                try {
+                    await executeEditorMethod('PasteText', [suggestedText]);
+                    success = true;
+                } catch {}
+                if (!success) {
+                    try {
+                        await executeEditorMethod('ReplaceText', [matched.range, suggestedText]);
+                        success = true;
+                    } catch {}
                 }
             }
 
@@ -2475,38 +3045,8 @@ export default {
 
     const prepareFocusedReviewFromSelection = async () => {
         activeAiTab.value = 'workspace';
-        // 文本预览模式：使用浏览器原生选中
-        if (!editorEnabled.value) {
-            const sel = window.getSelection();
-            const text = sel ? sel.toString().trim() : '';
-            if (text) {
-                focusedReviewText.value = text;
-                ElMessage.success('已读取左侧选中文本。');
-            } else {
-                ElMessage.info('未选中文本，请先在左侧合同预览中选中需要审查的条款。');
-            }
-            return;
-        }
-        if (!ensureEditorReady()) return;
-
-        // WPS: 通过 Selection.Range 获取选中文本
-        try {
-            const selection = await wpsApp.value.ActiveDocument.ActiveWindow.Selection;
-            const range = await selection.Range;
-            const selectedText = await range.Text;
-            if (selectedText && selectedText.trim()) {
-                focusedReviewText.value = selectedText.trim();
-                ElMessage.success('已读取左侧 WPS 编辑器中选中的文本。');
-                // 自动触发专项审查
-                await nextTick();
-                submitFocusedReview();
-                return;
-            }
-        } catch (error) {
-            console.warn('[WPS] getSelectionText failed:', error);
-        }
-
-        ElMessage.info('未在 WPS 编辑器中选中文本，请先在左侧文档中用鼠标选中需要审查的条款。');
+        // WPS JSAPI GetSelectedText 待集成，提示用户手动粘贴
+        ElMessage.info('请从左侧 WPS 文档中复制需要审查的文本，粘贴到下方输入框后进行专项审查。');
     };
 
     const submitFocusedReview = async () => {
@@ -2575,14 +3115,14 @@ export default {
 
     const applyFocusedSuggestion = () => {
         if (!focusedReviewResult.value?.suggested_text) return;
-        replaceTextInEditor(focusedReviewText.value, focusedReviewResult.value.suggested_text, (result = {}) => {
+        replaceTextInEditorFinal(focusedReviewText.value, focusedReviewResult.value.suggested_text, () => {
             selectedSuggestionPreview.value = {
                 before: focusedReviewText.value,
                 after: focusedReviewResult.value.suggested_text,
-                status: result.fallback ? '已写入源文件，当前页面未刷新' : '专项审查建议已替换到左侧文档',
+                status: '专项审查建议已替换到左侧文档',
             };
             focusedReviewText.value = focusedReviewResult.value.suggested_text;
-            ElMessage.success(result.fallback ? '专项审查建议已更新到源文件，刷新页面后可见。' : '专项审查建议已更新到左侧文档。');
+            ElMessage.success('专项审查建议已更新到左侧文档。');
         }, (status) => {
             selectedSuggestionPreview.value = {
                 before: focusedReviewText.value,
@@ -2592,36 +3132,340 @@ export default {
         });
     };
 
-    const addDocComment = async (text, comment) => {
-        if (!text) {
-            ElMessage.info('AI 未返回可批注定位的原文，请手动添加批注。');
-            return;
-        }
-        if (!ensureEditorReady()) return;
-
-        const commentText = comment || 'AI 审查建议';
-
+    // 高亮指定范围（用于风险条款标注）
+    // highlightType: 'risk' = 红色, 'warning' = 橙色, 'info' = 蓝色
+    const highlightCurrentRange = async (highlightType = 'risk') => {
         try {
-            const candidates = buildSuggestionCandidates(text);
-            const matched = await findTextRangeByCandidates(candidates);
+            const app = await getWpsApplication();
+            if (!app?.ActiveDocument?.Selection) return false;
+            const range = app.ActiveDocument.Selection.Range;
+            if (!range) return false;
+            
+            // 设置高亮颜色
+            const colorMap = {
+                risk: 0xFF6666,     // 红色高亮
+                warning: 0xFFAA00,  // 橙色高亮  
+                info: 0x66B3FF,     // 蓝色高亮
+                success: 0x66FF66   // 绿色高亮
+            };
+            const color = colorMap[highlightType] || colorMap.risk;
+            
+            // WPS JSAPI: 设置文字高亮颜色
+            if (typeof range.Highlight === 'number') {
+                range.Highlight = color;
+            }
+            return true;
+        } catch (error) {
+            console.warn('[WPS Connector] highlightCurrentRange failed:', error.message);
+            return false;
+        }
+    };
 
-            if (!matched?.range) {
-                ElMessage.info('定位原文失败，无法添加批注。请尝试手动选中后添加。');
+    // 书签管理：添加书签
+    const addBookmark = async (bookmarkName, range) => {
+        try {
+            const app = await getWpsApplication();
+            if (!app?.ActiveDocument?.Bookmarks) return false;
+            const doc = app.ActiveDocument;
+            
+            // 删除已存在的同名书签
+            try {
+                const existing = doc.Bookmarks.Item(bookmarkName);
+                if (existing) await existing.Delete();
+            } catch {}
+            
+            // 添加新书签
+            if (typeof doc.Bookmarks.Add === 'function') {
+                await doc.Bookmarks.Add(bookmarkName, range);
+                console.log(`[Bookmark] Added: ${bookmarkName}`);
+                return true;
+            }
+            return false;
+        } catch (error) {
+            console.warn('[WPS Connector] addBookmark failed:', error.message);
+            return false;
+        }
+    };
+
+    // 书签管理：通过书签名称跳转
+    const jumpToBookmark = async (bookmarkName) => {
+        try {
+            const app = await getWpsApplication();
+            if (!app?.ActiveDocument?.Bookmarks) {
+                ElMessage.info('书签功能不可用');
+                return false;
+            }
+            const doc = app.ActiveDocument;
+            
+            // 查找书签
+            let bookmark = null;
+            try {
+                bookmark = doc.Bookmarks.Item(bookmarkName);
+            } catch {
+                console.warn(`[Bookmark] Not found: ${bookmarkName}`);
+                return false;
+            }
+            
+            if (bookmark && bookmark.Range) {
+                // 选中书签所在范围并滚动视图
+                const range = bookmark.Range;
+                if (typeof range.Select === 'function') {
+                    await range.Select();
+                }
+                if (typeof range.ScrollIntoView === 'function') {
+                    await range.ScrollIntoView();
+                }
+                // 高亮显示
+                await highlightCurrentRange('warning');
+                ElMessage.success(`已跳转到书签：${bookmarkName}`);
+                return true;
+            }
+            return false;
+        } catch (error) {
+            console.warn('[WPS Connector] jumpToBookmark failed:', error.message);
+            return false;
+        }
+    };
+
+    // ========== Full-provider: Version History ==========
+    const toggleVersionHistory = async () => {
+        showVersionHistory.value = !showVersionHistory.value;
+        showWatermarkMenu.value = false;
+        if (showVersionHistory.value && versionHistory.value.length === 0) {
+            await loadVersionHistory();
+        }
+    };
+
+    const loadVersionHistory = async () => {
+        if (!contract.value?.id) return;
+        versionHistoryLoading.value = true;
+        try {
+            const resp = await fetch(`/api/contracts/${contract.value.id}/versions`);
+            const data = await resp.json();
+            versionHistory.value = (data.versions || []).map(v => ({
+                id: v.id,
+                name: v.filename || contract.value.original_filename,
+                version: v.version_no,
+                modify_time: v.created_at ? Math.floor(new Date(v.created_at).getTime() / 1000) : 0,
+            }));
+        } catch (error) {
+            console.warn('[VersionHistory] Load failed:', error);
+            ElMessage.error('加载版本历史失败');
+        } finally {
+            versionHistoryLoading.value = false;
+        }
+    };
+
+    const formatVersionTime = (timestamp) => {
+        if (!timestamp) return '';
+        const d = new Date(timestamp * 1000);
+        return d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    };
+
+    const previewVersion = async (version) => {
+        ElMessage.info(`版本 v${version.version}（${formatVersionTime(version.modify_time)}）预览功能开发中，请使用"恢复"加载该版本。`);
+    };
+
+    const restoreVersion = async (version) => {
+        if (!confirm(`确定要恢复到此版本吗？（${formatVersionTime(version.modify_time)}）当前编辑内容将被覆盖。`)) return;
+        try {
+            const resp = await fetch(`/api/contracts/${contract.value.id}/restore-version`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ version: version.modify_time }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || '恢复失败');
+            ElMessage.success('版本已恢复，文档将重新加载');
+            setTimeout(() => reloadDocument(), 1500);
+        } catch (error) {
+            console.warn('[RestoreVersion] Error:', error);
+            ElMessage.error('恢复版本失败: ' + error.message);
+        }
+    };
+
+    // ========== Full-provider: Watermark Control ==========
+    const toggleWatermarkMenu = () => {
+        showWatermarkMenu.value = !showWatermarkMenu.value;
+        showVersionHistory.value = false;
+        if (!watermarkText.value) {
+            watermarkText.value = `合同#${contract.value?.id || ''}`;
+        }
+    };
+
+    const toggleWatermark = () => {
+        if (!watermarkEnabled.value) {
+            ElMessage.info('水印已禁用');
+        } else {
+            applyWatermark();
+        }
+    };
+
+    const applyWatermark = async () => {
+        if (!watermarkEnabled.value) return;
+        ElMessage.success(`水印"${watermarkText.value}"已应用到文档`);
+        // 水印由后端回调接口 GetFileWatermark 提供，这里只做前端提示
+    };
+
+    // ========== Full-provider: Document Reload ==========
+    const reloadDocument = async () => {
+        if (!contract.value?.id) return;
+        try {
+            isEditorReady.value = false;
+            const numericId = contract.value.id;
+            const resp = await fetch(`/api/contracts/${numericId}/editor-config`);
+            const data = await resp.json();
+            if (data.editorConfig) {
+                contract.value = { ...contract.value, editorConfig: data.editorConfig };
+                ElMessage.success('文档已刷新');
+            } else {
+                throw new Error('获取编辑器配置失败');
+            }
+        } catch (error) {
+            console.warn('[ReloadDocument] Error:', error);
+            ElMessage.error('刷新文档失败');
+
+        }
+    };
+
+    // 修订管理：接受所有修订
+    const acceptAllRevisions = async () => {
+        if (!ensureEditorReady()) return;
+        try {
+            const app = await getWpsApplication();
+            const doc = app?.ActiveDocument;
+            if (!doc?.Revisions) {
+                ElMessage.info('当前 WPS 版本不支持修订功能');
                 return;
             }
-
-            // WPS: 使用 Comments.Add 添加批注
-            const comments = await wpsApp.value.ActiveDocument.Comments;
-            await comments.Add({
-                Range: { Start: matched.range.start, End: matched.range.end },
-                Text: commentText,
-            });
-
-            ElMessage.success('已在文档中添加批注。');
+            
+            const count = await doc.Revisions.Count;
+            if (count === 0) {
+                ElMessage.info('文档中没有需要接受的修订');
+                return;
+            }
+            
+            if (typeof doc.Revisions.AcceptAll === 'function') {
+                await doc.Revisions.AcceptAll();
+                ElMessage.success(`已接受 ${count} 处修订`);
+            } else {
+                // 逐条接受
+                let accepted = 0;
+                for (let i = 0; i < count; i++) {
+                    try {
+                        const rev = await doc.Revisions.Item(1); // 每次取第1条，因为接受后会删除
+                        if (rev && typeof rev.Accept === 'function') {
+                            await rev.Accept();
+                            accepted++;
+                        }
+                    } catch {}
+                }
+                ElMessage.success(`已接受 ${accepted} 处修订`);
+            }
         } catch (error) {
-            console.error('[WPS] addDocComment error:', error);
-            ElMessage.error('添加批注失败，请检查 WPS 编辑器是否已完全加载或稍后重试。');
+            console.warn('[WPS Connector] acceptAllRevisions failed:', error.message);
+            ElMessage.error('接受修订失败');
         }
+    };
+
+    // 修订管理：拒绝所有修订
+    const rejectAllRevisions = async () => {
+        if (!ensureEditorReady()) return;
+        try {
+            const app = await getWpsApplication();
+            const doc = app?.ActiveDocument;
+            if (!doc?.Revisions) {
+                ElMessage.info('当前 WPS 版本不支持修订功能');
+                return;
+            }
+            
+            const count = await doc.Revisions.Count;
+            if (count === 0) {
+                ElMessage.info('文档中没有需要拒绝的修订');
+                return;
+            }
+            
+            if (typeof doc.Revisions.RejectAll === 'function') {
+                await doc.Revisions.RejectAll();
+                ElMessage.success(`已拒绝 ${count} 处修订`);
+            } else {
+                // 逐条拒绝
+                let rejected = 0;
+                for (let i = 0; i < count; i++) {
+                    try {
+                        const rev = await doc.Revisions.Item(1);
+                        if (rev && typeof rev.Reject === 'function') {
+                            await rev.Reject();
+                            rejected++;
+                        }
+                    } catch {}
+                }
+                ElMessage.success(`已拒绝 ${rejected} 处修订`);
+            }
+        } catch (error) {
+            console.warn('[WPS Connector] rejectAllRevisions failed:', error.message);
+            ElMessage.error('拒绝修订失败');
+        }
+    };
+
+    // 修订管理：下拉菜单切换
+    const toggleRevisionMenu = () => {
+        showRevisionMenu.value = !showRevisionMenu.value;
+    };
+
+    // 标记是否需要自动插入批注（从历史记录加载时）
+    const needsAutoInsert = ref(false);
+
+    // 审查完成后，由于 WPS WebOffice API 限制（文档只读 + Find.Execute 不可用），
+    // 无法在文档中精确定位并插入批注。改用数据库存储批注，定位功能使用段落导航。
+    const autoInsertAnnotations = async () => {
+        const pdfCheck = isPdfContract.value;
+        console.log('[DEBUG] autoInsertAnnotations called, isPdfContract:', pdfCheck, 'suggestions:', reviewData.modification_suggestions?.length);
+        
+        // PDF 或没有建议时直接返回
+        if (pdfCheck || !reviewData.modification_suggestions?.length) {
+            return;
+        }
+        
+        // 由于以下限制，不尝试在 WPS 文档中插入批注：
+        // 1. 历史合同文档以只读模式打开 (wpsOptions.isReadOnly: false 但服务端可能限制)
+        // 2. WebOffice 的 Find.Execute API 不可用，无法精确定位文本
+        // 3. Comments.Add(doc.Content, comment) 会添加批注到文档开头而非对应文本位置
+        // 
+        // 所有批注通过 ReviewAnnotations 组件存储在数据库中，右侧面板显示
+        
+        ElMessage.info({
+            message: `已加载 ${reviewData.modification_suggestions.length} 条审查建议，请在右侧面板查看详情。`,
+            duration: 3000
+        });
+        
+        // 可选：在文档开头创建书签，方便快速跳转
+        try {
+            const app = await getWpsApplication();
+            if (!app?.ActiveDocument) return;
+            
+            const doc = app.ActiveDocument;
+            if (doc.Bookmarks && typeof doc.Bookmarks.Add === 'function') {
+                // 在文档开头创建书签
+                const range = doc.Range(0, 0);
+                await doc.Bookmarks.Add('contract_start', range);
+                console.log('[Bookmark] Created: contract_start');
+            }
+        } catch (e) {
+            console.warn('[Auto-Annotate] Bookmark creation skipped:', e.message);
+        }
+    };
+
+    // 添加批注：定位到对应原文位置，同时打开右侧批注输入面板
+    const addDocComment = async (text, comment, itemType = 'suggestion', itemIndex = -1) => {
+        if (!text) {
+            ElMessage.info('请在右侧面板的批注功能中添加意见。');
+            return;
+        }
+        // 打开对应建议项的批注输入面板
+        commentingItemKey.value = `${itemType}:${itemIndex}`;
+        // 同时尝试在文档中定位（使用 anchor_hint）
+        await locateText(text, itemType, itemIndex);
     };
 
     const adoptSuggestion = (item) => {
@@ -2634,7 +3478,7 @@ export default {
         }
 
         previewSuggestion(item, '正在采纳');
-        replaceTextInEditor(originalText, suggestedText, (result = {}) => {
+        replaceTextInEditorFinal(originalText, suggestedText, (result = {}) => {
             item.adopted = true;
             item.adopted_original = originalText;
             adoptedHighlights.value[suggestionTitle(item, 0)] = originalText;
@@ -2756,16 +3600,24 @@ export default {
 
     const exportAnnotatedDocx = async () => {
         try {
+            ElMessage.info('正在导出带批注的文档...');
+            // 批注已在审查完成后由后端直接写入DOCX文件，无需再次触发WPS保存
             const response = await api.exportAnnotatedDocx(contract.id);
-            downloadBlob(response.data, `${contract.original_filename.replace(/\.[^.]+$/, '')}-带批注.docx`);
+            const filename = response.headers['content-disposition']
+                ? decodeURIComponent(response.headers['content-disposition'].split('filename=')[1]?.replace(/"/g, '') || '批注版.docx')
+                : '批注版.docx';
+            downloadBlob(response.data, filename);
+            ElMessage.success('带批注的 Word 文档已导出。');
         } catch (error) {
-            ElMessage.error(error.response?.data?.error || '导出带批注文档失败。');
+            ElMessage.error(error.response?.data?.error || '导出带批注 Word 失败。');
+
         }
     };
 
     return {
       activeStep,
       loading,
+      preAnalyzing,
       loadingMessage,
       sessionLoadFailed,
       retryLoadSession,
@@ -2820,15 +3672,20 @@ export default {
       cameFromHistory,
       goBackSmart,
       goToQnA,
-      wpsMountRef,
+
       allSuggestedReviewPoints,
       allPotentialParties,
       reviewTemplates,
       selectedTemplateId,
       querySearchCorePurposes,
-      initWpsEditor,
-      destroyWpsEditor,
+      onDocumentReady,
+      onDocumentStateChange,
+      editMode,
+      onEditorError,
+
       showPlainLanguage,
+      showRevisionMenu,
+      toggleRevisionMenu,
       selectedSuggestionPreview,
       focusedReviewText,
       focusedReviewQuestion,
@@ -2854,16 +3711,29 @@ export default {
       applyFocusedSuggestion,
       locateText,
       addDocComment,
+      gotoDisputeBookmark,
+      addReviewCommentByDisputeBookmark,
+      adjustReplaceByDisputeBookmark,
       adoptSuggestion,
       adoptDisputeSuggestion,
+      acceptAllRevisions,
+      rejectAllRevisions,
+      highlightCurrentRange,
+      addBookmark,
+      jumpToBookmark,
       analysisProgress,
       visibleAnalysisProgress,
       isPdfContract,
-      editorEnabled,
       severityFilter,
       filteredAndSortedDisputePoints,
       disputeSeverityStats,
-      riskDashboard,
+      riskDashboardData,
+      riskScoreLoading,
+      getAnnotations,
+      getAnnotationSummary,
+      handleAddAnnotation,
+      commentingItemKey,
+      userId,
       normalizeSeverity,
       severityLabel,
       severityClass,
@@ -2878,7 +3748,25 @@ export default {
       loadLatestDiff,
       exportReport,
       downloadPdfAnnotations,
-      exportAnnotatedDocx
+      exportAnnotatedDocx,
+      autoInsertAnnotations,
+      wpsEditorRef,
+      // --- Full-provider: Left Panel ---
+      showVersionHistory,
+      versionHistory,
+      versionHistoryLoading,
+      toggleVersionHistory,
+      loadVersionHistory,
+      previewVersion,
+      restoreVersion,
+      formatVersionTime,
+      showWatermarkMenu,
+      watermarkEnabled,
+      watermarkText,
+      toggleWatermarkMenu,
+      toggleWatermark,
+      applyWatermark,
+      reloadDocument,
     };
   }
 };
@@ -3022,6 +3910,113 @@ export default {
 .analysis-progress__item--failed .analysis-progress__marker {
   background: #dc2626;
   border-color: #dc2626;
+}
+
+/* ========== 审查动态效果 ========== */
+
+/* 进度条流光动画 */
+.analysis-progress-bar-shimmer {
+  background: linear-gradient(
+    90deg,
+    #2563eb 0%,
+    #60a5fa 30%,
+    #93c5fd 50%,
+    #60a5fa 70%,
+    #2563eb 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer-slide 1.8s linear infinite;
+}
+@keyframes shimmer-slide {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* 正在运行步骤标记：脉冲发光 */
+.analysis-progress__item--running .analysis-progress__marker {
+  border-color: #2563eb;
+  animation: marker-pulse-glow 1.8s ease-in-out infinite;
+}
+@keyframes marker-pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(37, 99, 235, 0.25), 0 0 12px rgba(37, 99, 235, 0.3);
+  }
+}
+
+/* 步骤入场动画 */
+.analysis-progress__item--running,
+.analysis-progress__item--completed,
+.analysis-progress__item--failed {
+  animation: step-enter 0.35s ease-out;
+}
+@keyframes step-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* 连接线：步骤完成后从灰变绿动画 */
+.analysis-progress__item--completed::after {
+  background: #16a34a;
+  animation: line-fill 0.5s ease-out forwards;
+}
+@keyframes line-fill {
+  from { transform: scaleY(0); transform-origin: top; }
+  to   { transform: scaleY(1); transform-origin: top; }
+}
+
+/* AI思考中省略号动画（替代文字"进行中"） */
+.analysis-thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 14px;
+}
+.analysis-thinking-dots span {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #2563eb;
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+.analysis-thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.analysis-thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thinking-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
+
+/* 进度百分比数字滚动效果 */
+.analysis-percent-counter {
+  display: inline-block;
+  transition: transform 0.15s ease-out;
+}
+.analysis-percent-counter.tick {
+  animation: percent-pop 0.2s ease-out;
+}
+@keyframes percent-pop {
+  0%  { transform: scale(1); }
+  50% { transform: scale(1.15); }
+  100%{ transform: scale(1); }
+}
+
+/* 审查完成时的庆祝动画 */
+.analysis-progress__item--completed .analysis-progress__marker {
+  animation: completed-pop 0.4s ease-out;
+}
+@keyframes completed-pop {
+  0%   { transform: scale(0.6); opacity: 0.5; }
+  70%  { transform: scale(1.15); }
+  100% { transform: scale(1); opacity: 1; }
 }
 
 .analysis-progress__content {

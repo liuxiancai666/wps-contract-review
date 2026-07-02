@@ -1,18 +1,24 @@
 import axios from 'axios';
 import { getUserId } from './user'; // Assuming user.js is in the same src directory
 
+const TOKEN_KEY = 'auth_token';
+
 const apiClient = axios.create({
-    baseURL: (import.meta.env.VITE_APP_BACKEND_API_URL || window.location.origin) + '/api',
+    baseURL: (import.meta.env.VITE_APP_BACKEND_API_URL || '') + '/api',
     headers: {
         'Content-Type': 'application/json'
     }
 });
 
-// 使用拦截器，在每个请求中自动注入用户ID到请求头
+// 使用拦截器，在每个请求中自动注入用户ID和Authorization到请求头
 apiClient.interceptors.request.use(config => {
     const userId = getUserId();
     if (userId) {
         config.headers['X-User-ID'] = userId;
+    }
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (token) {
+        config.headers['Authorization'] = `Bearer ${token}`;
     }
     return config;
 }, error => {
@@ -111,12 +117,20 @@ export default {
         return apiClient.get(`/contracts/${contractId}/editor-config`);
     },
 
+    enableEdit(contractId) {
+        return apiClient.post(`/contracts/${contractId}/enable-edit`);
+    },
+
+    getFreshWpsConfig(contractId) {
+        return apiClient.get(`/contracts/${contractId}/fresh-editor-config`);
+    },
+
     forceSaveContract(contractId, payload = {}) {
         return apiClient.post(`/contracts/${contractId}/force-save`, payload);
     },
 
     getHistory() {
-        return apiClient.get('/contracts/history');
+        return apiClient.get('/contracts');
     },
 
     identifyUser(payload) {
@@ -193,7 +207,7 @@ export default {
         return apiClient.get('/knowledge/template', { params: { type }, responseType: 'blob' });
     },
 
-    rebuildKnowledge() {
+    rebuildVectorDatabase() {
         return apiClient.post('/knowledge/rebuild', {}, { timeout: 300000 });
     },
 
@@ -204,6 +218,25 @@ export default {
     getReviewTemplates() {
         return apiClient.get('/templates');
     },
+
+    // === 批注交互 API ===
+    getReviewComments(contractId) {
+        return apiClient.get(`/contracts/${contractId}/comments`);
+    },
+    addReviewComment(contractId, payload) {
+        return apiClient.post(`/contracts/${contractId}/comments`, payload);
+    },
+    updateReviewComment(commentId, payload) {
+        return apiClient.put(`/contracts/comments/${commentId}`, payload);
+    },
+    deleteReviewComment(commentId) {
+        return apiClient.delete(`/contracts/comments/${commentId}`);
+    },
+
+    // === 风险评分 API ===
+    getRiskScore(contractId) {
+        return apiClient.get(`/contracts/${contractId}/risk-score`);
+    }
 };
 
 export { apiClient };

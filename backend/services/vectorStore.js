@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const db = require('../database');
-const { EMBEDDING_DIM, embedText, embedTexts, ensureEmbeddingReady, rerankDocuments, isHashFallback } = require('./embeddingClient');
+const { EMBEDDING_DIM, embedText, embedTexts, ensureEmbeddingReady, rerankDocuments } = require('./embeddingClient');
 const { parseLegalMarkdownFile } = require('./legalMarkdownParser');
 const { parseCaseJsonDocument } = require('./caseJsonParser');
 
@@ -11,7 +11,7 @@ let DataType;
 let MetricType;
 try {
     ({ MilvusClient, DataType, MetricType } = require('@zilliz/milvus2-sdk-node'));
-} catch (_) {
+} catch (error) {
     console.warn('[Milvus] SDK not installed. Relational vector fallback will be used.');
 }
 
@@ -112,7 +112,7 @@ const sourceHash = (parts) => crypto
 
 const escapeExpr = (value) => String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
-const splitTextIntoChunks = (text, { maxChars = 400, overlap = 80 } = {}) => {
+const splitTextIntoChunks = (text, { maxChars = 400, overlap = 60 } = {}) => {
     const normalized = normalizeText(text);
     if (!normalized) return [];
 
@@ -146,9 +146,88 @@ const splitTextIntoChunks = (text, { maxChars = 400, overlap = 80 } = {}) => {
     return chunks.filter((chunk) => chunk.length >= 20);
 };
 
+// 按段落拆分文本（不跨段落合并），每个段落作为独立 query 保留完整语义
+// 超长段落按句末标点二次拆分，同段落内的句子可组合到 maxChars 以内（语义连贯）
+// minChars 以下的碎片直接丢弃，避免无意义 query 稀释检索
+const splitIntoParagraphs = (text, { maxChars = 500, minChars = 5 } = {}) => {
+    // 不能用 normalizeText：它会把 \r\n 折成空格，导致段落边界丢失、整篇被合并成一段
+    // 只在段落内部折叠空格/制表符，保留 \r?\n 作为段落分隔
+    const raw = String(text || '');
+    if (!raw.trim()) return [];
+
+    const paragraphs = raw
+        .split(/(?:\r?\n)+/g)
+        .map((p) => p.replace(/[ \t]+/g, ' ').trim())
+        .filter(Boolean);
+
+    const result = [];
+    for (const para of paragraphs.length ? paragraphs : [raw.trim()]) {
+        if (para.length <= maxChars) {
+            result.push(para);
+            continue;
+        }
+        // 超长段落按句末标点拆分，同段落内句子组合到 maxChars 以内
+        const sentences = para.split(/(?<=[。！？；;.!?])\s*/g).map((s) => s.trim()).filter(Boolean);
+        let buf = '';
+        for (const sentence of sentences.length ? sentences : [para]) {
+            if (sentence.length > maxChars) {
+                if (buf) { result.push(buf); buf = ''; }
+                result.push(sentence); // 超长单句保持原样，交给 embedding 模型截断
+                continue;
+            }
+            if ((buf + sentence).length > maxChars) {
+                if (buf) result.push(buf);
+                buf = sentence;
+            } else {
+                buf = buf ? `${buf}${sentence}` : sentence;
+            }
+        }
+        if (buf) result.push(buf);
+    }
+    return result.filter((p) => p.length >= minChars);
+};
+
+// 通道 B「合同内容」专用切分：每个 \n 一段，相邻 groupSize 段合并为一个 chunk
+// 目的：把"每行一段"的细粒度按语义聚合成块，既保留合同自然结构，
+// 又避免每行一个 query 产生大量噪声检索；maxChars 防止单块过长被 embedding 截断
+const splitIntoParagraphGroups = (text, { groupSize = 5, maxChars = 500, minChars = 5 } = {}) => {
+    const raw = String(text || '');
+    if (!raw.trim()) return [];
+
+    const paragraphs = raw
+        .split(/(?:\r?\n)+/g)
+        .map((p) => p.replace(/[ \t]+/g, ' ').trim())
+        .filter(Boolean);
+    if (paragraphs.length === 0) return [];
+
+    const groups = [];
+    let buf = [];
+    let bufLen = 0;
+    const flush = () => {
+        if (buf.length === 0) return;
+        const chunk = buf.join(' ');
+        if (chunk.length >= minChars) groups.push(chunk);
+        buf = [];
+        bufLen = 0;
+    };
+
+    for (const para of paragraphs) {
+        // 达到 groupSize 或加入后超过 maxChars，先 flush（保证块不致过长）
+        if (buf.length >= groupSize || (bufLen + para.length + 1) > maxChars) {
+            flush();
+        }
+        buf.push(para);
+        bufLen += para.length + 1;
+        // 单段本身超 maxChars，单独成块（不再与相邻段合并）
+        if (para.length > maxChars) flush();
+    }
+    flush();
+    return groups;
+};
+
 const getMilvusClient = async () => {
     const vectorStore = String(process.env.VECTOR_STORE || '').toLowerCase();
-    if (!MilvusClient || ['postgres', 'relational'].includes(vectorStore)) return null;
+    if (!MilvusClient || ['sqlite', 'postgres', 'pg', 'relational'].includes(vectorStore)) return null;
     if (!process.env.MILVUS_ADDRESS) return null;
     if (!milvusClientPromise) {
         milvusClientPromise = (async () => {
@@ -204,6 +283,7 @@ const ensureRelationalVectorTable = async () => {
     await addColumn('source_url', (table) => table.string('source_url'));
     await addColumn('chunk_index', (table) => table.integer('chunk_index').defaultTo(0));
     await addColumn('content_hash', (table) => table.string('content_hash').index());
+    await addColumn('embedding_vec', (table) => table.specificType('embedding_vec', 'vector(1024)'));
 };
 
 const ensureMilvusCollection = async () => {
@@ -276,7 +356,7 @@ const toVectorDocumentRows = async (entry) => {
     const sourceUrl = entry.source_url || entry.sourceUrl || '';
     const metadata = toMetadataObject(entry.metadata);
     const chunks = entry.chunks || splitTextIntoChunks(entry.content || '');
-    const textsForEmbedding = chunks.map((text, _i) => `${title}\n${category}\n${entry.clauseId || entry.clause_id || ''}\n${text}`);
+    const textsForEmbedding = chunks.map((chunk, index) => `${title}\n${category}\n${entry.clauseId || entry.clause_id || ''}\n${chunk}`);
     const embeddings = await embedTexts(textsForEmbedding);
 
     return chunks.map((chunk, index) => {
@@ -301,9 +381,11 @@ const toVectorDocumentRows = async (entry) => {
 };
 
 const upsertRelationalRow = async (row) => {
+    const vectorStr = `[${row.embedding.join(',')}]`;
     const payload = {
         ...row,
         embedding: JSON.stringify(row.embedding),
+        embedding_vec: db.raw(`'${vectorStr}'::vector`),
         updated_at: db.fn.now(),
     };
     const duplicate = await db('vector_documents').where({ content_hash: row.content_hash }).first();
@@ -316,8 +398,7 @@ const upsertRelationalRow = async (row) => {
         await db('vector_documents').where({ id: existing.id }).update(payload);
         return { id: existing.id, deduped: false };
     }
-    const result = await db('vector_documents').insert(payload, ['id']);
-    const inserted = Array.isArray(result) ? result[0] : result;
+    const [inserted] = await db('vector_documents').insert(payload).returning('id');
     const id = typeof inserted === 'object' ? inserted.id : inserted;
     return { id, deduped: false };
 };
@@ -621,7 +702,7 @@ const deleteMilvusRows = async (rows) => {
         await client.flush({ collection_names: [COLLECTION_NAME] });
         return true;
     } catch (error) {
-        console.warn(`[Milvus] Delete failed: ${error.message}. PG metadata has been deleted.`);
+        console.warn(`[Milvus] Delete failed: ${error.message}. SQLite metadata has been deleted.`);
         return false;
     }
 };
@@ -660,7 +741,7 @@ const deleteKnowledgeDocuments = async ({ ids = [], sourceIds = [], sourceType =
     return { deleted: rows.length, vectorStore: milvusReady ? 'milvus' : 'relational-fallback' };
 };
 
-// 清空所有向量数据（用于重建）
+// 清空所有向量数据（用于重建），同时清空 SQLite 和 Milvus
 const clearAllVectorDocuments = async () => {
     await ensureVectorStore();
     const rows = await db('vector_documents').select('id', 'source_id', 'content_hash');
@@ -731,36 +812,28 @@ const listKnowledgeDocuments = async ({
 const pgVectorSearch = async (query, queryVector, { limit, sourceTypes }) => {
     let rowsQuery = db('vector_documents');
     if (sourceTypes.length > 0) rowsQuery = rowsQuery.whereIn('source_type', sourceTypes);
-    // 小规模数据直接全量扫描，确保所有语义相关行进入候选
-    const total = await db('vector_documents').count({ total: '*' }).first();
-    const scanLimit = Number(total?.total || 0) > 5000 ? Math.min(limit * 40, 5000) : 10000;
-    const rows = await rowsQuery.select('*').limit(scanLimit);
-    return rows
-        .map((row) => {
-            const embedding = JSON.parse(row.embedding || '[]');
-            let score = 0;
-            for (let i = 0; i < Math.min(queryVector.length, embedding.length); i += 1) {
-                score += (queryVector[i] || 0) * (embedding[i] || 0);
-            }
-            return {
-                id: row.id,
-                source_type: row.source_type,
-                source_id: row.source_id,
-                title: row.title,
-                category: row.category,
-                clause_id: row.clause_id,
-                source_name: row.source_name,
-                source_url: row.source_url,
-                chunk_index: row.chunk_index,
-                content_hash: row.content_hash,
-                content: row.content,
-                metadata: toMetadataObject(row.metadata),
-                score,
-            };
-        })
-        .filter((row) => row.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, limit);
+    // Ensure queryVector is an array of floats
+    const vectorStr = `[${queryVector.join(',')}]`;
+    const rows = await rowsQuery
+        .select('*', db.raw(`1 - (embedding_vec <=> '${vectorStr}'::vector) as score`))
+        .whereNotNull('embedding_vec')
+        .orderByRaw(`embedding_vec <=> '${vectorStr}'::vector`)
+        .limit(limit);
+    return rows.map((row) => ({
+        id: row.id,
+        source_type: row.source_type,
+        source_id: row.source_id,
+        title: row.title,
+        category: row.category,
+        clause_id: row.clause_id,
+        source_name: row.source_name,
+        source_url: row.source_url,
+        chunk_index: row.chunk_index,
+        content_hash: row.content_hash,
+        content: row.content,
+        metadata: toMetadataObject(row.metadata),
+        score: Number(row.score) || 0,
+    }));
 };
 
 const tokenizeQuery = (query) => {
@@ -789,20 +862,14 @@ const keywordSearch = async (query, { limit, sourceTypes }) => {
         }
     });
 
-    const rows = await rowsQuery.select('*');
+    const rows = await rowsQuery.select('*').limit(limit * 8);
     return rows
         .map((row) => {
             const title = `${row.title || ''} ${row.category || ''} ${row.clause_id || ''} ${row.source_name || ''}`.toLowerCase();
             const content = String(row.content || '').toLowerCase();
             const score = terms.reduce((sum, term) => {
                 const titleHits = title.includes(term) ? 0.15 : 0;
-                // 词频计算：term 在 content 中出现次数越多，score 越高
-                let contentHits = 0;
-                if (content.includes(term)) {
-                    let idx = 0; let count = 0;
-                    while ((idx = content.indexOf(term, idx)) !== -1) { count++; idx += term.length; }
-                    contentHits = Math.min(0.05 + (count - 1) * 0.02, 0.30);
-                }
+                const contentHits = content.includes(term) ? 0.05 : 0;
                 return sum + titleHits + contentHits;
             }, 0);
             return {
@@ -892,22 +959,13 @@ const milvusVectorSearch = async (queryVector, { limit, sourceTypes }) => {
 const searchVectorDocuments = async (query, { limit = 5, sourceTypes = [], rerank = true } = {}) => {
     await ensureVectorStore();
     const cleanQuery = normalizeText(query);
-    const candidateLimit = Math.max(limit * 8, limit);
-
-    // 检测 embedding 模式：hash fallback 时跳过向量搜索（hash向量无语义区分度），仅用关键词搜索
-    // 此时增大候选量确保所有匹配行都被召回
-    if (isHashFallback()) {
-        console.log('[Vector Search] Hash fallback mode active — using keyword search only.');
-        const keywordResults = await keywordSearch(cleanQuery, { limit: Math.max(limit * 40, 200), sourceTypes });
-        return keywordResults.slice(0, limit);
-    }
-
     const queryVector = await embedText(cleanQuery);
+    const candidateLimit = Math.max(limit * 8, limit);
     let results = await milvusVectorSearch(queryVector, { limit: candidateLimit, sourceTypes });
-    // Milvus 返回空数组时也回退到关系库
+    // Milvus 返回空数组时也回退到关系库（避免 Milvus 无数据但 SQLite 有数据时搜不到）
     if (!results || results.length === 0) {
         if (results && results.length === 0 && milvusReady) {
-            console.log('[Vector Search] Milvus returned 0 results, falling back to relational vectors.');
+            console.log('[Vector Search] Milvus returned 0 results, falling back to pgvector.');
         }
         results = await pgVectorSearch(cleanQuery, queryVector, { limit: candidateLimit, sourceTypes });
     }
@@ -917,14 +975,111 @@ const searchVectorDocuments = async (query, { limit = 5, sourceTypes = [], reran
     return reranked.slice(0, limit);
 };
 
+// 知识库检索 rerank 阈值：只对 rerank_score 生效；rerank 不可用时（无 rerank_score）不过滤
+// 设为 0 可关闭阈值过滤；未配置环境变量时默认 0.6
+const DEFAULT_SCORE_THRESHOLD = (() => {
+    const v = Number(process.env.KNOWLEDGE_SCORE_THRESHOLD);
+    return Number.isFinite(v) ? v : 0.6;
+})();
+
+// 多 query 拆分检索：对每个子 query 独立召回 + rerank，再按 content_hash 去重融合
+// 适用于"合同类型 + 审查点 + 合同正文段落"这类多意图场景，避免长文本稀释聚焦词信号
+const searchVectorDocumentsMulti = async (queries, {
+    limit = 8,
+    sourceTypes = [],
+    rerank = true,
+    scoreThreshold = DEFAULT_SCORE_THRESHOLD,
+    perQueryLimit = 2,
+} = {}) => {
+    const cleanQueries = (Array.isArray(queries) ? queries : [queries])
+        .map((q) => normalizeText(q))
+        .filter((q) => q && q.length >= 5);
+    if (cleanQueries.length === 0) return [];
+    const filterByThreshold = (items) => {
+        if (scoreThreshold <= 0) return items;
+        return items.filter((item) => {
+            if (item.rerank_score === undefined || item.rerank_score === null) return true;
+            return item.rerank_score >= scoreThreshold;
+        });
+    };
+
+    if (cleanQueries.length === 1) {
+        const results = await searchVectorDocuments(cleanQueries[0], { limit, sourceTypes, rerank });
+        return filterByThreshold(results).slice(0, limit);
+    }
+
+    // 多 query 时每条少取一些，靠融合补足；perQueryLimit 由调用方按通道配置
+    const perQueryResults = await Promise.all(
+        cleanQueries.map((q) => searchVectorDocuments(q, {
+            limit: perQueryLimit,
+            sourceTypes,
+            rerank,
+        })),
+    );
+    // 融合：按 content_hash/source_id 去重，保留最高 rerank_score（或 score 兜底）
+    // 1. 先过滤掉低于 KNOWLEDGE_SCORE_THRESHOLD 的项；每个 cleanQuery 贡献一条最高分的 above-threshold 项
+    //    （已被其他 query 选中的跳过，保证多样性；某 query 无 above-threshold 项则跳过）
+    // 2. 如果 Phase 1 超出 limit，按实际取 top limit return phase1;
+    // 3. 如果 Phase 1 不足 limit，从剩余项（含 below-threshold）去重后按分数补充
+
+    const getKey = (item) => item.content_hash || item.source_id || item.id;
+    const scoreOf = (item) => item.rerank_score ?? item.score ?? 0;
+    const sortByScoreDesc = (a, b) => scoreOf(b) - scoreOf(a);
+    const isAboveThreshold = (item) => {
+        if (scoreThreshold <= 0) return true;
+        if (item.rerank_score === undefined || item.rerank_score === null) return true;
+        return item.rerank_score >= scoreThreshold;
+    };
+
+    // Phase 1：每个 cleanQuery 贡献一条最高分的 above-threshold 项（已被选中的跳过）
+    const phase1 = [];
+    const usedKeys = new Set();
+    perQueryResults.forEach((results, queryIndex) => {
+        const best = results
+            .filter((item) => {
+                if (!isAboveThreshold(item)) return false;
+                const key = getKey(item);
+                return !key || !usedKeys.has(key);
+            })
+            .sort(sortByScoreDesc)[0];
+        if (!best) return; // 该 query 无 above-threshold 可用项，跳过
+        const key = getKey(best);
+        if (key) usedKeys.add(key);
+        phase1.push({ ...best, matched_query_index: queryIndex });
+    });
+    phase1.sort(sortByScoreDesc);
+
+    // 超出 limit 直接截断
+    if (phase1.length >= limit) {
+        return phase1.slice(0, limit);
+    }
+    // Phase 2：不足 limit，从剩余项（含 below-threshold）去重后按分数补充
+    const backfillByKey = new Map();
+    perQueryResults.forEach((results, queryIndex) => {
+        results.forEach((item) => {
+            const key = getKey(item);
+            if (key && usedKeys.has(key)) return;
+            const existing = backfillByKey.get(key);
+            if (!existing || scoreOf(item) > scoreOf(existing)) {
+                backfillByKey.set(key, { ...item, matched_query_index: queryIndex });
+            }
+        });
+    });
+    const backfill = [...backfillByKey.values()].sort(sortByScoreDesc);
+    return [...phase1, ...backfill.slice(0, limit - phase1.length)];
+};
+
 module.exports = {
     ensureVectorStore,
     seedLawsFromMarkdown,
     seedCasesFromJson,
     searchVectorDocuments,
+    searchVectorDocumentsMulti,
     listKnowledgeDocuments,
     importKnowledgeEntries,
     deleteKnowledgeDocuments,
     clearAllVectorDocuments,
     splitTextIntoChunks,
+    splitIntoParagraphs,
+    splitIntoParagraphGroups,
 };

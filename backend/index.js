@@ -1,48 +1,77 @@
-require('dotenv').config({ override: true });
+require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const helmet = require('helmet');
 const path = require('path');
 const fs = require('fs');
-const http = require('http');
-const { Server } = require('socket.io');
-
+const rateLimit = require('express-rate-limit');
 const contractRoutes = require('./routes/contracts');
 const qaRoutes = require('./routes/qa');
 const userRoutes = require('./routes/users');
 const knowledgeRoutes = require('./routes/knowledge');
 const templateRoutes = require('./routes/templates');
+const rulesRoutes = require('./routes/rules');
+const wpsCallbackRoutes = require('./routes/wps-callback');
+const wpsAuthRoutes = require('./routes/wps-auth');
+const authRoutes = require('./routes/auth');
 const db = require('./database');
 const resetAndRebuildDatabase = require('./database-check');
 
+const http = require('http');
+const { Server } = require('socket.io');
+
 const app = express();
 const server = http.createServer(app);
-
-// Security headers
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' },
-  contentSecurityPolicy: false,
-}));
-
-// CORS - restricted to known origins
-const allowedOrigins = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
-  : ['http://82.157.138.176:8082', 'http://localhost:8082'];
-
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
-    methods: ['GET', 'POST'],
-  },
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
 });
-
 const port = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors({ origin: allowedOrigins }));
+const allowedOrigins = (process.env.CORS_ORIGIN || process.env.APP_HOST || '').split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({
+    origin: function(origin, callback) {
+        // 允许没有 origin 的请求（如测试工具、服务器内部调用）
+        if (!origin) return callback(null, true);
+        // 允许明确配置的域名，或在开发环境允许所有 localhost
+        if (allowedOrigins.includes(origin)) return callback(null, true);
+        if (process.env.NODE_ENV !== 'production') {
+            if (origin && (origin.includes('localhost') || origin.includes('127.0.0.1'))) {
+                return callback(null, true);
+            }
+        }
+        console.warn('[CORS] Blocked origin:', origin, '| allowed:', allowedOrigins);
+        callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+}));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Trust proxy for correct rate-limiting behind nginx
+app.set('trust proxy', 1);
+
+// Rate limiting
+const apiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 100,
+    message: { error: '请求过于频繁，请稍后再试。' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+app.use('/api/', apiLimiter);
+
+const analyzeLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 5,
+    message: { error: 'AI 分析请求过于频繁，每分钟最多 5 次。' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+app.use('/api/contracts/analyze', analyzeLimiter);
 
 // Socket.io logic
 io.on('connection', (socket) => {
@@ -51,14 +80,17 @@ io.on('connection', (socket) => {
   socket.on('join-contract', (contractId) => {
     socket.join(`contract-${contractId}`);
     console.log(`User ${socket.id} joined room: contract-${contractId}`);
+    // Notify others in the room
     socket.to(`contract-${contractId}`).emit('user-joined', { userId: socket.id });
   });
 
   socket.on('analysis-started', (data) => {
+    // data should contain contractId and perhaps user info
     socket.to(`contract-${data.contractId}`).emit('analysis-progress', { status: 'started', user: data.user });
   });
 
   socket.on('analysis-finished', (data) => {
+    // Broadcast analysis results to everyone in the room
     io.to(`contract-${data.contractId}`).emit('analysis-complete', data.results);
   });
 
@@ -70,7 +102,7 @@ io.on('connection', (socket) => {
 // Serve static files from the 'public' directory
 const publicDir = path.join(__dirname, 'public');
 if (!fs.existsSync(publicDir)) {
-  fs.mkdirSync(publicDir, { recursive: true });
+    fs.mkdirSync(publicDir, { recursive: true });
 }
 app.use(express.static(publicDir));
 
@@ -79,14 +111,31 @@ app.use('/api/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Attach io to app for use in routes
 app.set('io', io);
+// 注入 io 实例到 contracts 路由，供后台异步分析任务推送进度
 contractRoutes.setIoInstance(io);
 
 // API Routes
 app.use('/api/contracts', contractRoutes);
 app.use('/api/qa', qaRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/knowledge', knowledgeRoutes);
+app.use('/api/knowledge', authRoutes.authMiddleware, authRoutes.adminMiddleware, knowledgeRoutes);
 app.use('/api/templates', templateRoutes);
+app.use('/api/rules', rulesRoutes);
+
+// Auth 路由（登录/注册/用户管理）
+app.use('/api/auth', authRoutes);
+
+// WPS WebOffice SDK auth 代理（必须在静态文件之前）
+app.use('/office/v5/ai', wpsAuthRoutes);
+
+// DEBUG: 临时测试端点 - 在 wpsAuthRoutes 之后验证路由
+app.post('/office/v5/ai/test', (req, res) => {
+    console.log('[DEBUG] /office/v5/ai/test endpoint HIT - wpsAuthRoutes works!');
+    res.json({ ok: true, msg: 'wpsAuthRoutes is working' });
+});
+
+// WPS WebOffice v3 回调路由（必须是公网可达）
+app.use(wpsCallbackRoutes);
 
 app.get('/', (req, res) => {
   res.send('ContractGE Backend is running!');
@@ -99,7 +148,7 @@ app.use((err, req, res, next) => {
       return res.status(413).json({ error: '文件大小超过 50MB 限制，请压缩或拆分后上传。', code: 'FILE_TOO_LARGE' });
     }
     if (err.message && err.message.startsWith('UNSUPPORTED_FILE_TYPE')) {
-      return res.status(400).json({ error: '仅支持 .docx 和 .pdf 格式的文件。', code: 'UNSUPPORTED_FILE_TYPE' });
+      return res.status(400).json({ error: '仅支持 .docx、.doc 和 .pdf 格式的文件。', code: 'UNSUPPORTED_FILE_TYPE' });
     }
     console.error('[ERROR] Unhandled middleware error:', err);
     return res.status(500).json({ error: '服务器处理请求时发生错误。' });
@@ -107,59 +156,13 @@ app.use((err, req, res, next) => {
   next();
 });
 
-// 健康检查端点
-app.get('/api/health', async (req, res) => {
-  const checks = {
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    services: {},
-  };
-
-  try {
-    const pgResult = await db.raw('SELECT 1 AS ok');
-    checks.services.postgres = pgResult?.rows?.[0]?.ok === 1 ? 'ok' : 'error';
-  } catch (e) {
-    checks.services.postgres = `error: ${e.message.slice(0, 80)}`;
-    checks.status = 'degraded';
-  }
-
-  try {
-    const { embedText } = require('./services/embeddingClient');
-    const emb = await embedText('健康检查');
-    checks.services.embedding = emb?.length > 0 ? 'ok' : 'no_output';
-  } catch (e) {
-    checks.services.embedding = `error: ${e.message.slice(0, 60)}`;
-    checks.status = 'degraded';
-  }
-
-  try {
-    const { MilvusClient } = require('@zilliz/milvus2-sdk-node');
-    const client = new MilvusClient({ address: process.env.MILVUS_ADDRESS || '127.0.0.1:19530' });
-    const exists = await client.hasCollection({ collection_name: process.env.MILVUS_COLLECTION || 'contract_review_knowledge' });
-    checks.services.milvus = exists?.value === true ? 'connected' : 'no_collection';
-  } catch (e) {
-    checks.services.milvus = `error: ${e.message.slice(0, 60)}`;
-    checks.status = 'degraded';
-  }
-
-  try {
-    const countResult = await db('vector_documents').count({ count: '*' }).first();
-    const totalChunks = Number(countResult?.count || 0);
-    const titlesResult = await db('vector_documents').distinct('title');
-    const totalTitles = titlesResult.length;
-    checks.services.knowledge_chunks = totalChunks;
-    checks.services.knowledge_titles = totalTitles;
-    if (totalTitles < 41) {
-      checks.services.knowledge_warning = `low coverage: ${totalTitles}/41 titles`;
-      checks.status = 'degraded';
-    }
-  } catch (e) {
-    checks.services.knowledge_chunks = 0;
-    checks.services.knowledge_titles = 0;
-  }
-
-  const httpCode = checks.status === 'ok' ? 200 : 503;
-  res.status(httpCode).json(checks);
+// ========== 进程级异常处理（防止未捕获异常导致静默崩溃） ==========
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err.stack || err.message);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled rejection at:', promise, 'reason:', reason);
 });
 
 async function startServer() {

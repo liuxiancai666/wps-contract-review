@@ -2,7 +2,6 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { execSync } = require('child_process');
 const mammoth = require('mammoth');
 const pdf = require('pdf-parse');
 const db = require('../database');
@@ -29,7 +28,6 @@ const upload = multer({
 });
 const legalTemplatePath = path.join(__dirname, '..', 'data', '法律法规模版.md');
 const caseTemplatePath = path.join(__dirname, '..', 'data', '裁判文书模版.json');
-const projectRoot = path.resolve(__dirname, '..', '..');
 
 const extractTextFromFile = async (filePath) => {
     const ext = path.extname(filePath).toLowerCase();
@@ -68,137 +66,6 @@ const normalizeKnowledgeEntries = (incoming) => {
     }
     return normalized;
 };
-
-// 尝试从 git 远程拉取最新的数据文件
-const tryPullGitData = () => {
-    const gitDir = path.join(projectRoot, '.git');
-    if (!fs.existsSync(gitDir)) {
-        console.log('[Knowledge Rebuild] No .git directory found. Skipping git pull.');
-        return false;
-    }
-    try {
-        console.log('[Knowledge Rebuild] Attempting git fetch origin...');
-        execSync('git fetch origin', { cwd: projectRoot, stdio: 'pipe', timeout: 30000 });
-        // 先尝试 origin/v2.0, 再试 origin/main
-        const remoteRef = execSync('git ls-remote origin HEAD', { cwd: projectRoot, stdio: 'pipe', timeout: 10000 })
-            .toString().trim();
-        // 使用 origin/v2.0（含代码和数据的完整分支）
-        for (const branch of ['origin/v2.0', 'origin/main', 'origin/master']) {
-            const checkCmd = `git rev-parse --verify ${branch} --`;
-            try {
-                execSync(checkCmd, { cwd: projectRoot, stdio: 'pipe', timeout: 5000 });
-                console.log(`[Knowledge Rebuild] Checking out data files from ${branch}...`);
-                execSync(`git checkout ${branch} -- backend/data/`, { cwd: projectRoot, stdio: 'pipe', timeout: 30000 });
-                console.log(`[Knowledge Rebuild] Successfully pulled data from ${branch}.`);
-                return true;
-            } catch {
-                continue;
-            }
-        }
-        console.log('[Knowledge Rebuild] No remote branch with data found.');
-        return false;
-    } catch (error) {
-        console.log(`[Knowledge Rebuild] Git pull failed: ${error.message}. Using local data.`);
-        return false;
-    }
-};
-
-// 向量数据库状态查询
-router.get('/vector-status', async (req, res) => {
-    try {
-        const lawCount = await db('vector_documents').where({ source_type: 'law' }).count({ count: '*' }).first();
-        const caseCount = await db('vector_documents').where({ source_type: 'case' }).count({ count: '*' }).first();
-        const totalCount = await db('vector_documents').count({ count: '*' }).first();
-        const count = Number(totalCount?.count || 0);
-        res.json({
-            hasData: count > 0,
-            lawCount: Number(lawCount?.count || 0),
-            caseCount: Number(caseCount?.count || 0),
-            totalCount: count,
-        });
-    } catch (error) {
-        res.status(500).json({ error: `查询向量数据库状态失败: ${error.message}` });
-    }
-});
-
-// 重建向量数据库（SSE 流式返回进度）
-router.post('/rebuild', async (req, res) => {
-    // 设置 SSE headers
-    res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-    });
-
-    const sendEvent = async (data) => {
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-        await new Promise((resolve) => setImmediate(resolve));
-    };
-
-    try {
-        console.log('[Knowledge] Rebuild vector database started...');
-
-        // 1. 先尝试从 git 拉取最新数据文件
-        tryPullGitData();
-
-        // 2. 清空现有数据
-        await sendEvent({ phase: 'clearing', message: '正在清空现有向量数据...' });
-        const clearResult = await clearAllVectorDocuments();
-        console.log(`[Knowledge] Cleared ${clearResult.deleted} existing vector documents.`);
-        await sendEvent({ phase: 'clearing_done', cleared: clearResult.deleted });
-
-        // 3. 设置环境变量强制重建
-        process.env.FORCE_RESEED_LAWS = 'true';
-        process.env.FORCE_RESEED_CASES = 'true';
-
-        // 4. Seed 法条
-        await sendEvent({ phase: 'law_start', message: '开始导入法条数据...' });
-        const lawResult = await seedLawsFromMarkdown(async (progress) => {
-            await sendEvent({
-                phase: 'law',
-                current: progress.current,
-                total: progress.total,
-                fileName: progress.fileName,
-                chunks: progress.chunks,
-            });
-        });
-        await sendEvent({ phase: 'law_done', result: lawResult });
-
-        // 5. Seed 案例
-        await sendEvent({ phase: 'case_start', message: '开始导入案例数据...' });
-        const caseResult = await seedCasesFromJson(async (progress) => {
-            await sendEvent({
-                phase: 'case',
-                current: progress.current,
-                total: progress.total,
-                fileName: progress.fileName,
-                chunks: progress.chunks,
-            });
-        });
-        await sendEvent({ phase: 'case_done', result: caseResult });
-
-        // 清理环境变量
-        delete process.env.FORCE_RESEED_LAWS;
-        delete process.env.FORCE_RESEED_CASES;
-
-        // 6. 完成
-        const summary = {
-            phase: 'complete',
-            message: '向量数据库重建完成',
-            cleared: clearResult.deleted,
-            law: lawResult,
-            case: caseResult,
-        };
-        console.log('[Knowledge] Rebuild vector database completed.');
-        await sendEvent(summary);
-        res.end();
-    } catch (error) {
-        console.error('[ERROR] Knowledge rebuild failed:', error);
-        await sendEvent({ phase: 'error', message: `向量数据库重建失败: ${error.message}` });
-        res.end();
-    }
-});
 
 router.get('/template', (req, res) => {
     const templateType = String(req.query.type || '').trim().toLowerCase();
@@ -300,7 +167,7 @@ router.post('/batch-import', upload.array('files', BATCH_IMPORT_FILE_LIMIT), asy
             deduped: 0,
             files: 0,
             failed: [],
-            vectorStore: 'pg-fallback',
+            vectorStore: 'sqlite-fallback',
         };
         let entries = [];
 
@@ -382,6 +249,94 @@ router.delete('/:id', async (req, res) => {
     } catch (error) {
         console.error('[ERROR] Knowledge delete by id failed:', error);
         res.status(400).json({ error: error.message || 'Knowledge delete failed.' });
+    }
+});
+
+// 向量数据库状态查询
+router.get('/vector-status', async (req, res) => {
+    try {
+        const lawCount = await db('vector_documents').where({ source_type: 'law' }).count({ count: '*' }).first();
+        const caseCount = await db('vector_documents').where({ source_type: 'case' }).count({ count: '*' }).first();
+        const totalCount = await db('vector_documents').count({ count: '*' }).first();
+        const count = Number(totalCount?.count || 0);
+        res.json({
+            hasData: count > 0,
+            lawCount: Number(lawCount?.count || 0),
+            caseCount: Number(caseCount?.count || 0),
+            totalCount: count,
+        });
+    } catch (error) {
+        res.status(500).json({ error: `查询向量数据库状态失败: ${error.message}` });
+    }
+});
+
+// 重建向量数据库（SSE 流式返回进度）
+router.post('/rebuild', async (req, res) => {
+    // 设置 SSE headers
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+    });
+
+    // 异步发送 SSE 事件，yield 事件循环确保数据立即推送到客户端
+    const sendEvent = async (data) => {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+        // 让出事件循环，允许 Node.js 将缓冲区的数据刷新到网络
+        await new Promise((resolve) => setImmediate(resolve));
+    };
+
+    try {
+        console.log('[Knowledge] Rebuild vector database started...');
+
+        // 1. 清空现有数据
+        await sendEvent({ phase: 'clearing', message: '正在清空现有向量数据...' });
+        const clearResult = await clearAllVectorDocuments();
+        console.log(`[Knowledge] Cleared ${clearResult.deleted} existing vector documents.`);
+        await sendEvent({ phase: 'clearing_done', cleared: clearResult.deleted });
+
+        // 2. Seed 法条
+        await sendEvent({ phase: 'law_start', message: '开始导入法条数据...' });
+        const lawResult = await seedLawsFromMarkdown(async (progress) => {
+            await sendEvent({
+                phase: 'law',
+                current: progress.current,
+                total: progress.total,
+                fileName: progress.fileName,
+                chunks: progress.chunks,
+            });
+        });
+        await sendEvent({ phase: 'law_done', result: lawResult });
+
+        // 3. Seed 案例
+        await sendEvent({ phase: 'case_start', message: '开始导入案例数据...' });
+        const caseResult = await seedCasesFromJson(async (progress) => {
+            await sendEvent({
+                phase: 'case',
+                current: progress.current,
+                total: progress.total,
+                fileName: progress.fileName,
+                chunks: progress.chunks,
+            });
+        });
+        await sendEvent({ phase: 'case_done', result: caseResult });
+
+        // 4. 完成
+        const summary = {
+            phase: 'complete',
+            message: '向量数据库重建完成',
+            cleared: clearResult.deleted,
+            law: lawResult,
+            case: caseResult,
+        };
+        console.log('[Knowledge] Rebuild vector database completed.');
+        await sendEvent(summary);
+        res.end();
+    } catch (error) {
+        console.error('[ERROR] Knowledge rebuild failed:', error);
+        await sendEvent({ phase: 'error', message: `向量数据库重建失败: ${error.message}` });
+        res.end();
     }
 });
 

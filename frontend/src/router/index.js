@@ -4,37 +4,98 @@ const Home = () => import('../views/Home.vue')
 const Review = () => import('../views/Review.vue')
 const QnA = () => import('../views/QnA.vue')
 const Settings = () => import('../views/Settings.vue')
+const Rules = () => import('../views/Rules.vue')
+const Login = () => import('../views/Login.vue')
+const Admin = () => import('../views/Admin.vue')
 
 const routes = [
   {
+    path: '/login',
+    name: 'Login',
+    component: Login,
+    meta: { guest: true },
+  },
+  {
     path: '/',
     name: 'Home',
-    component: Home
+    component: Home,
+    meta: { requiresAuth: true },
   },
   {
     path: '/review',
     name: 'Review',
-    component: Review
+    component: Review,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/review/:id',
+    name: 'ReviewResult',
+    component: Review,
+    meta: { requiresAuth: true },
+  },
+  {
+    // 兼容旧链接 /contracts/:id → 重定向到 /review?contract_id=:id
+    path: '/contracts/:id',
+    redirect: (to) => ({ path: '/review', query: { contract_id: to.params.id } }),
   },
   {
     path: '/history',
-    redirect: '/'
+    redirect: '/',
   },
   {
     path: '/qna',
     name: 'QnA',
-    component: QnA
+    component: QnA,
+    meta: { requiresAuth: true },
   },
   {
     path: '/settings',
     name: 'Settings',
-    component: Settings
-  }
+    component: Settings,
+    meta: { requiresAuth: true, requiresAdmin: true },
+  },
+  {
+    path: '/rules',
+    name: 'Rules',
+    component: Rules,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/admin',
+    name: 'Admin',
+    component: Admin,
+    meta: { requiresAuth: true, requiresAdmin: true },
+  },
 ]
 
 const router = createRouter({
   history: createWebHistory(process.env.BASE_URL),
-  routes
+  routes,
 })
 
-export default router 
+// 路由守卫
+router.beforeEach(async (to, from, next) => {
+  // 动态导入 useAuth（避免循环依赖）
+  const { useAuth } = await import('../composables/useAuth')
+  const { isLoggedIn, isAdmin } = useAuth()
+
+  if (to.meta.requiresAuth && !isLoggedIn.value) {
+    next({ path: '/login', query: { redirect: to.fullPath } })
+    return
+  }
+
+  if (to.meta.requiresAdmin && !isAdmin.value) {
+    next({ path: '/' })
+    return
+  }
+
+  // 已登录用户访问登录页 → 跳首页
+  if (to.meta.guest && isLoggedIn.value) {
+    next({ path: '/' })
+    return
+  }
+
+  next()
+})
+
+export default router
