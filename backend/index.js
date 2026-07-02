@@ -12,6 +12,7 @@ const knowledgeRoutes = require('./routes/knowledge');
 const templateRoutes = require('./routes/templates');
 const rulesRoutes = require('./routes/rules');
 const wpsCallbackRoutes = require('./routes/wps-callback');
+const wpsAuthRoutes = require('./routes/wps-auth');
 const authRoutes = require('./routes/auth');
 const db = require('./database');
 const resetAndRebuildDatabase = require('./database-check');
@@ -123,6 +124,15 @@ app.use('/api/rules', rulesRoutes);
 
 // Auth 路由（登录/注册/用户管理）
 app.use('/api/auth', authRoutes);
+
+// WPS WebOffice SDK auth 代理（必须在静态文件之前）
+app.use('/office/v5/ai', wpsAuthRoutes);
+
+// DEBUG: 临时测试端点 - 在 wpsAuthRoutes 之后验证路由
+app.post('/office/v5/ai/test', (req, res) => {
+    console.log('[DEBUG] /office/v5/ai/test endpoint HIT - wpsAuthRoutes works!');
+    res.json({ ok: true, msg: 'wpsAuthRoutes is working' });
+});
 
 // WPS WebOffice v3 回调路由（必须是公网可达）
 app.use(wpsCallbackRoutes);
