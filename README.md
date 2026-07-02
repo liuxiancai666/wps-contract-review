@@ -1,6 +1,6 @@
 # Contract Review AI
 
-> 基于 AI 的中文合同审查与知识库增强平台，支持合同风险分析、OnlyOffice 在线审阅、法律知识检索与智能问答。
+> 基于 AI 的中文合同审查与知识库增强平台，支持合同风险分析、WPS WebOffice 在线审阅、法律知识检索与智能问答。
 
 如需帮助，可微信联系
 
@@ -18,7 +18,7 @@
   * 输出风险点、修改建议、相关法条与审查理由
   * 支持关联裁判文书增强分析
 
-* 📝 OnlyOffice 在线协同编辑
+* 📝 WPS WebOffice 在线协同编辑
 
   * 文档内精准定位条款
   * 添加批注与修改建议
@@ -46,7 +46,7 @@
   * PostgreSQL
   * Milvus
   * MinIO
-  * OnlyOffice
+  * WPS WebOffice
 
 ---
 
@@ -86,7 +86,7 @@
 * Vite
 * Element Plus
 * Tailwind CSS
-* OnlyOffice Document Editor
+* WPS WebOffice SDK
 
 ### Backend
 
@@ -112,7 +112,7 @@
 * Milvus
 * MinIO
 * etcd
-* OnlyOffice
+* WPS WebOffice
 
 ---
 
@@ -133,7 +133,7 @@
 ├── data/
 │   ├── postgres/          # PostgreSQL 数据目录
 │   ├── milvus/            # Milvus / MinIO / etcd
-│   └── onlyoffice/        # OnlyOffice 数据目录
+
 │
 ├── docker-compose.yml
 └── README.md
@@ -182,14 +182,13 @@ copy .env.example .env
 ```env
 LLM_API_KEY=
 EMBEDDING_API_KEY=
-ONLYOFFICE_JWT_SECRET=
 ```
 
 同时需要配置：
 
 * PostgreSQL
 * Milvus
-* OnlyOffice
+* WPS WebOffice（需在 WPS 开放平台创建应用获取 appid）
 
 ---
 
@@ -250,15 +249,15 @@ http://localhost:8080
 | `DATABASE_URL`          | PostgreSQL 连接         |
 | `VECTOR_STORE`          | 向量数据库类型               |
 | `MILVUS_*`              | Milvus 配置             |
-| `ONLYOFFICE_URL`        | OnlyOffice 地址         |
-| `ONLYOFFICE_JWT_SECRET` | OnlyOffice JWT Secret |
+| `WPS_APPID`             | WPS WebOffice 应用 appid |
 
 ### Frontend
 
 | Variable                   | Description   |
 | -------------------------- | ------------- |
 | `VITE_APP_BACKEND_API_URL` | 后端 API 地址     |
-| `VITE_APP_ONLYOFFICE_URL`  | OnlyOffice 地址 |
+| `VITE_APP_WPS_APPID`       | WPS WebOffice 应用 appid |
+| `VITE_APP_WPS_FILE_BASE_URL` | WPS 文件服务地址 |
 
 ---
 
@@ -369,7 +368,7 @@ MIT
 
 ## ⭐ Acknowledgements
 
-* OnlyOffice
+* WPS WebOffice
 * Milvus
 * OpenAI
 * Vue.js

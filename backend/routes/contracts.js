@@ -1244,7 +1244,6 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 });
 
 // WPS WebOffice 保存回调
-// WPS 回调格式与 OnlyOffice 不同，但为兼容性保留两种处理方式
 router.post('/save-callback', async (req, res) => {
     try {
         const body = req.body;
@@ -1254,7 +1253,7 @@ router.post('/save-callback', async (req, res) => {
             hasUrl: Boolean(body.url),
             forcesavetype: body.forcesavetype,
         });
-        // 兼容 OnlyOffice 回调格式：status 2=保存, 6=强制保存
+        // status 2=保存, 6=强制保存
         if (body.status === 2 || body.status === 6) {
             const contract = await db('contracts').where({ document_key: body.key }).first();
             if (contract && body.url) {
