@@ -478,6 +478,16 @@
                                     <p class="text-xs font-bold mb-1">📢 大白话解释：</p>
                                     <p class="text-sm">{{ item.plain_language || disputeDescription(item) }}</p>
                                 </div>
+                                <div v-if="item.suggested_text" class="mt-3 p-3 bg-green-50 rounded-md border-l-4 border-green-400">
+                                    <p class="text-xs font-bold text-green-800 mb-1">💡 修改建议：</p>
+                                    <p class="text-sm text-green-900 whitespace-pre-line">{{ item.suggested_text }}</p>
+                                    <div v-if="editorEnabled" class="mt-2 flex justify-end">
+                                        <button @click="adoptDisputeSuggestion(item)" :disabled="isPdfContract || item.adopted" class="px-3 py-1.5 text-xs font-medium text-white bg-green-600 rounded hover:bg-green-700 transition-colors flex items-center disabled:opacity-50 disabled:cursor-not-allowed">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+                                            {{ item.adopted ? '已采纳' : '采纳建议' }}
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -3463,6 +3473,38 @@ export default {
         }, item);
     };
 
+    // 采纳争议点/风险点的修改建议（一键替换）
+    const adoptDisputeSuggestion = (item) => {
+        const originalText = item.original_clause;
+        const suggestedText = item.suggested_text;
+
+        if (!originalText || !suggestedText) {
+            ElMessage.warning('该风险点缺少可自动替换的原文或建议文本，请手动修改。');
+            return;
+        }
+
+        selectedSuggestionPreview.value = {
+            before: originalText,
+            after: suggestedText,
+            status: '正在采纳',
+        };
+
+        replaceTextInEditor(originalText, suggestedText, (result = {}) => {
+            item.adopted = true;
+            item.adopted_original = originalText;
+            adoptedHighlights.value[item.title] = originalText;
+            if (result.fallback) {
+                selectedSuggestionPreview.value.status = '已写入源文件，当前页面未刷新';
+                ElMessage.success('风险点建议已采纳，源文件已更新；当前页面未刷新。');
+            } else {
+                selectedSuggestionPreview.value.status = '已实时更新到左侧文档';
+                ElMessage.success('风险点建议已采纳，左侧文档已更新。');
+            }
+        }, (status) => {
+            selectedSuggestionPreview.value.status = status;
+        }, item);
+    };
+
     const downloadBlob = (blob, filename) => {
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
@@ -3645,10 +3687,9 @@ export default {
       applyFocusedSuggestion,
       locateText,
       addDocComment,
-      gotoDisputeBookmark,
-      addReviewCommentByDisputeBookmark,
-      adjustReplaceByDisputeBookmark,
       adoptSuggestion,
+      adoptDisputeSuggestion,
+      adjustReplaceByDisputeBookmark,
       acceptAllRevisions,
       rejectAllRevisions,
       highlightCurrentRange,
