@@ -225,32 +225,29 @@
 
     <!-- Step 2: Review & Edit -->
     <div v-if="activeStep === 2" class="flex-grow min-h-0 flex space-x-4">
-        <!-- Left Side: OnlyOffice Editor -->
+        <!-- Left Side: WPS WebOffice Editor -->
         <div class="w-2/3 bg-white rounded-lg shadow-md overflow-hidden h-full flex flex-col">
             <div class="px-3 py-2 border-b border-border-color bg-bg-subtle flex items-center justify-between gap-3">
                 <div class="text-sm text-text-main">
-                    {{ onlyOfficeUrl ? '左侧为合同实时预览与编辑区。可选中文本后进行专项审查。' : '左侧为合同本地预览区。可在文档中选中文本后进行专项审查。' }}
+                    {{ editorEnabled ? '左侧为合同实时预览与编辑区。可选中文本后进行专项审查。' : '左侧为合同本地预览区。可在文档中选中文本后进行专项审查。' }}
                 </div>
                 <button @click="prepareFocusedReviewFromSelection" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark">
                     读取选中文本审查
                 </button>
             </div>
-            <DocumentEditor
-                v-if="contract.editorConfig && onlyOfficeUrl"
-                id="docEditorComponent"
-                ref="docEditorComponent"
+            <!-- WPS WebOffice 编辑器挂载点 -->
+            <div
+                v-if="contract.editorConfig && editorEnabled"
+                ref="wpsMountRef"
+                id="wps-editor-mount"
                 class="flex-grow min-h-0"
-                :documentServerUrl="onlyOfficeUrl"
-                :config="contract.editorConfig"
-                :events_onDocumentReady="onDocumentReady"
-                :events_onDocumentStateChange="onDocumentStateChange"
-            />
-            <!-- 本地预览回退（无 OnlyOffice 时） -->
-            <DocxViewer v-else-if="!onlyOfficeUrl && !isPdfContract && downloadUrl"
+            ></div>
+            <!-- 本地预览回退（无 WPS 编辑器时） -->
+            <DocxViewer v-else-if="!editorEnabled && !isPdfContract && downloadUrl"
                 :downloadUrl="downloadUrl"
                 :filename="contract.original_filename"
                 :contractId="contract.id" />
-            <PdfViewer v-else-if="!onlyOfficeUrl && downloadUrl"
+            <PdfViewer v-else-if="!editorEnabled && downloadUrl"
                 :downloadUrl="downloadUrl"
                 :filename="contract.original_filename"
                 :contractId="contract.id" />
@@ -470,8 +467,8 @@
                         </el-checkbox-group>
                         <div class="flex items-center gap-2">
                             <span v-if="isPdfContract" class="text-xs text-amber-600">PDF 不支持采纳</span>
-                            <span v-else-if="!hasOnlyOffice" class="text-xs text-amber-600">仅 OnlyOffice 支持实时编辑采纳，文本预览模式下请使用导出功能</span>
-                            <button v-if="hasOnlyOffice" @click="applySelectedSuggestions" :disabled="batchApplying || isPdfContract || selectedSuggestionIndexes.length === 0" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark disabled:opacity-50 disabled:cursor-not-allowed">
+                            <span v-else-if="!editorEnabled" class="text-xs text-amber-600">仅 WPS 编辑器支持实时编辑采纳，文本预览模式下请使用导出功能</span>
+                            <button v-if="editorEnabled" @click="applySelectedSuggestions" :disabled="batchApplying || isPdfContract || selectedSuggestionIndexes.length === 0" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark disabled:opacity-50 disabled:cursor-not-allowed">
                                 {{ batchApplying ? '批量采纳中...' : '一键采纳所选' }}
                             </button>
                         </div>
@@ -481,12 +478,12 @@
                             <div class="flex justify-between items-start">
                                 <p class="font-semibold text-text-dark pr-2">{{ suggestionTitle(item, index) }}</p>
                                 <div class="flex space-x-1 flex-shrink-0">
-                                    <el-tooltip v-if="hasOnlyOffice" content="在文档中定位" placement="top">
+                                    <el-tooltip v-if="editorEnabled" content="在文档中定位" placement="top">
                                         <button @click="locateText(suggestionOriginal(item))" class="p-1 text-gray-400 hover:text-primary transition-colors">
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                                         </button>
                                     </el-tooltip>
-                                    <el-tooltip v-if="hasOnlyOffice" content="添加批注" placement="top">
+                                    <el-tooltip v-if="editorEnabled" content="添加批注" placement="top">
                                         <button @click="addDocComment(suggestionOriginal(item), suggestionReason(item))" class="p-1 text-gray-400 hover:text-primary transition-colors">
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" /></svg>
                                         </button>
@@ -533,11 +530,11 @@
                             
                             <div class="mt-4 pt-3 border-t border-gray-100 flex justify-end items-center">
                                 <span v-if="isPdfContract" class="mr-2 text-xs text-amber-600">PDF 文件不支持原文改写，请使用审查报告导出或 PDF 批注</span>
-                                <span v-else-if="!hasOnlyOffice" class="mr-2 text-xs text-amber-600">文本预览模式不支持实时编辑修改，请使用导出功能获取审查报告</span>
+                                <span v-else-if="!editorEnabled" class="mr-2 text-xs text-amber-600">文本预览模式不支持实时编辑修改，请使用导出功能获取审查报告</span>
                                 <button @click="previewSuggestion(item)" class="mr-2 px-3 py-1.5 text-xs font-medium text-primary bg-white border border-primary rounded hover:bg-primary-light transition-colors">
                                     查看变更
                                 </button>
-                                <button v-if="hasOnlyOffice" @click="adoptSuggestion(item)" :disabled="isPdfContract || item.adopted" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark transition-colors flex items-center disabled:opacity-50 disabled:cursor-not-allowed">
+                                <button v-if="editorEnabled" @click="adoptSuggestion(item)" :disabled="isPdfContract || item.adopted" class="px-3 py-1.5 text-xs font-medium text-white bg-primary rounded hover:bg-primary-dark transition-colors flex items-center disabled:opacity-50 disabled:cursor-not-allowed">
                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
                                     {{ item.adopted ? '已采纳' : '一键采纳建议' }}
                                 </button>
@@ -603,7 +600,7 @@
                                 class="mt-3"
                                 type="textarea"
                                 :rows="6"
-                                placeholder="可从左侧 OnlyOffice 选中文本后读取，也可手动粘贴某一条款或段落"
+                                placeholder="可从左侧 WPS 编辑器选中文本后读取，也可手动粘贴某一条款或段落"
                             />
                             <el-input
                                 v-model="focusedReviewQuestion"
@@ -903,13 +900,11 @@ import api from '../api';
 import { getUserId } from '../user';
 import DocxViewer from '../components/DocxViewer.vue';
 import PdfViewer from '../components/PdfViewer.vue';
-import { DocumentEditor } from "@onlyoffice/document-editor-vue";
 import { io } from "socket.io-client";
 
 export default {
   name: 'ReviewView',
   components: {
-    DocumentEditor,
     DocxViewer,
     PdfViewer,
     ElUpload, ElSelect, ElOption, ElCheckboxGroup, ElCheckbox, ElInput, ElAutocomplete, ElSwitch, ElTooltip
@@ -925,7 +920,9 @@ export default {
     const sessionLoadFailed = ref(false);
     const perspective = ref('');
     const activeAiTab = ref('summary');
-    const docEditorComponent = ref(null);
+    const wpsMountRef = ref(null);
+    const wpsInstance = ref(null);
+    const wpsApp = ref(null);
     const isEditorReady = ref(false);
     const reAnalyzing = ref(false);
     const showPlainLanguage = ref(false);
@@ -952,7 +949,7 @@ export default {
         const name = String(contract.original_filename || '').toLowerCase();
         return name.endsWith('.pdf');
     });
-    const hasOnlyOffice = computed(() => !!onlyOfficeUrl);
+    // editorEnabled 在下方 WPS 配置区域定义
     const progressStepLabels = {
       pre_analysis: '合同预分析',
       extract_text: '提取合同正文',
@@ -1347,7 +1344,11 @@ export default {
 
     const suggestionReason = (item) => firstText(item.reason, item.rationale);
 
-    const onlyOfficeUrl = import.meta.env.VITE_APP_ONLYOFFICE_URL;
+    // WPS WebOffice 配置
+    const wpsAppId = import.meta.env.VITE_APP_WPS_APPID || '';
+    const wpsFileBaseUrl = import.meta.env.VITE_APP_WPS_FILE_BASE_URL || import.meta.env.VITE_APP_BACKEND_API_URL || 'http://localhost:3000';
+    // 编辑器是否可用（配置了 WPS appid 或文件服务地址即视为可用）
+    const editorEnabled = computed(() => !!wpsFileBaseUrl);
 
     const loadReviewTemplates = async () => {
       try {
@@ -1626,18 +1627,22 @@ export default {
       if (!contract.id || forceSaveInFlight.value) return false;
       forceSaveInFlight.value = true;
       try {
-        const editor = getEditor();
-        if (typeof editor?.serviceCommand === 'function') {
-          editor.serviceCommand('forcesave', {});
+        // WPS 保存：通过 JSAPI 调用 ActiveDocument.Save()
+        if (wpsApp.value) {
+          try {
+            await wpsApp.value.ActiveDocument.Save();
+          } catch (e) {
+            console.warn('[WPS] Save() failed, falling back to API', e);
+          }
         }
         await api.forceSaveContract(contract.id, {
-          documentKey: contract.editorConfig?.document?.key,
+          documentKey: contract.editorConfig?.document?.document_key,
         });
         hasPendingEditorChanges.value = false;
         if (!silent) ElMessage.success('已触发文档保存同步');
         return true;
       } catch (error) {
-        console.warn('[OnlyOffice] force-save failed', error.response?.data || error.message);
+        console.warn('[WPS] force-save failed', error.response?.data || error.message);
         if (!silent) ElMessage.warning(error.response?.data?.error || '触发文档保存同步失败');
         return false;
       } finally {
@@ -1676,20 +1681,75 @@ export default {
       }, 30000);
     };
 
-    const onDocumentStateChange = (event) => {
-      const changed = typeof event === 'boolean' ? event : Boolean(event?.data);
-      hasPendingEditorChanges.value = changed;
-      if (changed) {
-        scheduleForceSave();
+    // --- WPS WebOffice 编辑器初始化与销毁 ---
+
+    const initWpsEditor = async () => {
+      if (!contract.editorConfig || !wpsMountRef.value) return;
+      // 先销毁旧实例
+      await destroyWpsEditor();
+
+      try {
+        // 动态加载 WPS WebOffice SDK
+        const WPSWebOffice = await loadWpsSdk();
+        if (!WPSWebOffice) {
+          ElMessage.error('WPS WebOffice SDK 加载失败，将使用本地预览模式');
+          return;
+        }
+
+        const docConfig = contract.editorConfig;
+        const isPdf = docConfig.editorConfig?.isPdf;
+        const fileUrl = docConfig.document?.url;
+
+        console.log('[WPS] 初始化编辑器, fileUrl:', fileUrl);
+        wpsInstance.value = await WPSWebOffice.createInstance({
+          mount: wpsMountRef.value,
+          url: fileUrl,
+          mode: isPdf ? 'simple' : 'normal',
+          appId: wpsAppId || undefined,
+          commonOptions: {
+            isShowTopArea: true,
+            isShowHeader: true,
+          },
+          wordOptions: {
+            isShowDocMap: false,
+            isBestScale: true,
+          },
+        });
+
+        await wpsInstance.value.ready();
+        wpsApp.value = wpsInstance.value.Application;
+        isEditorReady.value = true;
+        console.log('[WPS] 编辑器已就绪');
+        startAutoForceSave();
+      } catch (error) {
+        console.error('[WPS] 初始化失败:', error);
+        ElMessage.error('WPS 编辑器初始化失败，将使用本地预览模式');
       }
     };
 
-    const onDocumentReady = () => {
-      console.log("[INFO] OnlyOffice document is ready.");
-      setTimeout(() => {
-        isEditorReady.value = Boolean(window?.DocEditor?.instances?.docEditorComponent);
-        if (isEditorReady.value) startAutoForceSave();
-      }, 300);
+    const destroyWpsEditor = async () => {
+      try {
+        if (wpsInstance.value && typeof wpsInstance.value.destroy === 'function') {
+          await wpsInstance.value.destroy();
+        }
+      } catch (e) {
+        console.warn('[WPS] destroy error:', e);
+      }
+      wpsInstance.value = null;
+      wpsApp.value = null;
+      isEditorReady.value = false;
+    };
+
+    const loadWpsSdk = () => {
+      return new Promise((resolve) => {
+        if (window.WPSWebOffice) return resolve(window.WPSWebOffice);
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/@wpsweboffice/weboffice-sdk@latest/dist/web-office-sdk.umd.js';
+        script.async = true;
+        script.onload = () => resolve(window.WPSWebOffice || null);
+        script.onerror = () => resolve(null);
+        document.head.appendChild(script);
+      });
     };
 
     const startReAnalysis = async () => {
@@ -1828,6 +1888,16 @@ export default {
         allSuggestedCorePurposes,
     ], saveState, { deep: true });
 
+    // 当进入 Step 2 且有 editorConfig 时，初始化 WPS 编辑器
+    watch(activeStep, async (newStep) => {
+        if (newStep === 2 && contract.editorConfig) {
+            await nextTick();
+            await initWpsEditor();
+        } else if (newStep !== 2) {
+            await destroyWpsEditor();
+        }
+    });
+
     const restoreSessionFromSavedState = async (savedState) => {
         // Fetch fresh contract editorConfig from the server to get a new, valid token.
         const response = await api.getContractDetails(savedState.contract.id);
@@ -1915,6 +1985,8 @@ export default {
     const resetState = () => {
       console.log('[DEBUG] resetState called.');
       isResetting = true; // Lock the saving mechanism
+      // 销毁 WPS 编辑器实例
+      destroyWpsEditor();
       activeStep.value = 0;
       loading.value = false;
       loadingMessage.value = '';
@@ -2004,41 +2076,12 @@ export default {
     onUnmounted(() => {
         stopAutoForceSave();
         forceSaveCurrentDocument(true);
+        destroyWpsEditor();
         stopStatusPolling();
         if (socket.value) socket.value.disconnect();
     });
 
-    // --- OnlyOffice Connector Methods ---
-
-    const getEditor = () => window?.DocEditor?.instances?.docEditorComponent || null;
-
-    const executeEditorMethod = (method, args = []) => {
-      const editor = getEditor();
-      if (!editor || typeof editor.executeMethod !== 'function') {
-        return Promise.reject(new Error('EDITOR_NOT_READY'));
-      }
-      return new Promise((resolve, reject) => {
-        let settled = false;
-        const timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          resolve(null);
-        }, 10000);
-        try {
-          editor.executeMethod(method, args, (result) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            resolve(result);
-          });
-        } catch (error) {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          reject(error);
-        }
-      });
-    };
+    // --- WPS WebOffice 编辑器 API 方法 ---
 
     const normalizeSearchText = (text) => {
         return String(text || '')
@@ -2054,61 +2097,6 @@ export default {
             .replace(/[？]/g, '?')
             .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '')
             .trim();
-    };
-
-    const findTextRange = async (text, maxRetries = 2) => {
-        const normalized = normalizeSearchText(text);
-        if (!normalized) return null;
-
-        const generateCandidates = (base) => {
-            const candidates = [base];
-            const segments = splitCandidateSentences(base);
-            
-            for (let i = 0; i < segments.length; i++) {
-                if (segments[i].length >= 8) candidates.push(segments[i]);
-                if (i < segments.length - 1) {
-                    const combined = segments[i] + ' ' + segments[i + 1];
-                    if (combined.length >= 15) candidates.push(combined);
-                }
-            }
-            
-            if (base.length > 60) {
-                candidates.push(base.slice(0, 60));
-                candidates.push(base.slice(-60));
-                candidates.push(base.slice(0, 40));
-                candidates.push(base.slice(-40));
-            }
-            
-            if (base.length > 30) {
-                candidates.push(base.slice(10, 50));
-                candidates.push(base.slice(-50, -10));
-            }
-
-            const compact = base.replace(/\s+/g, '');
-            if (compact && compact.length >= 8 && compact !== base) candidates.push(compact);
-            
-            return [...new Set(candidates.filter(c => c.length >= 8))];
-        };
-
-        const candidates = generateCandidates(normalized);
-        
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-            for (const candidate of candidates) {
-                try {
-                    const result = await executeEditorMethod('Search', [candidate]);
-                    if (Array.isArray(result) && result.length > 0) {
-                        return result[0];
-                    }
-                } catch {
-                    continue;
-                }
-            }
-            
-            if (attempt < maxRetries) {
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
-        }
-        return null;
     };
 
     const normalizeCandidate = (text) => String(text || '')
@@ -2157,6 +2145,103 @@ export default {
             });
     };
 
+    // 获取文档全文
+    const getDocumentText = async () => {
+        if (!wpsApp.value) return '';
+        try {
+            const content = await wpsApp.value.ActiveDocument.Content;
+            const text = await content.Text;
+            return String(text || '');
+        } catch (e) {
+            console.warn('[WPS] getDocumentText failed:', e);
+            return '';
+        }
+    };
+
+    // 在全文中查找文本位置，返回 { start, end }
+    const findTextRange = async (text, maxRetries = 2) => {
+        const normalized = normalizeSearchText(text);
+        if (!normalized) return null;
+
+        const generateCandidates = (base) => {
+            const candidates = [base];
+            const segments = splitCandidateSentences(base);
+            for (let i = 0; i < segments.length; i++) {
+                if (segments[i].length >= 8) candidates.push(segments[i]);
+                if (i < segments.length - 1) {
+                    const combined = segments[i] + ' ' + segments[i + 1];
+                    if (combined.length >= 15) candidates.push(combined);
+                }
+            }
+            if (base.length > 60) {
+                candidates.push(base.slice(0, 60));
+                candidates.push(base.slice(-60));
+                candidates.push(base.slice(0, 40));
+                candidates.push(base.slice(-40));
+            }
+            if (base.length > 30) {
+                candidates.push(base.slice(10, 50));
+                candidates.push(base.slice(-50, -10));
+            }
+            const compact = base.replace(/\s+/g, '');
+            if (compact && compact.length >= 8 && compact !== base) candidates.push(compact);
+            return [...new Set(candidates.filter(c => c.length >= 8))];
+        };
+
+        const candidates = generateCandidates(normalized);
+        const fullText = await getDocumentText();
+        if (!fullText) return null;
+
+        // 归一化全文用于匹配
+        const normalizeForMatch = (s) => s.replace(/\s+/g, '').replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/[：]/g, ':').replace(/[，]/g, ',').replace(/[。]/g, '.');
+
+        for (const candidate of candidates) {
+            // 1. 精确匹配
+            const exactIdx = fullText.indexOf(candidate);
+            if (exactIdx >= 0) {
+                return { start: exactIdx, end: exactIdx + candidate.length };
+            }
+            // 2. 归一化匹配（忽略空格和标点差异）
+            const normFull = normalizeForMatch(fullText);
+            const normCandidate = normalizeForMatch(candidate);
+            if (normCandidate.length < 6) continue;
+            const normIdx = normFull.indexOf(normCandidate);
+            if (normIdx >= 0) {
+                // 将归一化位置映射回原文位置
+                let rawIdx = 0;
+                let normIdxCount = 0;
+                while (rawIdx < fullText.length && normIdxCount < normIdx) {
+                    const ch = fullText[rawIdx];
+                    if (!/\s/.test(ch)) normIdxCount++;
+                    rawIdx++;
+                }
+                const start = rawIdx;
+                let endIdx = start;
+                let matchLen = 0;
+                while (endIdx < fullText.length && matchLen < normCandidate.length) {
+                    const ch = fullText[endIdx];
+                    if (!/\s/.test(ch)) matchLen++;
+                    endIdx++;
+                }
+                return { start, end: endIdx };
+            }
+        }
+
+        // 重试机制（等待文档内容加载）
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            const retryText = await getDocumentText();
+            if (!retryText || retryText === fullText) continue;
+            for (const candidate of candidates) {
+                const exactIdx = retryText.indexOf(candidate);
+                if (exactIdx >= 0) {
+                    return { start: exactIdx, end: exactIdx + candidate.length };
+                }
+            }
+        }
+        return null;
+    };
+
     const findTextRangeByCandidates = async (candidates, maxRetries = 1) => {
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             for (const candidate of candidates) {
@@ -2171,13 +2256,8 @@ export default {
     };
 
     const ensureEditorReady = () => {
-        const editor = getEditor();
-        if (!editor) {
+        if (!wpsApp.value || !isEditorReady.value) {
             ElMessage.warning('编辑器尚未就绪，请等待左侧文档加载完成。');
-            return false;
-        }
-        if (typeof editor.executeMethod !== 'function' && typeof editor.createConnector !== 'function') {
-            ElMessage.warning('编辑器 API 未就绪，请稍候重试。');
             return false;
         }
         return true;
@@ -2198,15 +2278,29 @@ export default {
         }
         if (!ensureEditorReady()) return;
         try {
-            const range = await findTextRange(text);
-            if (!range) {
-                ElMessage.info('未在文档中找到对应条款原文。');
-                return;
-            }
-            await executeEditorMethod('SelectRange', [range]);
+            // WPS: 使用 Find.Execute 搜索并高亮文本
+            const normalized = normalizeSearchText(text);
+            await wpsApp.value.ActiveDocument.Find.Execute(normalized, true);
             ElMessage.success('已定位到文档中的对应条款。');
         } catch (error) {
-            ElMessage.error('文档定位失败，请检查 OnlyOffice 是否已完全加载。');
+            console.warn('[WPS] locateText failed, trying range approach:', error);
+            // 降级：通过全文匹配定位 Range 并选中
+            try {
+                const range = await findTextRange(text);
+                if (range) {
+                    const docRange = await wpsApp.value.ActiveDocument.Range(range.start, range.end);
+                    // WPS Range 没有 Select 方法，但 Find.Execute 可以高亮
+                    const rangeText = await docRange.Text;
+                    if (rangeText) {
+                        await wpsApp.value.ActiveDocument.Find.Execute(rangeText.slice(0, 80), true);
+                    }
+                    ElMessage.success('已定位到文档中的对应条款。');
+                } else {
+                    ElMessage.info('未在文档中找到对应条款原文。');
+                }
+            } catch (e) {
+                ElMessage.error('文档定位失败，请检查 WPS 编辑器是否已完全加载。');
+            }
         }
     };
 
@@ -2239,51 +2333,41 @@ export default {
             ];
             const replacement = await findTextRangeByCandidates(searchCandidates);
             if (!replacement?.range) return;
-            await executeEditorMethod('SelectRange', [replacement.range]);
-            const highlightMethods = [
-                ['SetHighlightColor', ['#FFF2A8']],
-                ['SetTextHighlightColor', ['#FFF2A8']],
-                ['SetHighlight', ['#FFF2A8']],
-            ];
-            for (const [method, args] of highlightMethods) {
-                try {
-                    await executeEditorMethod(method, args);
-                    break;
-                } catch {
-                    continue;
-                }
+            // WPS: 通过 Range 设置高亮并添加批注
+            const range = await wpsApp.value.ActiveDocument.Range(replacement.range.start, replacement.range.end);
+            // 尝试设置高亮
+            try {
+                range.Font.HighlightColorIndex = 7; // wdYellow
+            } catch (e) {
+                console.warn('[WPS] highlight failed:', e);
             }
-            await executeEditorMethod('AddComment', [{ text: `采纳前原文：${originalText}`, author: 'AI 审查' }]).catch(() => null);
+            // 添加批注记录采纳前原文
+            try {
+                const comments = await wpsApp.value.ActiveDocument.Comments;
+                await comments.Add({
+                    Range: { Start: replacement.range.start, End: replacement.range.end },
+                    Text: `采纳前原文：${originalText}`,
+                });
+            } catch (e) {
+                console.warn('[WPS] add comment in markAdoptedText failed:', e);
+            }
         } catch {
-            // Highlight/comment support depends on the deployed OnlyOffice build.
+            // 高亮/批注功能取决于 WPS 版本
         }
     };
 
     const refreshEditorDocument = async () => {
-        const editor = getEditor();
-        if (!editor) return false;
+        if (!wpsInstance.value) return false;
 
         try {
+            // WPS: 重新加载文件
             const res = await api.getFreshEditorConfig(contract.id);
             const editorConfig = res.data?.editorConfig;
             if (!editorConfig) return false;
 
-            if (typeof editor.refreshFile === 'function') {
-                editor.refreshFile(editorConfig.document || editorConfig);
-                contract.editorConfig = editorConfig;
-                return true;
-            }
-            if (typeof editor.setConfig === 'function') {
-                editor.setConfig(editorConfig);
-                contract.editorConfig = editorConfig;
-                return true;
-            }
-        } catch {
-            // Some OnlyOffice builds do not allow changing config after init.
-        }
-
-        try {
-            await executeEditorMethod('ForceSave', []);
+            // WPS 不支持运行时切换文件，需要销毁重建
+            contract.editorConfig = editorConfig;
+            await initWpsEditor();
             return true;
         } catch {
             return false;
@@ -2320,83 +2404,39 @@ export default {
             return;
         }
 
-        const editor = getEditor();
         let success = false;
 
         try {
             const matched = await findTextRangeByCandidates(buildSuggestionCandidates(originalText, item));
-            
+
             if (!matched?.range) {
                 ElMessage.info('编辑器未匹配到原文，尝试从源文件替换...');
                 await serverFallback(originalText, suggestedText, onSuccess, onFailure, item);
                 return;
             }
 
-            await executeEditorMethod('SelectRange', [matched.range]);
-
-            const replacementMethods = [
-                async () => {
-                    if (typeof editor.createConnector !== 'function') return false;
-                    const connector = editor.createConnector();
-                    if (!connector?.callCommand) return false;
-                    const asc = window.Asc || (window.Asc = {});
-                    asc.scope = asc.scope || {};
-                    asc.scope.suggestedText = suggestedText;
-                    await new Promise((resolve) => {
-                        connector.callCommand(function() {
-                            try {
-                                const oDocument = Api.GetDocument();
-                                const oRange = oDocument.GetRangeBySelect?.() || null;
-                                if (oRange) oRange.Delete();
-                                const oParagraph = Api.CreateParagraph();
-                                oParagraph.AddText(Asc.scope.suggestedText);
-                                oDocument.InsertContent([oParagraph], false, { KeepTextOnly: false });
-                            } catch (e) {}
-                        }, true);
-                        setTimeout(resolve, 800);
-                    });
-                    return true;
-                },
-                async () => {
-                    if (!window.Asc?.plugin?.callCommand) return false;
-                    window.Asc.scope = window.Asc.scope || {};
-                    window.Asc.scope.suggestedText = suggestedText;
-                    await new Promise((resolve) => {
-                        window.Asc.plugin.callCommand(function() {
-                            try {
-                                const oDocument = Api.GetDocument();
-                                const oRange = oDocument.GetRangeBySelect?.() || null;
-                                if (oRange) oRange.Delete();
-                                const oParagraph = Api.CreateParagraph();
-                                oParagraph.AddText(Asc.scope.suggestedText);
-                                oDocument.InsertContent([oParagraph], false, { KeepTextOnly: false });
-                            } catch (e) {}
-                        }, true);
-                        setTimeout(resolve, 800);
-                    });
-                    return true;
-                },
-                async () => {
-                    await executeEditorMethod('ReplaceText', [matched.range, suggestedText]);
-                    return true;
-                },
-                async () => {
-                    await executeEditorMethod('PasteText', [suggestedText]);
-                    return true;
-                },
-            ];
-
-            for (const method of replacementMethods) {
+            // WPS: 通过 Range.Text 替换文本
+            try {
+                const range = await wpsApp.value.ActiveDocument.Range(matched.range.start, matched.range.end);
+                range.Text = suggestedText;
+                success = true;
+            } catch (e) {
+                console.warn('[WPS] Range.Text replace failed, trying ReplaceText:', e);
+                // 降级：使用 ActiveDocument.ReplaceText 全文替换
                 try {
-                    success = await method();
-                    if (success) break;
-                } catch {
-                    continue;
+                    await wpsApp.value.ActiveDocument.ReplaceText([
+                        { search: matched.matchedText, replace: suggestedText },
+                    ]);
+                    success = true;
+                } catch (e2) {
+                    console.warn('[WPS] ReplaceText also failed:', e2);
                 }
             }
 
             if (success) {
                 await markAdoptedText(originalText, suggestedText);
+                // 触发保存
+                scheduleForceSave();
                 onSuccess?.({ realTime: true });
                 ElMessage.success('建议已实时采纳并更新到文档');
                 return;
@@ -2411,7 +2451,7 @@ export default {
     const prepareFocusedReviewFromSelection = async () => {
         activeAiTab.value = 'workspace';
         // 文本预览模式：使用浏览器原生选中
-        if (!onlyOfficeUrl) {
+        if (!editorEnabled.value) {
             const sel = window.getSelection();
             const text = sel ? sel.toString().trim() : '';
             if (text) {
@@ -2424,22 +2464,24 @@ export default {
         }
         if (!ensureEditorReady()) return;
 
-        // 通过 OnlyOffice Editor API 直接获取选中文本
+        // WPS: 通过 Selection.Range 获取选中文本
         try {
-            const selectedText = await executeEditorMethod('GetSelectedText', []);
+            const selection = await wpsApp.value.ActiveDocument.ActiveWindow.Selection;
+            const range = await selection.Range;
+            const selectedText = await range.Text;
             if (selectedText && selectedText.trim()) {
                 focusedReviewText.value = selectedText.trim();
-                ElMessage.success('已读取左侧 OnlyOffice 中选中的文本。');
+                ElMessage.success('已读取左侧 WPS 编辑器中选中的文本。');
                 // 自动触发专项审查
                 await nextTick();
                 submitFocusedReview();
                 return;
             }
         } catch (error) {
-            console.warn('GetSelectedText failed:', error);
+            console.warn('[WPS] getSelectionText failed:', error);
         }
 
-        ElMessage.info('未在 OnlyOffice 中选中文本，请先在左侧文档中用鼠标选中需要审查的条款。');
+        ElMessage.info('未在 WPS 编辑器中选中文本，请先在左侧文档中用鼠标选中需要审查的条款。');
     };
 
     const submitFocusedReview = async () => {
@@ -2533,100 +2575,27 @@ export default {
         if (!ensureEditorReady()) return;
 
         const commentText = comment || 'AI 审查建议';
-        const commentAuthor = 'AI 审查专家';
 
         try {
             const candidates = buildSuggestionCandidates(text);
             const matched = await findTextRangeByCandidates(candidates);
-            
+
             if (!matched?.range) {
                 ElMessage.info('定位原文失败，无法添加批注。请尝试手动选中后添加。');
                 return;
             }
 
-            await executeEditorMethod('SelectRange', [matched.range]);
+            // WPS: 使用 Comments.Add 添加批注
+            const comments = await wpsApp.value.ActiveDocument.Comments;
+            await comments.Add({
+                Range: { Start: matched.range.start, End: matched.range.end },
+                Text: commentText,
+            });
 
-            const editor = getEditor();
-            const asc = window.Asc || (window.Asc = {});
-            asc.scope = asc.scope || {};
-            asc.scope.commentText = commentText;
-            asc.scope.commentAuthor = commentAuthor;
-
-            const addCommentMethods = [
-                async () => {
-                    if (typeof editor.createConnector !== 'function') return false;
-                    const connector = editor.createConnector();
-                    if (!connector?.callCommand) return false;
-                    let success = false;
-                    await new Promise((resolve) => {
-                        connector.callCommand(function() {
-                            try {
-                                const oDocument = Api.GetDocument();
-                                const oRange = oDocument.GetRangeBySelect?.() || oDocument.GetSelection();
-                                if (!oRange) return;
-                                oRange.AddComment(Asc.scope.commentText, Asc.scope.commentAuthor);
-                                success = true;
-                            } catch (e) {
-                                console.warn('[addDocComment] createConnector.callCommand failed:', e);
-                            }
-                        }, true);
-                        setTimeout(resolve, 1000);
-                    });
-                    return success;
-                },
-                async () => {
-                    if (!window.Asc?.plugin?.callCommand) return false;
-                    let success = false;
-                    await new Promise((resolve) => {
-                        window.Asc.plugin.callCommand(function() {
-                            try {
-                                const oDocument = Api.GetDocument();
-                                const oRange = oDocument.GetRangeBySelect?.() || oDocument.GetSelection();
-                                if (!oRange) return;
-                                oRange.AddComment(Asc.scope.commentText, Asc.scope.commentAuthor);
-                                success = true;
-                            } catch (e) {
-                                console.warn('[addDocComment] plugin.callCommand failed:', e);
-                            }
-                        }, true);
-                        setTimeout(resolve, 1000);
-                    });
-                    return success;
-                },
-                async () => {
-                    try {
-                        await executeEditorMethod('AddComment', [{ text: commentText, author: commentAuthor }]);
-                        return true;
-                    } catch {
-                        try {
-                            await executeEditorMethod('AddComment', [{ text: commentText }]);
-                            return true;
-                        } catch {
-                            return false;
-                        }
-                    }
-                },
-            ];
-
-            let success = false;
-            for (const method of addCommentMethods) {
-                try {
-                    success = await method();
-                    if (success) break;
-                } catch (e) {
-                    console.warn('[addDocComment] method failed:', e);
-                    continue;
-                }
-            }
-
-            if (success) {
-                ElMessage.success('已在文档中添加批注。');
-            } else {
-                ElMessage.warning('批注接口调用失败，请检查 OnlyOffice 版本或手动添加批注。');
-            }
+            ElMessage.success('已在文档中添加批注。');
         } catch (error) {
-            console.error('[addDocComment] error:', error);
-            ElMessage.error('添加批注失败，请检查 OnlyOffice 是否已完全加载或稍后重试。');
+            console.error('[WPS] addDocComment error:', error);
+            ElMessage.error('添加批注失败，请检查 WPS 编辑器是否已完全加载或稍后重试。');
         }
     };
 
@@ -2760,7 +2729,8 @@ export default {
       analysisSteps,
       analysisJobId,
       formatDuration,
-      docEditorComponent,
+      wpsInstance,
+      wpsApp,
       isEditorReady,
       preAnalysisData,
       selectedReviewPoints,
@@ -2785,14 +2755,14 @@ export default {
       cameFromHistory,
       goBackSmart,
       goToQnA,
-      onlyOfficeUrl,
+      wpsMountRef,
       allSuggestedReviewPoints,
       allPotentialParties,
       reviewTemplates,
       selectedTemplateId,
       querySearchCorePurposes,
-      onDocumentReady,
-      onDocumentStateChange,
+      initWpsEditor,
+      destroyWpsEditor,
       showPlainLanguage,
       selectedSuggestionPreview,
       focusedReviewText,
@@ -2823,7 +2793,7 @@ export default {
       analysisProgress,
       visibleAnalysisProgress,
       isPdfContract,
-      hasOnlyOffice,
+      editorEnabled,
       severityFilter,
       filteredAndSortedDisputePoints,
       disputeSeverityStats,

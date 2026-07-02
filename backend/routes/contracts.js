@@ -7,7 +7,6 @@ const mammoth = require('mammoth');
 const pdf = require('pdf-parse');
 const unidecode = require('unidecode');
 const { v4: uuidv4 } = require('uuid');
-const jwt = require('jsonwebtoken');
 const iconv = require('iconv-lite');
 const AdmZip = require('adm-zip');
 const PDFDocument = require('pdfkit');
@@ -20,8 +19,7 @@ const { createChatCompletion } = require('../services/llmClient');
 
 const router = express.Router();
 
-const ONLYOFFICE_JWT_SECRET = process.env.ONLYOFFICE_JWT_SECRET;
-const ONLYOFFICE_URL = process.env.ONLYOFFICE_URL || 'http://localhost:8081';
+const WPS_APPID = process.env.WPS_APPID || '';
 const APP_HOST = process.env.APP_HOST;
 const BACKEND_URL_FOR_DOCKER = process.env.BACKEND_URL_FOR_DOCKER || APP_HOST;
 
@@ -229,76 +227,29 @@ const callJsonLLM = async (prompt) => {
     return cleanJsonResponse(completion.choices[0].message.content);
 };
 
-const buildOnlyOfficeConfig = (contractRecord, ext = 'docx') => {
+const buildEditorConfig = (contractRecord, ext = 'docx') => {
     const isPdf = ext === 'pdf';
     const fileUrl = `${BACKEND_URL_FOR_DOCKER}/api/uploads/${path.basename(contractRecord.storage_path)}`;
     const callbackUrl = `${BACKEND_URL_FOR_DOCKER}/api/contracts/save-callback`;
-    const payload = {
+    return {
         document: {
             fileType: ext,
-            key: contractRecord.document_key,
             title: contractRecord.original_filename,
             url: fileUrl,
-            permissions: {
-                comment: !isPdf,
-                download: true,
-                edit: !isPdf,
-                print: true,
-                review: !isPdf,
-            },
+            document_key: contractRecord.document_key,
         },
-        documentType: isPdf ? 'pdf' : 'word',
         editorConfig: {
             callbackUrl,
             lang: 'zh-CN',
             mode: isPdf ? 'view' : 'edit',
+            isPdf,
+            appid: WPS_APPID,
             user: {
                 id: `user-${contractRecord.user_id || 1}`,
                 name: 'Reviewer',
             },
-            customization: {
-                forcesave: !isPdf,
-                comments: true,
-                compactHeader: true,
-                compactToolbar: true,
-                toolbarHideFileName: true,
-                toolbarNoTabs: true,
-                features: {
-                    tabStyle: 'line',
-                    tabBackground: 'toolbar',
-                    spellcheck: false,
-                },
-                hideRightMenu: true,
-                hideRulers: true,
-                help: false,
-                plugins: false,
-                chat: false,
-                feedback: false,
-                goback: false,
-            },
         },
     };
-    return ONLYOFFICE_JWT_SECRET
-        ? { ...payload, token: jwt.sign(payload, ONLYOFFICE_JWT_SECRET) }
-        : payload;
-};
-
-const postOnlyOfficeCommand = async (payload) => {
-    const commandPayload = ONLYOFFICE_JWT_SECRET
-        ? { ...payload, token: jwt.sign(payload, ONLYOFFICE_JWT_SECRET) }
-        : payload;
-
-    const headers = { 'Content-Type': 'application/json' };
-    if (ONLYOFFICE_JWT_SECRET) {
-        headers.Authorization = `Bearer ${commandPayload.token}`;
-    }
-
-    const response = await axios.post(
-        `${ONLYOFFICE_URL.replace(/\/$/, '')}/coauthoring/CommandService.ashx`,
-        commandPayload,
-        { headers, timeout: 10000 },
-    );
-    return response.data;
 };
 
 const escapeXmlText = (text) => String(text || '')
@@ -1281,26 +1232,29 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         res.status(201).json({
             message: '文件已上传，编辑器配置已生成。',
             contractId: contractRecord.id,
-            editorConfig: buildOnlyOfficeConfig(contractRecord, ext),
+            editorConfig: buildEditorConfig(contractRecord, ext),
         });
     } catch (error) {
         if (error.message === 'INVALID_USER_ID') {
             return res.status(400).json({ error: 'Invalid user ID for upload.' });
         }
-        console.error('[ERROR] Error processing upload for OnlyOffice:', error);
+        console.error('[ERROR] Error processing upload for WPS editor:', error);
         res.status(500).json({ error: 'Server error during file upload.' });
     }
 });
 
+// WPS WebOffice 保存回调
+// WPS 回调格式与 OnlyOffice 不同，但为兼容性保留两种处理方式
 router.post('/save-callback', async (req, res) => {
     try {
         const body = req.body;
-        console.log('[OnlyOffice] save callback:', {
+        console.log('[WPS] save callback:', {
             status: body.status,
             key: body.key,
             hasUrl: Boolean(body.url),
             forcesavetype: body.forcesavetype,
         });
+        // 兼容 OnlyOffice 回调格式：status 2=保存, 6=强制保存
         if (body.status === 2 || body.status === 6) {
             const contract = await db('contracts').where({ document_key: body.key }).first();
             if (contract && body.url) {
@@ -1312,9 +1266,9 @@ router.post('/save-callback', async (req, res) => {
                     writer.on('error', reject);
                 });
                 await db('contracts').where({ id: contract.id }).update({ updated_at: db.fn.now() });
-                console.log(`[OnlyOffice] saved file for contract ${contract.id} from status ${body.status}`);
+                console.log(`[WPS] saved file for contract ${contract.id} from status ${body.status}`);
             } else {
-                console.warn('[OnlyOffice] save callback skipped: contract or download url missing');
+                console.warn('[WPS] save callback skipped: contract or download url missing');
             }
         }
         res.status(200).json({ error: 0 });
@@ -1736,7 +1690,7 @@ ${companySearchContext || '未识别到可检索的公司主体名称。'}
 
         const sectionReviewRules = `硬性要求：
 - modification_suggestions 每一项必须包含 original_text 和 suggested_text。
-- original_text 必须尽量逐字摘录合同原文中的完整句子或段落，用于 OnlyOffice 定位、书签和批注锚点。
+- original_text 必须尽量逐字摘录合同原文中的完整句子或段落，用于文档编辑器定位、书签和批注锚点。
 - 如果没有检索依据，不得编造法条或案例，只能说明"当前知识库未检索到直接依据"。
 - 不输出自然语言解释，不输出 markdown。
 - 每节审查仅针对当前节展示的合同段落，不要跨段审查。`;
@@ -2307,7 +2261,7 @@ router.post('/:id/replace-text', async (req, res) => {
         res.json({
             replacements,
             version,
-            editorConfig: buildOnlyOfficeConfig(updatedContract, ext),
+            editorConfig: buildEditorConfig(updatedContract, ext),
         });
     } catch (error) {
         if (error.message === 'DOCX_EXACT_TEXT_NOT_FOUND') {
@@ -2380,7 +2334,7 @@ router.post('/:id/batch-replace-text', async (req, res) => {
             succeededCount,
             failedCount,
             results,
-            editorConfig: buildOnlyOfficeConfig({ ...contract, document_key: nextKey }, ext),
+            editorConfig: buildEditorConfig({ ...contract, document_key: nextKey }, ext),
         });
     } catch (error) {
         console.error('[ERROR] Batch DOCX replacement failed:', error);
@@ -2447,7 +2401,7 @@ router.post('/:id/append-clause', async (req, res) => {
             ok: true,
             version,
             message: `已追加条款「${title || '未命名条款'}」到文档末尾。`,
-            editorConfig: buildOnlyOfficeConfig({ ...contract, document_key: nextKey }, ext),
+            editorConfig: buildEditorConfig({ ...contract, document_key: nextKey }, ext),
         });
     } catch (error) {
         console.error('[ERROR] Append clause failed:', error);
@@ -2575,22 +2529,13 @@ router.post('/:id/force-save', async (req, res) => {
     try {
         const contract = await db('contracts').where({ id: req.params.id, user_id: userId }).first();
         if (!contract) return res.status(404).json({ error: 'Contract not found or you do not have permission to access it.' });
-        const key = String(documentKey || contract.document_key || '').trim();
-        if (!key) return res.status(400).json({ error: 'Document key is required for force-save.' });
 
-        const result = await postOnlyOfficeCommand({
-            c: 'forcesave',
-            key,
-        });
-
-        if (result?.error && result.error !== 0) {
-            return res.status(502).json({ error: `OnlyOffice force-save failed: ${result.error}`, result });
-        }
-
-        res.json({ ok: true, result });
+        // WPS WebOffice: 保存由前端 JSAPI 直接调用 ActiveDocument.Save()
+        // 后端仅返回确认，实际的保存回调通过 /save-callback 端点处理
+        res.json({ ok: true, message: 'WPS 保存由前端 JSAPI 触发' });
     } catch (error) {
         console.error(`[ERROR] Failed to force-save contract ${req.params.id}:`, error.response?.data || error.message);
-        res.status(500).json({ error: 'Failed to trigger OnlyOffice force-save.' });
+        res.status(500).json({ error: 'Failed to trigger force-save.' });
     }
 });
 
@@ -2605,7 +2550,7 @@ router.get('/:id/editor-config', async (req, res) => {
 
         const ext = path.extname(contractRecord.storage_path).toLowerCase().replace('.', '') || 'docx';
         res.json({
-            editorConfig: buildOnlyOfficeConfig(contractRecord, ext),
+            editorConfig: buildEditorConfig(contractRecord, ext),
         });
     } catch (error) {
         console.error(`[ERROR] Failed to fetch fresh editor config for id ${id}:`, error);
@@ -2631,7 +2576,7 @@ router.get('/:id', async (req, res) => {
             contract: {
                 id: contractRecord.id,
                 original_filename: contractRecord.original_filename,
-                editorConfig: buildOnlyOfficeConfig(contractRecord, ext),
+                editorConfig: buildEditorConfig(contractRecord, ext),
             },
             preAnalysisData,
             reviewData,
