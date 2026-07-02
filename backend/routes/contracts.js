@@ -255,7 +255,9 @@ const buildEditorConfig = (contractRecord, ext = 'docx') => {
 const escapeXmlText = (text) => String(text || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 
 const unescapeXmlText = (text) => String(text || '')
     .replace(/&lt;/g, '<')
@@ -264,21 +266,37 @@ const unescapeXmlText = (text) => String(text || '')
     .replace(/&apos;/g, "'")
     .replace(/&amp;/g, '&');
 
-const normalizeForDocxMatch = (text) => {
+const normalizeChar = (char) => {
+    const replacements = {
+        '“': '"', '”': '"',
+        '‘': "'", '’': "'",
+        '：': ':', '，': ',', '。': '.',
+    };
+    return replacements[char] || char;
+};
+
+const normalizeTextForMatch = (text) => {
     const normalized = [];
     const indexMap = [];
-    for (let index = 0; index < String(text || '').length; index += 1) {
-        const char = String(text)[index]
-            .replace(/[“”]/g, '"')
-            .replace(/[‘’]/g, "'")
-            .replace(/[：]/g, ':')
-            .replace(/[，]/g, ',')
-            .replace(/[。]/g, '.');
+    const str = String(text || '');
+    for (let index = 0; index < str.length; index += 1) {
+        const char = str[index];
         if (/\s/.test(char)) continue;
-        normalized.push(char);
+        normalized.push(normalizeChar(char));
         indexMap.push(index);
     }
     return { value: normalized.join(''), indexMap };
+};
+
+const normalizeText = (text) => {
+    const str = String(text || '').replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
+    let result = '';
+    for (let i = 0; i < str.length; i += 1) {
+        const char = str[i];
+        if (/\s/.test(char)) continue;
+        result += normalizeChar(char);
+    }
+    return result;
 };
 
 const findDocxTextRange = (fullText, candidate) => {
@@ -287,8 +305,8 @@ const findDocxTextRange = (fullText, candidate) => {
         return { start: exactIndex, end: exactIndex + candidate.length };
     }
 
-    const normalizedFull = normalizeForDocxMatch(fullText);
-    const normalizedCandidate = normalizeForDocxMatch(candidate).value;
+    const normalizedFull = normalizeTextForMatch(fullText);
+    const normalizedCandidate = normalizeTextForMatch(candidate).value;
     if (!normalizedCandidate) return null;
 
     const normalizedIndex = normalizedFull.value.indexOf(normalizedCandidate);
@@ -596,24 +614,17 @@ const renderReviewReportHtml = (contract, reviewData = {}, _format = 'html') => 
 
 // 生成真正的 DOCX 文件（OOXML 格式，非 HTML 伪装）
 const generateDocxBuffer = (contract, reviewData = {}) => {
-    const escapeXml = (text) => String(text || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&apos;');
-
     const paragraphs = [];
     const addHeading = (text, level = 1) => {
         const style = level === 1 ? 'Title' : 'Heading1';
-        paragraphs.push(`<w:p><w:pPr><w:pStyle w:val="${style}"/></w:pPr><w:r><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r></w:p>`);
+        paragraphs.push(`<w:p><w:pPr><w:pStyle w:val="${style}"/></w:pPr><w:r><w:t xml:space="preserve">${escapeXmlText(text)}</w:t></w:r></w:p>`);
     };
     const addParagraph = (text, bold = false) => {
         const rPr = bold ? '<w:rPr><w:b/></w:rPr>' : '';
-        paragraphs.push(`<w:p><w:r>${rPr}<w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r></w:p>`);
+        paragraphs.push(`<w:p><w:r>${rPr}<w:t xml:space="preserve">${escapeXmlText(text)}</w:t></w:r></w:p>`);
     };
     const addKeyValue = (key, value) => {
-        paragraphs.push(`<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${escapeXml(key)}：</w:t></w:r><w:r><w:t xml:space="preserve">${escapeXml(value || '')}</w:t></w:r></w:p>`);
+        paragraphs.push(`<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${escapeXmlText(key)}：</w:t></w:r><w:r><w:t xml:space="preserve">${escapeXmlText(value || '')}</w:t></w:r></w:p>`);
     };
 
     addHeading('合同审查报告', 1);
@@ -732,22 +743,6 @@ const generateAnnotatedDocxBuffer = (contract, reviewData = {}) => {
 
     const zip = new AdmZip(fs.readFileSync(storagePath));
 
-    const escapeXml = (text) => String(text || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&apos;');
-
-    const normalizeText = (text) => String(text || '')
-        .replace(/\s+/g, '')
-        .replace(/[“”]/g, '"')
-        .replace(/[‘’]/g, "'")
-        .replace(/[：]/g, ':')
-        .replace(/[，]/g, ',')
-        .replace(/[。]/g, '.')
-        .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
-
     const documentEntry = zip.getEntry('word/document.xml');
     if (!documentEntry) {
         throw new Error('document.xml not found in DOCX');
@@ -845,7 +840,7 @@ const generateAnnotatedDocxBuffer = (contract, reviewData = {}) => {
 
         const commentText = `${item.title || (item.type === 'risk' ? '风险提示' : '修改建议')}\n${item.comment}`;
 
-        const commentEntry = `<w:comment w:id="${commentId}" w:author="合同审查系统" w:date="${new Date().toISOString()}"><w:p><w:r><w:t>${escapeXml(commentText)}</w:t></w:r></w:p></w:comment>`;
+        const commentEntry = `<w:comment w:id="${commentId}" w:author="合同审查系统" w:date="${new Date().toISOString()}"><w:p><w:r><w:t>${escapeXmlText(commentText)}</w:t></w:r></w:p></w:comment>`;
 
         documentXml = `${prefix}<w:commentRangeStart w:id="${commentId}"/>${targetText}<w:commentRangeEnd w:id="${commentId}"/><w:commentReference w:id="${commentId}"/>${suffix}`;
 
@@ -2548,16 +2543,13 @@ router.post('/:id/append-clause', async (req, res) => {
             return res.status(500).json({ error: 'DOCX 文件结构异常，无法找到 document.xml。' });
         }
         let documentXml = documentXmlEntry.getData().toString('utf8');
-        const escapeXml = (text) => String(text || '')
-            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
         // 构建追加的段落 XML
         const titlePara = title
-            ? `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${escapeXml(title)}</w:t></w:r></w:p>`
+            ? `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${escapeXmlText(title)}</w:t></w:r></w:p>`
             : '';
         const contentParas = String(content).split(/\n+/).map((line) =>
-            `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>`
+            `<w:p><w:r><w:t xml:space="preserve">${escapeXmlText(line)}</w:t></w:r></w:p>`
         ).join('');
         const insertXml = `${titlePara}${contentParas}`;
 
