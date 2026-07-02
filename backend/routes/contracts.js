@@ -16,6 +16,7 @@ const { searchVectorDocuments } = require('../services/vectorStore');
 const { getTemplateById, matchTemplate } = require('../services/reviewTemplates');
 const { extractCompanyNames, searchCompanyInfo } = require('../services/webSearch');
 const { createChatCompletion } = require('../services/llmClient');
+const { enrichRiskLocations } = require('../services/riskLocation');
 
 const router = express.Router();
 
@@ -1851,7 +1852,7 @@ ${companySearchContext || '未识别到可检索的公司主体名称。'}
 
         // 构建标准审查 JSON schema 说明
         const reviewSchemaDoc = `{
-  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","suggested_text":"针对该风险的修改建议","plain_language":"大白话说明","severity":"高/中/低"}],
+  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","clause_ref":"条款编号，如第八条","section_title":"章节标题，如违约责任","legal_reference":"依据","dispute_rationale":"风险说明","suggested_text":"针对该风险的修改建议","plain_language":"大白话说明","severity":"高/中/低"}],
   "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
   "party_review": [{"title":"主体审查项","description":"审查结论","plain_language":"大白话说明"}],
   "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}],
@@ -1861,6 +1862,7 @@ ${companySearchContext || '未识别到可检索的公司主体名称。'}
         const sectionReviewRules = `硬性要求：
 - modification_suggestions 每一项必须包含 original_text 和 suggested_text。
 - original_text 必须尽量逐字摘录合同原文中的完整句子或段落，用于文档编辑器定位、书签和批注锚点。
+- dispute_points 每一项的 original_clause 必须尽量逐字摘录合同原文；clause_ref 和 section_title 用于风险总揽定位，不确定时留空，不得编造。
 - 如果没有检索依据，不得编造法条或案例，只能说明"当前知识库未检索到直接依据"。
 - 不输出自然语言解释，不输出 markdown。
 - 每节审查仅针对当前节展示的合同段落，不要跨段审查。`;
@@ -2160,6 +2162,7 @@ ${sectionReviewRules}
 
         // 主体审查（同原有逻辑，注入到结果中）
         const analysisResult = finalAnalysis;
+        analysisResult.dispute_points = enrichRiskLocations(analysisResult.dispute_points, plainText);
         analysisResult.company_search = companySearchResults;
         if (!analysisResult.company_review.length && companySearchResults.length) {
             analysisResult.company_review = companySearchResults.map((company) => ({

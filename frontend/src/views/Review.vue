@@ -370,17 +370,24 @@
                         <div class="space-y-4">
                             <div v-for="(item, index) in filteredAndSortedDisputePoints" :key="'dp-' + index" :class="['p-4 bg-bg-subtle rounded-md border border-border-color', normalizeSeverity(item.severity) === 'high' ? 'border-l-4 border-l-red-500' : normalizeSeverity(item.severity) === 'medium' ? 'border-l-4 border-l-amber-500' : 'border-l-4 border-l-blue-500']">
                                 <div class="flex justify-between items-start gap-2">
-                                    <p class="font-semibold text-text-dark">{{ disputeTitle(item, index) }}</p>
+                                    <div class="min-w-0">
+                                        <p class="font-semibold text-text-dark">{{ disputeTitle(item, index) }}</p>
+                                        <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-text-light">
+                                            <span v-if="riskLocationLabel(item)">定位：{{ riskLocationLabel(item) }}</span>
+                                            <span v-if="item.location_verified === true" class="text-green-600">已匹配原文</span>
+                                            <span v-else-if="item.original_clause" class="text-amber-600">待人工核对原文</span>
+                                        </div>
+                                    </div>
                                     <div class="flex items-center gap-2">
                                         <span v-if="item.severity" :class="severityClass(item.severity)" class="px-2 py-0.5 text-xs font-bold rounded border whitespace-nowrap">{{ severityLabel(item.severity) }}</span>
                                         <div class="flex space-x-1">
                                             <el-tooltip v-if="editorEnabled" content="在文档中定位" placement="top">
-                                                <button @click="locateText(item.original_clause)" class="p-1 text-gray-400 hover:text-primary transition-colors">
+                                                <button @click="locateText(riskLocationSearchText(item))" class="p-1 text-gray-400 hover:text-primary transition-colors">
                                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                                                 </button>
                                             </el-tooltip>
                                             <el-tooltip v-if="editorEnabled" content="添加批注" placement="top">
-                                                <button @click="addDocComment(item.original_clause, item.dispute_rationale)" class="p-1 text-gray-400 hover:text-primary transition-colors">
+                                                <button @click="addDocComment(riskLocationSearchText(item), item.dispute_rationale)" class="p-1 text-gray-400 hover:text-primary transition-colors">
                                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" /></svg>
                                                 </button>
                                             </el-tooltip>
@@ -1337,6 +1344,19 @@ export default {
         item.legal_reference && `法律依据：${item.legal_reference}`,
         item.dispute_rationale && `风险说明：${item.dispute_rationale}`,
       )
+    );
+
+    const riskLocationLabel = (item) => {
+      const parts = [item.section_title, item.clause_ref]
+        .filter((value) => typeof value === 'string' && value.trim());
+      return [...new Set(parts)].join(' / ');
+    };
+
+    const riskLocationSearchText = (item) => firstText(
+      item.location_text,
+      item.original_clause,
+      item.original_text,
+      item.clause_ref,
     );
 
     const missingClauseTitle = (item, index) => firstText(item.title, item.clause_type, `缺失条款 ${index + 1}`);
@@ -2841,6 +2861,8 @@ export default {
       formatHistoryTime,
       disputeTitle,
       disputeDescription,
+      riskLocationLabel,
+      riskLocationSearchText,
       missingClauseTitle,
       partyReviewTitle,
       partyReviewDescription,
