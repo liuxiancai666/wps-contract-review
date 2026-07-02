@@ -56,6 +56,15 @@ export default defineComponent({
     const loaded = ref(false);
     const sdkError = ref(null);
     const loadingText = ref('WPS 文档加载中...');
+
+    // 简单字符串 hash，用于无 id 时生成书签名
+    const hashCode = (str) => {
+      let h = 0;
+      for (let i = 0; i < str.length; i++) {
+        h = Math.imul(31, h) + str.charCodeAt(i) | 0;
+      }
+      return h;
+    };
     
     let wpsInstance = null;
     let wpsApplication = null;
@@ -463,89 +472,188 @@ export default defineComponent({
     };
 
     // 定位原文（书签导航）
-    const gotoBookmark = async (bookmarkName) => {
-      if (!bookmarkName) {
-        console.warn('[WPS] gotoBookmark: bookmarkName is empty');
-        ElMessage.warning('书签不存在，无法定位');
-        return false;
-      }
+    // 定位原文书签（支持按需创建书签）
+    // 传入 item 时：如果 bookmarkName 为空但 item 有 filtered_content，自动创建书签后导航
+    const gotoBookmark = async (bookmarkName, item) => {
       const app = await getApplication();
       if (!app) {
         ElMessage.warning('WPS 文档未就绪，请稍候再试');
         return false;
       }
+      const doc = app.ActiveDocument;
+      let targetBookmark = bookmarkName;
+
+      // 如果没有 bookmarkName 但有 item.filtered_content，按需创建书签
+      if (!targetBookmark && item?.filtered_content) {
+        const itemId = item.id || Math.abs(hashCode(String(item.filtered_content)));
+        targetBookmark = `risk_title_${itemId}`;
+        try {
+          const existing = (await doc.Bookmarks.Json()).map(b => b.name);
+          if (!existing.includes(targetBookmark)) {
+            const positions = await findAllMatchPositions(item.filtered_content);
+            if (positions?.length > 0) {
+              await doc.Bookmarks.Add({ Name: targetBookmark, Range: { Start: positions[0][0], End: positions[0][1] } });
+              // 同步创建编辑书签（与 risk_title_ 同位置，供批注和修订使用）
+              const editBookmark = `risk_edit_${itemId}`;
+              if (!existing.includes(editBookmark)) {
+                await doc.Bookmarks.Add({ Name: editBookmark, Range: { Start: positions[0][0], End: positions[0][1] } });
+              }
+              // 更新 item 上的书签名称，供后续批注/修订直接使用
+              if (item) { item.titleBookmark = targetBookmark; item.editBookmark = editBookmark; }
+              ElMessage.success('已创建书签并定位');
+            } else {
+              ElMessage.warning('未在文档中找到「' + item.filtered_content.substring(0, 15) + '...」，请手动定位');
+              return false;
+            }
+          }
+        } catch (e) {
+          ElMessage.warning('书签创建失败：' + e.message);
+          return false;
+        }
+      }
+
+      if (!targetBookmark) {
+        ElMessage.warning('无原文信息，无法定位');
+        return false;
+      }
+
       try {
-        await app.ActiveDocument.ActiveWindow.Selection.GoTo({
+        await doc.ActiveWindow.Selection.GoTo({
           What: app.Enum.WdGoToItem.wdGoToBookmark,
-          Name: bookmarkName,
+          Name: targetBookmark,
         });
-        console.log('[WPS] gotoBookmark:', bookmarkName);
         return true;
       } catch (error) {
         console.error('[WPS] gotoBookmark error:', error.message);
-        ElMessage.warning(`定位失败：书签「${bookmarkName}」无法找到`);
+        ElMessage.warning('定位失败：' + error.message);
         return false;
       }
     };
 
-    // 添加审查批注（通过书签）
-    const addReviewCommentByBookmarkWps = async (editBookmark, actionData, itemId) => {
-      if (!editBookmark) {
-        console.warn('[WPS] addReviewCommentByBookmarkWps: editBookmark is empty');
-        ElMessage.warning('书签未创建，请先点击"定位原文"按钮创建书签后再试');
+    // 添加审查批注（支持按需创建书签）
+    // 优先使用 editBookmark；无 editBookmark 但有 actionData.target_text 时按需创建
+    const addReviewCommentByBookmarkWps = async (editBookmark, actionData, itemId, item) => {
+      const app = await getApplication();
+      if (!app) {
+        ElMessage.warning('WPS 文档未就绪，请稍候再试');
         return;
       }
-      const app = await getApplication();
-      if (!app) return;
+      const doc = app.ActiveDocument;
+      let targetBookmark = editBookmark;
+
+      // 无书签但有原文文本，按需创建
+      if (!targetBookmark && (actionData?.target_text || item?.filtered_content)) {
+        const searchText = item?.filtered_content || actionData?.target_text || '';
+        const iId = item?.id || itemId || Math.abs(hashCode(String(searchText)));
+        targetBookmark = `risk_edit_${iId}`;
+        try {
+          const existing = (await doc.Bookmarks.Json()).map(b => b.name);
+          if (!existing.includes(targetBookmark)) {
+            const positions = await findAllMatchPositions(searchText);
+            if (positions?.length > 0) {
+              await doc.Bookmarks.Add({ Name: targetBookmark, Range: { Start: positions[0][0], End: positions[0][1] } });
+              // 同步创建标题书签（定位用）
+              const titleBm = `risk_title_${iId}`;
+              if (!existing.includes(titleBm)) {
+                await doc.Bookmarks.Add({ Name: titleBm, Range: { Start: positions[0][0], End: positions[0][1] } });
+              }
+              if (item) { item.titleBookmark = titleBm; item.editBookmark = targetBookmark; }
+              ElMessage.success('已创建批注书签');
+            } else {
+              ElMessage.warning('未在文档中找到原文，无法批注');
+              return;
+            }
+          }
+        } catch (e) {
+          ElMessage.error('书签创建失败：' + e.message);
+          return;
+        }
+      }
+
+      if (!targetBookmark) {
+        ElMessage.warning('无原文信息，请先定位原文后再添加批注');
+        return;
+      }
+
       try {
-        // 定位到书签
-        await app.ActiveDocument.ActiveWindow.Selection.GoTo({
+        await doc.ActiveWindow.Selection.GoTo({
           What: app.Enum.WdGoToItem.wdGoToBookmark,
-          Which: app.Enum.WdGoToDirection.wdGoToAbsolute,
-          Name: editBookmark,
+          Name: targetBookmark,
         });
         // 构建批注内容
         let commentText = '';
         if (actionData) {
           switch (actionData.action) {
             case 'replace':
-              commentText = `【AI审查建议】将"${actionData.target_text}"${actionData.actionText}为"${actionData.new_text}"`;
+              commentText = `【AI审查建议】将"${actionData.target_text}"${actionData.actionText || '修改为'}"${actionData.new_text}"`;
               break;
             case 'insert_before':
-              commentText = `【AI审查建议】在"${actionData.target_text}"起始位置之前插入"${actionData.new_text}"`;
+              commentText = `【AI审查建议】在"${actionData.target_text}"之前插入"${actionData.new_text}"`;
               break;
             case 'insert_after':
-              commentText = `【AI审查建议】在"${actionData.target_text}"结束位置之后插入"${actionData.new_text}"`;
+              commentText = `【AI审查建议】在"${actionData.target_text}"之后插入"${actionData.new_text}"`;
               break;
             case 'delete':
               commentText = `【AI审查建议】删除"${actionData.target_text}"`;
               break;
             default:
-              commentText = `【AI审查建议】${JSON.stringify(actionData)}`;
+              commentText = `【AI审查建议】${actionData.target_text ? '针对该条款' : JSON.stringify(actionData)}`;
           }
         }
-        // 添加批注
-        const selection = app.ActiveDocument.ActiveWindow.Selection;
-        await app.ActiveDocument.Comments.Add(selection.Range, commentText);
-        console.log('[WPS] addReviewCommentByBookmarkWps:', editBookmark, commentText.substring(0, 50));
+        const selection = doc.ActiveWindow.Selection;
+        await doc.Comments.Add(selection.Range, commentText);
+        ElMessage.success('批注添加成功');
       } catch (error) {
         console.error('[WPS] addReviewCommentByBookmarkWps error:', error.message);
         ElMessage.error('批注添加失败：' + (error.message || '未知错误'));
       }
     };
 
-    // 通过书签替换文本（保留书签）
-    const adjustReplaceByBookmarkWps = async (editBookmark, actionData, itemId) => {
-      if (!editBookmark) {
-        console.warn('[WPS] adjustReplaceByBookmarkWps: editBookmark is empty');
-        ElMessage.warning('书签未创建，请先点击"定位原文"按钮创建书签后再试');
+    // 通过书签替换文本（支持按需创建书签）
+    const adjustReplaceByBookmarkWps = async (editBookmark, actionData, itemId, item) => {
+      const app = await getApplication();
+      if (!app) {
+        ElMessage.warning('WPS 文档未就绪，请稍候再试');
         return;
       }
-      const app = await getApplication();
-      if (!app) return;
+      const doc = app.ActiveDocument;
+      let targetBookmark = editBookmark;
+
+      // 无书签但有原文文本，按需创建
+      if (!targetBookmark && (actionData?.target_text || item?.filtered_content)) {
+        const searchText = item?.filtered_content || actionData?.target_text || '';
+        const iId = item?.id || itemId || Math.abs(hashCode(String(searchText)));
+        targetBookmark = `risk_edit_${iId}`;
+        try {
+          const existing = (await doc.Bookmarks.Json()).map(b => b.name);
+          if (!existing.includes(targetBookmark)) {
+            const positions = await findAllMatchPositions(searchText);
+            if (positions?.length > 0) {
+              await doc.Bookmarks.Add({ Name: targetBookmark, Range: { Start: positions[0][0], End: positions[0][1] } });
+              const titleBm = `risk_title_${iId}`;
+              if (!existing.includes(titleBm)) {
+                await doc.Bookmarks.Add({ Name: titleBm, Range: { Start: positions[0][0], End: positions[0][1] } });
+              }
+              if (item) { item.titleBookmark = titleBm; item.editBookmark = targetBookmark; }
+              ElMessage.success('已创建修订书签');
+            } else {
+              ElMessage.warning('未在文档中找到原文，无法修订');
+              return;
+            }
+          }
+        } catch (e) {
+          ElMessage.error('书签创建失败：' + e.message);
+          return;
+        }
+      }
+
+      if (!targetBookmark) {
+        ElMessage.warning('无原文信息，请先定位原文后再调整');
+        return;
+      }
+
       try {
-        const doc = app.ActiveDocument;
-        const bookmarkRange = await doc.Bookmarks.Item(editBookmark);
+        const bookmarkRange = await doc.Bookmarks.Item(targetBookmark);
         const currentText = await bookmarkRange.Range.Text;
         let newText = '';
         if (actionData) {
@@ -557,9 +665,12 @@ export default defineComponent({
             default: newText = actionData.new_text || currentText;
           }
         }
-        await doc.Bookmarks.ReplaceBookmark([{ name: editBookmark, type: 'text', value: newText }]);
-        await gotoBookmark(editBookmark);
-        console.log('[WPS] adjustReplaceByBookmarkWps:', editBookmark, '→', newText.substring(0, 30));
+        await doc.Bookmarks.ReplaceBookmark([{ name: targetBookmark, type: 'text', value: newText }]);
+        await doc.ActiveWindow.Selection.GoTo({
+          What: app.Enum.WdGoToItem.wdGoToBookmark,
+          Name: targetBookmark,
+        });
+        ElMessage.success('文本已调整');
       } catch (error) {
         console.error('[WPS] adjustReplaceByBookmarkWps error:', error.message);
         ElMessage.error('文本调整失败：' + (error.message || '未知错误'));

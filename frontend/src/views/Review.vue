@@ -615,30 +615,27 @@
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" /></svg>
                                         </button>
                                     </el-tooltip>
-                                    <!-- 星法2.0 书签定位按钮组 -->
-                                    <el-tooltip :content="item.titleBookmark ? '定位原文（书签）' : '书签创建中...'" placement="top">
+                                    <!-- 星法2.0 书签按钮组（始终可点击，按需创建书签） -->
+                                    <el-tooltip content="定位原文" placement="top">
                                         <button
-                                          :disabled="!item.titleBookmark"
-                                          @click="item.titleBookmark && wpsEditorRef?.gotoBookmark(item.titleBookmark)"
-                                          :class="['p-1 transition-colors', item.titleBookmark ? 'text-blue-500 hover:text-blue-700' : 'text-gray-300 cursor-not-allowed']"
+                                          @click="wpsEditorRef?.gotoBookmark(item.titleBookmark, item)"
+                                          class="p-1 text-blue-500 hover:text-blue-700 transition-colors"
                                         >
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
                                         </button>
                                     </el-tooltip>
-                                    <el-tooltip :content="item.editBookmark ? '原位批注（书签）' : '书签创建中...'" placement="top">
+                                    <el-tooltip content="原位批注" placement="top">
                                         <button
-                                          :disabled="!item.editBookmark"
-                                          @click="item.editBookmark && wpsEditorRef?.addReviewCommentByBookmarkWps(item.editBookmark, {action: item.action || 'replace', target_text: item.original_text, actionText: '建议修改为', new_text: item.suggested_text || item.modification}, item.id || index)"
-                                          :class="['p-1 transition-colors', item.editBookmark ? 'text-purple-500 hover:text-purple-700' : 'text-gray-300 cursor-not-allowed']"
+                                          @click="wpsEditorRef?.addReviewCommentByBookmarkWps(item.editBookmark, {action: item.action || 'replace', target_text: item.original_text, actionText: '建议修改为', new_text: item.suggested_text || item.modification}, item.id || index, item)"
+                                          class="p-1 text-purple-500 hover:text-purple-700 transition-colors"
                                         >
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
                                         </button>
                                     </el-tooltip>
-                                    <el-tooltip :content="item.editBookmark ? '一键调整（书签）' : '书签创建中...'" placement="top">
+                                    <el-tooltip content="一键修订" placement="top">
                                         <button
-                                          :disabled="!item.editBookmark"
-                                          @click="item.editBookmark && wpsEditorRef?.adjustReplaceByBookmarkWps(item.editBookmark, {action: item.action || 'replace', target_text: item.original_text, new_text: item.suggested_text || item.modification}, item.id || index)"
-                                          :class="['p-1 transition-colors', item.editBookmark ? 'text-green-500 hover:text-green-700' : 'text-gray-300 cursor-not-allowed']"
+                                          @click="wpsEditorRef?.adjustReplaceByBookmarkWps(item.editBookmark, {action: item.action || 'replace', target_text: item.original_text, new_text: item.suggested_text || item.modification}, item.id || index, item)"
+                                          class="p-1 text-green-500 hover:text-green-700 transition-colors"
                                         >
                                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                                         </button>
