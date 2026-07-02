@@ -391,7 +391,7 @@ export default defineComponent({
           try {
             const shortText = normText.substring(0, 15).replace(/[，。、；：""'']$/, '').trim();
             console.log('[WPS] Trying short text:', shortText);
-            let findResults = await doc.Range(0, 0).Find.Execute(shortText, false);
+            let findResults = await doc.Range(0, doc.Content.End || doc.Content.Range?.End || 0).Find.Execute(shortText, false);
             console.log('[WPS] Range.Find short result:', JSON.stringify(findResults));
 
             if (Array.isArray(findResults) && findResults.length > 0) {
@@ -427,7 +427,8 @@ export default defineComponent({
             if (positions && positions.length > 0) {
               const bookmarkName = `fix_${item.sceUuid || i}`;
               if (!existingBookmarks.includes(bookmarkName)) {
-                await doc.Bookmarks.Add({ Name: bookmarkName, Range: { Start: positions[0][0], End: positions[0][1] } });
+                const range = doc.Range(positions[0][0], positions[0][1]);
+                await doc.Bookmarks.Add({ Name: bookmarkName, Range: range });
               }
               item.titleBookmark = bookmarkName;
             }
@@ -466,9 +467,10 @@ export default defineComponent({
                 console.log(`[WPS] item ${i}: positions=`, positions);
                 if (positions && positions.length > 0) {
                   // 创建标题书签
-                  await doc.Bookmarks.Add({ Name: titleBookmarkName, Range: { Start: positions[0][0], End: positions[0][1] } });
+                  const range = doc.Range(positions[0][0], positions[0][1]);
+                  await doc.Bookmarks.Add({ Name: titleBookmarkName, Range: range });
                   // 创建编辑书签（同一位置）
-                  await doc.Bookmarks.Add({ Name: editBookmarkName, Range: { Start: positions[0][0], End: positions[0][1] } });
+                  await doc.Bookmarks.Add({ Name: editBookmarkName, Range: range });
                   item.titleBookmark = titleBookmarkName;
                   item.editBookmark = editBookmarkName;
                   console.log(`[WPS] item ${i}: created bookmarks ${titleBookmarkName} and ${editBookmarkName}`);
@@ -510,11 +512,12 @@ export default defineComponent({
           if (!existing.includes(targetBookmark)) {
             const positions = await findAllMatchPositions(item.filtered_content);
             if (positions?.length > 0) {
-              await doc.Bookmarks.Add({ Name: targetBookmark, Range: { Start: positions[0][0], End: positions[0][1] } });
+              const range = doc.Range(positions[0][0], positions[0][1]);
+              await doc.Bookmarks.Add({ Name: targetBookmark, Range: range });
               // 同步创建编辑书签（与 risk_title_ 同位置，供批注和修订使用）
               const editBookmark = `risk_edit_${itemId}`;
               if (!existing.includes(editBookmark)) {
-                await doc.Bookmarks.Add({ Name: editBookmark, Range: { Start: positions[0][0], End: positions[0][1] } });
+                await doc.Bookmarks.Add({ Name: editBookmark, Range: range });
               }
               // 更新 item 上的书签名称，供后续批注/修订直接使用
               if (item) { item.titleBookmark = targetBookmark; item.editBookmark = editBookmark; }
@@ -722,6 +725,18 @@ export default defineComponent({
       adjustReplaceByBookmarkWps,
       findAllMatchPositions,
       normalizeText,
+      // 批注跳转 API（GoToComment，跳转到文档中指定批注位置）
+      goToComment: async (commentId) => {
+        const app = await getApplication();
+        if (!app) { ElMessage.warning('WPS 文档未就绪，请稍候再试'); return false; }
+        try {
+          await app.ActiveDocument.Comments.GoToComment({ CommentId: commentId });
+          return true;
+        } catch (e) {
+          ElMessage.warning('无法跳转到指定批注：' + e.message);
+          return false;
+        }
+      },
       // 命令栏控制
       setCommandBars: (bars) => wpsInstance?.setCommandBars(bars),
       executeCommandBar: (cmbId) => wpsInstance?.executeCommandBar(cmbId),
