@@ -230,7 +230,18 @@ const callJsonLLM = async (prompt) => {
 };
 
 const buildWpsConfig = (contractRecord, userId) => {
-    const ext = path.extname(contractRecord.storage_path || '').toLowerCase().replace('.', '') || 'docx';
+    const rawExt = path.extname(contractRecord.storage_path || '').toLowerCase().replace('.', '') || 'docx';
+    // WPS SDK officeType 单字母映射
+    const OFFICE_TYPE_MAP = {
+        'doc': 'w', 'docx': 'w', 'wpt': 'w', 'dot': 'w', 'rtf': 'w',
+        'xls': 's', 'xlsx': 's', 'xlt': 's', 'csv': 's', 'et': 's',
+        'ppt': 'p', 'pptx': 'p', 'pps': 'p', 'dps': 'p',
+        'pdf': 'f',
+        'otl': 'o',
+        'dbt': 'd',
+        'ksheet': 'k', 'kex': 'k',
+    };
+    const fileSuffix = OFFICE_TYPE_MAP[rawExt] || 'w';  // 默认 Writer
     const fileId = `contract-${contractRecord.id}`;
     const hasReviewResult = !!(contractRecord.analysis_result && contractRecord.analysis_status === 'completed');
     const mode = hasReviewResult ? 'nomal' : 'simple';
@@ -261,7 +272,7 @@ const buildWpsConfig = (contractRecord, userId) => {
     return {
         appId: WPS_APP_ID,
         fileId,
-        fileSuffix: ext,
+        fileSuffix: fileSuffix,  // WPS SDK 单字母代码（w/s/p/f/o/d/k）
         mode,          // 'nomal'=有审查结果/'simple'=编辑模式
         endpoint: WPS_ENDPOINT,
         token,         // JWT token（SDK 初始化用）
