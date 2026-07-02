@@ -13,61 +13,20 @@ const AdmZip = require('adm-zip');
 const PDFDocument = require('pdfkit');
 const { createWorker } = require('tesseract.js');
 const db = require('../database');
-const { authMiddleware } = require('./auth');
-const { searchVectorDocumentsMulti, splitIntoParagraphGroups } = require('../services/vectorStore');
+const { searchVectorDocuments } = require('../services/vectorStore');
 const { getTemplateById, matchTemplate } = require('../services/reviewTemplates');
 const { extractCompanyNames, searchCompanyInfo } = require('../services/webSearch');
 const { createChatCompletion } = require('../services/llmClient');
-const { buildWpsEditorConfig } = require('../services/wpsEditor');
-
-// 合同正文段落 chunk 检索上限：0 = 不限；超过部分不再生成子 query，控制长合同的检索成本
-const CONTRACT_CHUNK_MAX = Math.max(0, Number(process.env.CONTRACT_CHUNK_MAX || 30));
-
-// 知识检索配额（按合同类型调整）：limit = 总配额，quotaA/B = 双通道分配
-const KNOWLEDGE_QUOTAS = {
-  '建设工程': { limit: 15, quotaA: 10, quotaB: 5 },
-  '技术开发合同': { limit: 12, quotaA: 8, quotaB: 4 },
-  '技术转让/许可合同': { limit: 12, quotaA: 8, quotaB: 4 },
-  '股权转让协议': { limit: 10, quotaA: 7, quotaB: 3 },
-  '融资租赁合同': { limit: 10, quotaA: 7, quotaB: 3 },
-  '房屋租赁合同': { limit: 10, quotaA: 7, quotaB: 3 },
-  'default': { limit: 8, quotaA: 5, quotaB: 3 },
-};
-
-// 全局风险评分权重（severity 加权而非简单计数）
-const RISK_WEIGHTS = { '高': 10, '中': 3, '低': 1 };
 
 const router = express.Router();
 
-// 所有 /api/contracts 路由都需要 JWT 认证（WPS 回调路由在 wps-callback.js 中独立挂载在 /v3/3rd，不受影响）
-router.use(authMiddleware);
-
-const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET || '';
+const ONLYOFFICE_JWT_SECRET = process.env.ONLYOFFICE_JWT_SECRET;
+const ONLYOFFICE_URL = process.env.ONLYOFFICE_URL || 'http://localhost:8081';
 const APP_HOST = process.env.APP_HOST;
 const BACKEND_URL_FOR_DOCKER = process.env.BACKEND_URL_FOR_DOCKER || APP_HOST;
 
-const ALLOWED_EXTENSIONS = ['.docx', '.doc', '.pdf'];
+const ALLOWED_EXTENSIONS = ['.docx', '.pdf'];
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
-
-// ========== 辅助：安全发送文件（防止路径遍历攻击） ==========
-const safeSendFile = (res, filePath) => {
-    try {
-        const realPath = fs.realpathSync(filePath);
-        const realUploads = fs.realpathSync(UPLOADS_DIR);
-        if (!realPath.startsWith(realUploads + path.sep)) {
-            console.error('[contracts] Blocked path traversal attempt:', filePath);
-            return false;
-        }
-        if (!fs.existsSync(realPath)) {
-            return false;
-        }
-        res.sendFile(realPath);
-        return true;
-    } catch {
-        return false;
-    }
-};
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -118,28 +77,6 @@ const extractTextFromFile = async (filePath) => {
         }
         return value;
     }
-    if (ext === '.doc') {
-        // 使用 antiword 提取 .doc 文档文本
-        return new Promise((resolve, reject) => {
-            const { exec } = require('child_process');
-            exec(`antiword "${filePath}"`, { timeout: 30000 }, (error, stdout, stderr) => {
-                if (error) {
-                    // antiword 失败时尝试 catdoc 作为备用
-                    exec(`catdoc "${filePath}"`, { timeout: 30000 }, (err2, out2) => {
-                        if (err2 || !out2?.trim()) {
-                            reject(new Error('无法提取 .doc 文档文本，文件可能已损坏或为旧版格式。'));
-                        } else {
-                            resolve(out2);
-                        }
-                    });
-                } else if (!stdout || !stdout.trim()) {
-                    reject(new Error('.doc 文档文本提取为空。'));
-                } else {
-                    resolve(stdout);
-                }
-            });
-        });
-    }
     if (ext === '.pdf') {
         const data = await pdf(fs.readFileSync(filePath));
         const scanInfo = detectScannedPdf(data);
@@ -166,9 +103,6 @@ const wrapContractContent = (text) => [
 ].join('\n');
 
 const getRequestUserId = (req) => {
-    // 优先从 JWT token 读取（经过 authMiddleware 验证）
-    if (req.user?.id) return Number(req.user.id);
-    // 降级：尝试从 X-User-ID 头读取（部分内部调用仍使用）
     const raw = req.header('X-User-ID') || req.body?.userId || req.query?.userId;
     const id = Number(raw);
     return Number.isInteger(id) && id > 0 ? id : null;
@@ -199,7 +133,6 @@ const ANALYSIS_STEPS = [
     { key: 'llm_review', label: 'AI 生成审查结论', weight: 50, estSeconds: 60 },
     { key: 'seal_analysis', label: '印章与签章核验', weight: 7, estSeconds: 8 },
     { key: 'finalize', label: '保存审查结果', weight: 3, estSeconds: 2 },
-    { key: 'batch_annotations', label: '写入审查批注', weight: 0, estSeconds: 2 },
 ];
 const TOTAL_EST_SECONDS = ANALYSIS_STEPS.reduce((sum, s) => sum + s.estSeconds, 0);
 
@@ -241,35 +174,29 @@ const updateAnalysisJob = (contractId, updates) => {
 const emitAnalysisProgress = async (reqOrIo, contractId, payload) => {
     const stepKey = payload.step;
     const status = payload.status;
-    const { percent: stepPercent, stepIndex, totalSteps } = getStepProgress(stepKey, status);
-
-    // 如果 payload 中有自定义 percent，使用它（用于 llm_review 的逐批进度更新）
-    // 否则使用 stepPercent（基于步骤权重的固定估算）
-    const effectivePercent = typeof payload.percent === 'number' ? payload.percent : stepPercent;
+    const { percent, stepIndex, totalSteps } = getStepProgress(stepKey, status);
 
     const event = {
         contractId: Number(contractId),
         timestamp: new Date().toISOString(),
+        percent,
         stepIndex,
         totalSteps,
         stepLabel: ANALYSIS_STEPS.find((s) => s.key === stepKey)?.label || stepKey,
         elapsedSeconds: 0,
+        estimatedRemainingSeconds: Math.max(0, TOTAL_EST_SECONDS - Math.round((TOTAL_EST_SECONDS * percent) / 100)),
         ...payload,
-        // 确保 percent 始终使用 effectivePercent（payload 中的 percent 会被下面覆盖）
-        percent: effectivePercent,
     };
 
-    // 基于已耗时动态估算 ETA（替代固定 TOTAL_EST_SECONDS 计算的偏差值）
-    const emitJob = analysisJobs.get(Number(contractId));
-
-    // 更新内存任务状态 — 永不回退（防止 batch 进度回调与首次 emit 的时间差导致 65%→35%）
-    if (emitJob) {
-        if (event.percent > emitJob.percent || emitJob.percent === 0) emitJob.percent = event.percent;
-        emitJob.currentStep = stepKey;
-        emitJob.status = status === 'failed' ? 'failed' : (event.percent >= 100 ? 'completed' : 'running');
-        emitJob.elapsedSeconds = Math.round((Date.now() - emitJob.startedAt) / 1000);
-        event.elapsedSeconds = emitJob.elapsedSeconds;
-        const stepEntry = emitJob.steps.find((s) => s.key === stepKey);
+    // 更新内存任务状态
+    const job = analysisJobs.get(Number(contractId));
+    if (job) {
+        job.percent = percent;
+        job.currentStep = stepKey;
+        job.status = status === 'failed' ? 'failed' : (percent >= 100 ? 'completed' : 'running');
+        job.elapsedSeconds = Math.round((Date.now() - job.startedAt) / 1000);
+        event.elapsedSeconds = job.elapsedSeconds;
+        const stepEntry = job.steps.find((s) => s.key === stepKey);
         if (stepEntry) {
             stepEntry.status = status;
             stepEntry.message = payload.message || '';
@@ -302,7 +229,77 @@ const callJsonLLM = async (prompt) => {
     return cleanJsonResponse(completion.choices[0].message.content);
 };
 
-// buildWpsEditorConfig is imported from ../services/wpsEditor
+const buildOnlyOfficeConfig = (contractRecord, ext = 'docx') => {
+    const isPdf = ext === 'pdf';
+    const fileUrl = `${BACKEND_URL_FOR_DOCKER}/api/uploads/${path.basename(contractRecord.storage_path)}`;
+    const callbackUrl = `${BACKEND_URL_FOR_DOCKER}/api/contracts/save-callback`;
+    const payload = {
+        document: {
+            fileType: ext,
+            key: contractRecord.document_key,
+            title: contractRecord.original_filename,
+            url: fileUrl,
+            permissions: {
+                comment: !isPdf,
+                download: true,
+                edit: !isPdf,
+                print: true,
+                review: !isPdf,
+            },
+        },
+        documentType: isPdf ? 'pdf' : 'word',
+        editorConfig: {
+            callbackUrl,
+            lang: 'zh-CN',
+            mode: isPdf ? 'view' : 'edit',
+            user: {
+                id: `user-${contractRecord.user_id || 1}`,
+                name: 'Reviewer',
+            },
+            customization: {
+                forcesave: !isPdf,
+                comments: true,
+                compactHeader: true,
+                compactToolbar: true,
+                toolbarHideFileName: true,
+                toolbarNoTabs: true,
+                features: {
+                    tabStyle: 'line',
+                    tabBackground: 'toolbar',
+                    spellcheck: false,
+                },
+                hideRightMenu: true,
+                hideRulers: true,
+                help: false,
+                plugins: false,
+                chat: false,
+                feedback: false,
+                goback: false,
+            },
+        },
+    };
+    return ONLYOFFICE_JWT_SECRET
+        ? { ...payload, token: jwt.sign(payload, ONLYOFFICE_JWT_SECRET) }
+        : payload;
+};
+
+const postOnlyOfficeCommand = async (payload) => {
+    const commandPayload = ONLYOFFICE_JWT_SECRET
+        ? { ...payload, token: jwt.sign(payload, ONLYOFFICE_JWT_SECRET) }
+        : payload;
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (ONLYOFFICE_JWT_SECRET) {
+        headers.Authorization = `Bearer ${commandPayload.token}`;
+    }
+
+    const response = await axios.post(
+        `${ONLYOFFICE_URL.replace(/\/$/, '')}/coauthoring/CommandService.ashx`,
+        commandPayload,
+        { headers, timeout: 10000 },
+    );
+    return response.data;
+};
 
 const escapeXmlText = (text) => String(text || '')
     .replace(/&/g, '&amp;')
@@ -469,20 +466,21 @@ const replaceTextInDocx = (filePath, originalText, suggestedText, originalCandid
 };
 
 const createContractVersionSnapshot = async (contract, sourceAction = 'replace-text') => {
-    const [{ next_version_no: nextVersionNo }] = await db('contract_versions')
+    const result = await db('contract_versions')
         .where({ contract_id: contract.id })
-        .max({ next_version_no: 'version_no' });
-    const versionNo = Number(nextVersionNo || 0) + 1;
+        .max('version_no as next_version_no');
+    const nextVersionNo = result[0] ? (result[0].next_version_no || result[0].max || 0) : 0;
+    const versionNo = Number(nextVersionNo) + 1;
     const ext = path.extname(contract.storage_path).toLowerCase();
     const snapshotDir = path.join(__dirname, '..', 'uploads', 'versions');
     await fs.promises.mkdir(snapshotDir, { recursive: true });
     const snapshotPath = path.join(snapshotDir, `${contract.id}-v${versionNo}-${uuidv4()}${ext}`);
     await fs.promises.copyFile(contract.storage_path, snapshotPath);
 
-    let plainText = '';
+    let plainText;
     try {
         plainText = await extractTextFromFile(contract.storage_path);
-    } catch (error) {
+    } catch (_) {
         plainText = '';
     }
 
@@ -548,14 +546,14 @@ const parseJsonField = (value, fallback = {}) => {
     }
 };
 
-const renderReviewReportHtml = (contract, reviewData = {}, format = 'html') => {
+const renderReviewReportHtml = (contract, reviewData = {}, _format = 'html') => {
     const rows = (items = [], render) => items.map(render).join('\n') || '<p>暂无数据。</p>';
     const severityCount = (points = []) => {
         const counts = { 高: 0, 中: 0, 低: 0 };
         points.forEach((p) => {
             const sev = String(p.severity || '').trim();
             if (counts[sev] !== undefined) counts[sev] += 1;
-            else counts[中] += 1;
+            else counts['中'] += 1;
         });
         return counts;
     };
@@ -881,7 +879,6 @@ const ensureUploadUser = async (trx, userId) => {
         .onConflict('id')
         .ignore();
 
-    await trx.raw("select setval(pg_get_serial_sequence('users', 'id'), greatest((select coalesce(max(id), 0) from users), 1), true)");
     return numericUserId;
 };
 
@@ -890,164 +887,113 @@ const compactText = (value, maxLength = 4000) => String(value || '')
     .trim()
     .slice(0, maxLength);
 
-// 通道 A「审查维度」query 构建：合同类型+立场、每个审查点、每个核心目的、用户问题
-// 这些是法律语言，与法条同语言空间，embedding 匹配精度高，是召回主力
-// 合同正文不进通道 A（合同语言会稀释法律意图），改由通道 B 独立召回
-const buildChannelAQueries = ({
+const LEGAL_TRIGGER_TERMS = [
+    '应当', '不得', '有权', '义务', '责任', '赔偿',
+    '解除', '终止', '保密', '管辖', '仲裁', '违约',
+    '保证', '承诺', '担保', '授权', '许可', '限制',
+    '禁止', '必须', '可以', '视为',
+    '违约金', '损害赔偿', '知识产权', '社会保险',
+    '竞业限制', '工资', '报酬', '股权', '期权',
+    '质押', '抵押', '定金', '保证金', '留置',
+    '通知', '送达', '争议', '诉讼', '继承',
+    '罚款', '商标', '专利', '著作权', '商业秘密',
+    '刑事责任', '连带', '免责', '不可抗力',
+    '转让', '分包', '转包', '出租', '出售',
+    '关联方', '披露', '陈述', '保证', '赔偿',
+];
+
+/**
+ * 从合同文本中提取含法律关键词的句子，作为向量检索的聚焦查询
+ * 替代原来的整段合同文本截取的方案，避免查询向量被稀释
+ */
+const extractLegalClauses = (text, maxClauses = 6) => {
+    if (!text || !String(text).trim()) return [];
+    const sentences = String(text)
+        .replace(/\s+/g, ' ')
+        .split(/(?<=[。；！？!?;])/g)
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 15 && s.length <= 600);
+
+    const scored = sentences.map((s) => ({
+        text: s,
+        score: LEGAL_TRIGGER_TERMS.reduce((sum, kw) => sum + (s.includes(kw) ? 1 : 0), 0),
+    }));
+
+    scored.sort((a, b) => b.score - a.score || b.text.length - a.text.length);
+
+    const result = [];
+    const seen = new Set();
+    for (const item of scored) {
+        if (result.length >= maxClauses) break;
+        const key = item.text.slice(0, 30);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(item.text);
+    }
+    return result;
+};
+
+const buildKnowledgeSearchQuery = ({
+    text = '',
     contractType = '',
     reviewPoints = [],
     corePurposes = [],
     question = '',
     perspective = '',
 } = {}) => {
-    const queries = [];
-    const perspectiveSuffix = perspective ? `${perspective} 立场` : '';
+    const focusedTerms = [
+        contractType,
+        perspective ? `${perspective} 立场 风险 责任 权利义务` : '',
+        ...reviewPoints,
+        ...corePurposes,
+        question,
+    ].filter(Boolean).join('\n');
 
-    if (contractType || perspectiveSuffix) {
-        queries.push([
-            contractType,
-            perspectiveSuffix || '法律 风险 责任 权利义务',
-        ].filter(Boolean).join(' '));
-    }
+    // 从合同中提取含法律关键词的句子作为检索查询，替代原始合同文本截取
+    // 这样每条查询语句都聚焦于一个具体的法律问题，而非整段噪音
+    const legalClauses = extractLegalClauses(text, focusedTerms ? 6 : 10);
+    const searchContext = legalClauses.length > 0
+        ? legalClauses.join('\n')
+        : compactText(text, focusedTerms ? 2000 : 4000);
 
-    (reviewPoints || []).forEach((point) => {
-        queries.push([
-            contractType,
-            point,
-            perspectiveSuffix,
-        ].filter(Boolean).join(' '));
-    });
-
-    (corePurposes || []).forEach((purpose) => {
-        queries.push([
-            contractType,
-            purpose,
-        ].filter(Boolean).join(' '));
-    });
-
-    if (question) queries.push(String(question).trim());
-
-    return queries.filter(Boolean);
+    return [
+        focusedTerms,
+        searchContext,
+    ].filter(Boolean).join('\n');
 };
 
-// 通道 B（合同内容）强阈值：只保留高置信命中，避免合同语言捞到弱相关法条噪声
-const CHANNEL_B_SCORE_THRESHOLD = 0.7;
+const getRelevantKnowledge = async (options, limit = 8) => {
+    const query = typeof options === 'string'
+        ? buildKnowledgeSearchQuery({ text: options })
+        : buildKnowledgeSearchQuery(options);
+    const matches = await searchVectorDocuments(query, {
+        limit,
+        sourceTypes: ['law', 'case', 'rule', 'guide'],
+        rerank: true,
+    });
 
-// 把向量检索结果映射为对外披露的 relevantKnowledge 项
-const toRelevantKnowledgeItem = (item) => ({
-    source_type: item.source_type,
-    law: item.title,
-    clause: item.clause_id || item.source_id,
-    content: item.content,
-    score: item.rerank_score ?? item.score,
-    source_name: item.source_name,
-    source_url: item.source_url,
-    metadata: item.metadata || {},
-});
-
-// 置信加权融合：通道 A（审查维度）与通道 B（合同内容）同时命中的法条置信最高，优先保留并加分
-// 仅 A 或仅 B 命中的项按分数排序在后；去重按 content_hash/source_id
-const mergeChannelsWithConfidence = (channelA, channelB, limit) => {
-    const getKey = (item) => item.content_hash || item.source_id || item.id;
-    const scoreOf = (item) => item.rerank_score ?? item.score ?? 0;
-    const merged = new Map();
-
-    for (const item of channelA) {
-        merged.set(getKey(item), { ...item, channel: 'A', confidence_boost: false });
-    }
-    for (const item of channelB) {
-        const key = getKey(item);
-        const existing = merged.get(key);
-        if (existing) {
-            // 两通道同时命中：置信最高，加分并标记
-            existing.confidence_boost = true;
-            const maxScore = Math.max(scoreOf(existing), scoreOf(item));
-            existing.rerank_score = maxScore + 0.05;
-            existing.score = maxScore;
-        } else {
-            merged.set(key, { ...item, channel: 'B', confidence_boost: false });
+    // 按 clause_id 去重：同一法条同一条号只保留 score 最高的一个
+    // 避免 LLM prompt 中出现 "第XX条...第XX条..." 重复引用
+    const byClause = new Map();
+    for (const item of matches) {
+        const sourceKey = `${item.title}@@${item.clause_id || ''}`;
+        const existing = byClause.get(sourceKey);
+        const score = item.rerank_score ?? item.score ?? 0;
+        if (!existing || score > (existing.rerank_score ?? existing.score ?? 0)) {
+            byClause.set(sourceKey, item);
         }
     }
 
-    return [...merged.values()]
-        .sort((a, b) => {
-            if (a.confidence_boost !== b.confidence_boost) return a.confidence_boost ? -1 : 1;
-            return scoreOf(b) - scoreOf(a);
-        })
-        .slice(0, limit);
-};
-
-// 知识库检索缓存（TTL 600s 避免相同合同类型重复检索）
-const knowledgeCache = new Map();
-const KNOWLEDGE_CACHE_TTL = Number(process.env.KNOWLEDGE_CACHE_TTL || 600000); // 10min
-
-const getCacheKey = (options) => {
-  if (typeof options === 'string') return `s:${options.slice(0, 100)}`;
-  const { text, contractType, reviewPoints, corePurposes, perspective, question, templateId } = options;
-  return `o:${contractType}|${(reviewPoints||[]).sort().join(',')}|${(corePurposes||[]).sort().join(',')}|${perspective||''}|${question||''}|${templateId||''}`;
-};
-
-// 知识库检索：分通道召回 + 配额融合
-//   通道 A「审查维度」法律语言，主力，占 2/3 配额，每条 query 召回 3 条
-//   通道 B「合同内容」捞审查点未覆盖的非常规条款，补充，占 1/3 配额，每条 query 仅 top-1 且强阈值
-// CONTRACT_CHUNK_MAX > 0 时限制通道 B 的 chunk 数，控制长合同检索成本
-const getRelevantKnowledge = async (options, limit = 8) => {
-    // 缓存命中检查
-    const cacheKey = getCacheKey(options);
-    const cached = knowledgeCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < KNOWLEDGE_CACHE_TTL) {
-      console.log(`[Knowledge Cache] HIT for key ${cacheKey.slice(0, 60)}...`);
-      return cached.data;
-    }
-
-    const sourceTypes = ['law', 'case', 'rule', 'guide'];
-
-    // 字符串入口（纯文本）：单通道，按段落归并检索
-    if (typeof options === 'string') {
-        const queries = splitIntoParagraphGroups(options, { groupSize: 2, maxChars: 500, minChars: 5 });
-        const matches = await searchVectorDocumentsMulti(queries, {
-            limit,
-            sourceTypes,
-            rerank: true,
-        });
-        return matches.map(toRelevantKnowledgeItem);
-    }
-
-    const channelAQueries = buildChannelAQueries(options);
-    let channelBQueries = splitIntoParagraphGroups(options.text || '', { groupSize: 2, maxChars: 500, minChars: 5 });
-    if (CONTRACT_CHUNK_MAX > 0) channelBQueries = channelBQueries.slice(0, CONTRACT_CHUNK_MAX);
-
-    // 从合同类型获取知识配额，找不到则用 default
-    const contractType = options.contractType || '';
-    const quotaConfig = KNOWLEDGE_QUOTAS[contractType] || KNOWLEDGE_QUOTAS['default'];
-    const quotaA = quotaConfig.quotaA;
-    const quotaB = quotaConfig.quotaB;
-    const effectiveLimit = quotaConfig.limit;
-
-    const [channelA, channelB] = await Promise.all([
-        channelAQueries.length
-            ? searchVectorDocumentsMulti(channelAQueries, {
-                limit: quotaA,
-                sourceTypes,
-                rerank: true,
-                perQueryLimit: 3,
-            })
-            : Promise.resolve([]),
-        (channelBQueries.length && quotaB > 0)
-            ? searchVectorDocumentsMulti(channelBQueries, {
-                limit: quotaB,
-                sourceTypes,
-                rerank: true,
-                perQueryLimit: 1,
-                scoreThreshold: CHANNEL_B_SCORE_THRESHOLD,
-            })
-            : Promise.resolve([]),
-    ]);
-    
-    const result = mergeChannelsWithConfidence(channelA, channelB, effectiveLimit).map(toRelevantKnowledgeItem);
-    // 写入缓存
-    knowledgeCache.set(cacheKey, { data: result, timestamp: Date.now() });
-    return result;
+    return Array.from(byClause.values()).map((item) => ({
+        source_type: item.source_type,
+        law: item.title,
+        clause: item.clause_id || item.source_id,
+        content: item.content,
+        score: item.rerank_score ?? item.score,
+        source_name: item.source_name,
+        source_url: item.source_url,
+        metadata: item.metadata || {},
+    }));
 };
 
 const annotateKnowledgeUpdates = (items) => items.map((item) => ({
@@ -1055,6 +1001,203 @@ const annotateKnowledgeUpdates = (items) => items.map((item) => ({
     hasUpdate: false,
     updateNotice: '当前知识库未标记该依据存在更新；正式出具意见前仍应核对最新法律、司法解释和裁判文书。',
 }));
+
+// ============ 分节链式检索 (Step A) ============
+
+/**
+ * 智能合同分节：将合同文本按条款/章节/编号/自然段落拆分为 N 段
+ * 返回 [{ index, title, content, type }]
+ */
+const splitContractIntoSections = (text) => {
+    if (!text || !String(text).trim()) return [{ index: 0, title: '全文', content: String(text || ''), type: 'full' }];
+
+    const raw = String(text);
+    const lines = raw.split('\n');
+    const sections = [];
+    let current = { index: 0, title: '', content: '', type: 'para' };
+
+    // 识别第X条、第X章、第X节、"X."编号、"X、"编号、或"（X）""【X】"标记
+    const sectionPattern = /^\s*(第[一二三四五六七八九十百千\d]+[条章节])\s*[。\.\s]?(.*)$|^\s*(第[一二三四五六七八九十百千\d]+[条章节])\s*$/;
+    // 段落编号模式: "X." "X、" "X、" "（X）" "【X】"
+    const numberedPattern = /^\s*(\d+)\.\s+(.+)$|^\s*(\d+)[、．]\s*(.+)$|^\s*[（【\(]\s*(\d+)\s*[）】\)]\s*(.+)$/;
+    // 连续自然段落合并阈值
+    const MAX_PARA_LEN = 3000;
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        const sectionMatch = trimmed.match(sectionPattern);
+        const numberedMatch = trimmed.match(numberedPattern);
+
+        let isNewSection = false;
+        let sectionTitle = '';
+        let sectionContent = trimmed;
+
+        if (sectionMatch) {
+            // 匹配到"第X条 标题"或"第X条"
+            sectionTitle = (sectionMatch[1] || sectionMatch[3] || '').trim();
+            const rest = (sectionMatch[2] || '').trim();
+            sectionContent = rest || trimmed;
+            isNewSection = true;
+        } else if (numberedMatch) {
+            // 匹配到 "1. 标题" "2、标题" "（3）标题"
+            const num = numberedMatch[1] || numberedMatch[3] || numberedMatch[5] || '';
+            const title = numberedMatch[2] || numberedMatch[4] || numberedMatch[6] || '';
+            sectionTitle = `${num}. ${title}`;
+            isNewSection = true;
+        } else if (current.content.length > MAX_PARA_LEN) {
+            // 当前段落过长，强制切分
+            isNewSection = true;
+            sectionTitle = `段落${sections.length + 1}`;
+        }
+
+        if (isNewSection && current.content) {
+            sections.push({ ...current });
+            current = {
+                index: sections.length,
+                title: sectionTitle,
+                content: sectionContent,
+                type: sectionMatch ? 'clause' : (numberedMatch ? 'numbered' : 'para'),
+            };
+        } else if (isNewSection) {
+            current.title = sectionTitle;
+            current.content = sectionContent;
+            current.type = sectionMatch ? 'clause' : (numberedMatch ? 'numbered' : 'para');
+        } else {
+            current.content += '\n' + trimmed;
+        }
+    }
+    if (current.content) sections.push(current);
+
+    // 如果分节太少（<=2），退回到按字数大致切分
+    if (sections.length <= 2 && raw.length > 4000) {
+        const roughChunks = [];
+        const chunkSize = Math.ceil(raw.length / Math.ceil(raw.length / 2500));
+        for (let i = 0; i < raw.length; i += chunkSize) {
+            roughChunks.push({
+                index: roughChunks.length,
+                title: `段落${roughChunks.length + 1}`,
+                content: raw.slice(i, i + chunkSize),
+                type: 'para',
+            });
+        }
+        return roughChunks;
+    }
+
+    return sections;
+};
+
+/**
+ * 构造多个检索角度：从当前节内容 + 审查点推断 2~3 个不同查询
+ */
+const buildSectionQueries = (sectionContent, sectionTitle, reviewPoints) => {
+    const queries = [];
+
+    // 1. 从节文本中提取法律关键句（原 extractLegalClauses 逻辑）
+    const legalSentences = extractLegalClauses(sectionContent, 5);
+    if (legalSentences.length > 0) {
+        queries.push(legalSentences.join('\n'));
+    }
+
+    // 2. 当前节标题 + 审查点聚焦
+    const titleQuery = [sectionTitle, ...reviewPoints].filter(Boolean).join(' ');
+    if (titleQuery.trim()) {
+        queries.push(titleQuery);
+    }
+
+    // 3. 合同全文中法律关键词丰富度高的句子（从本节取 top-3 关键词句 + 邻近上下文）
+    const expandedSentences = extractLegalClauses(sectionContent, 8).slice(0, 3);
+    if (expandedSentences.length > 0) {
+        queries.push(expandedSentences.join('\n'));
+    }
+
+    // 去重（简单模糊去重）
+    const deduped = [];
+    const seen = new Set();
+    for (const q of queries) {
+        const sig = q.replace(/\s+/g, '').slice(0, 60);
+        if (!seen.has(sig)) {
+            seen.add(sig);
+            deduped.push(q);
+        }
+    }
+    return deduped;
+};
+
+/**
+ * 逐节 Multi-Query 知识检索 + 合并去重
+ * 替代原来的单次 getRelevantKnowledge 调用
+ */
+const multiSectionKnowledgeRetrieval = async (plainText, options, perSectionLimit = 5, totalLimit = 24) => {
+    const sections = splitContractIntoSections(plainText);
+    const allResults = [];
+
+    // 并行检索每节（控制并发数，避免 API 限流）
+    const CONCURRENCY = 4;
+    for (let i = 0; i < sections.length; i += CONCURRENCY) {
+        const batch = sections.slice(i, i + CONCURRENCY);
+        const batchResults = await Promise.all(batch.map(async (section) => {
+            const sectionQueries = buildSectionQueries(
+                section.content,
+                section.title,
+                options.reviewPoints || [],
+            );
+
+            if (sectionQueries.length === 0) return [];
+
+            // 每条查询独立检索，结果合并
+            const sectionMatches = [];
+            const queriedQueries = sectionQueries.slice(0, 3); // 最多 3 个查询角度
+            for (const query of queriedQueries) {
+                const fullQuery = [
+                    options.contractType || '',
+                    options.perspective ? `${options.perspective} 立场 风险 责任 权利义务` : '',
+                    query,
+                ].filter(Boolean).join('\n');
+
+                try {
+                    const matches = await searchVectorDocuments(fullQuery, {
+                        limit: perSectionLimit,
+                        sourceTypes: ['law', 'case', 'rule', 'guide'],
+                        rerank: true,
+                    });
+                    sectionMatches.push(...matches);
+                } catch (err) {
+                    console.warn(`[Section ${section.index}] Query failed:`, err.message);
+                }
+            }
+            return sectionMatches;
+        }));
+        allResults.push(...batchResults.flat());
+    }
+
+    // 全局按 clause_id 去重（保留 score 最高的）
+    const byClause = new Map();
+    for (const item of allResults) {
+        const sourceKey = `${item.title}@@${item.clause_id || ''}`;
+        const existing = byClause.get(sourceKey);
+        const score = item.rerank_score ?? item.score ?? 0;
+        if (!existing || score > (existing.rerank_score ?? existing.score ?? 0)) {
+            byClause.set(sourceKey, item);
+        }
+    }
+
+    const merged = Array.from(byClause.values());
+    // 按 score 排序
+    merged.sort((a, b) => (b.rerank_score ?? b.score ?? 0) - (a.rerank_score ?? a.score ?? 0));
+
+    return merged.slice(0, totalLimit).map((item) => ({
+        source_type: item.source_type,
+        law: item.title,
+        clause: item.clause_id || item.source_id,
+        content: item.content,
+        score: item.rerank_score ?? item.score,
+        source_name: item.source_name,
+        source_url: item.source_url,
+        metadata: item.metadata || {},
+    }));
+};
 
 const runSealOcr = async (filePath) => {
     const ext = path.extname(filePath).toLowerCase();
@@ -1102,118 +1245,31 @@ const analyzeSealAndSignature = async (contract, plainText) => {
     }
 };
 
-// 兜底检测：扫描合同原文，补充 LLM 可能遗漏的典型霸王条款
-const supplementKnownRiskPatterns = (analysisResult, plainText) => {
-    if (!plainText || typeof plainText !== 'string') return;
-    const points = analysisResult.dispute_points || [];
-    const existingClauses = new Set(points.map(p => (p.original_clause || '').replace(/\s+/g, '').slice(0, 30)));
-    const riskPatterns = [
-        { keywords: ['解释权归', '解释权归甲方', '解释权归公司', '最终解释权'], title: '单方解释权条款（霸王条款）', legal_reference: '《民法典》第六条（公平原则）、第七条（诚信原则）；《中华人民共和国劳动合同法》第三条（公平原则）', dispute_rationale: '"单方解释权"赋予用人单位对合同条款的最终解释权，劳动者无法对条款含义提出异议，违反合同公平原则，属于典型格式霸王条款。', plain_language: '这条款说"最终解释权归公司"，意味着公司可以随便解读合同内容，劳动者说了不算，这是不公平的。', severity: '高' },
-        { keywords: ['无偿解除', '无偿解除合同', '无偿辞退', '不支付任何补偿解除'], title: '无偿违法解除条款', legal_reference: '《中华人民共和国劳动合同法》第四十六条（经济补偿）、第四十八条（违法解除赔偿）', dispute_rationale: '用人单位违法解除或终止劳动合同须支付赔偿金，约定"无偿解除"违反法律规定，该条款无效。', plain_language: '合同写公司可以"无偿开除"你，但法律不允许这样做，被违法开除可以要求2N赔偿金。', severity: '高' },
-        { keywords: ['限制结婚', '限制生育', '不得结婚', '不得生育'], title: '限制结婚生育条款（违法）', legal_reference: '《中华人民共和国劳动合同法》第三条；《就业促进法》第二十七条；《妇女权益保障法》第四十四条', dispute_rationale: '用人单位不得规定女职工在孕产哺乳期解除劳动合同，或限制其结婚生育，此类条款违法且无效。', plain_language: '合同规定不能结婚生孩子，这是违法的，公司不能用这个理由开除你。', severity: '高' },
-        { keywords: ['加班必须', '强制加班', '拒绝加班视为', '不服从加班'], title: '强制加班且拒绝即违纪', legal_reference: '《中华人民共和国劳动法》第四十一条（加班上限）、第四十三条（支付加班费）', dispute_rationale: '用人单位不得强制加班，员工有权拒绝超时加班。将拒绝加班列为"严重违纪"是违法条款。', plain_language: '合同说必须无偿加班，不加班就违纪开除，这违反劳动法，加班要给双倍或三倍工资。', severity: '高' },
-        { keywords: ['扣除押金', '扣押工资', '风险抵押', '入职押金'], title: '违法扣押押金/工资条款', legal_reference: '《中华人民共和国劳动合同法》第九条（不得扣押证件财物）、第八十四条（罚款法律责任）', dispute_rationale: '用人单位不得扣押劳动者证件或收取押金，不得以任何名义扣留工资作为"风险抵押"。', plain_language: '公司扣你押金或者扣部分工资当"押金"，这是违法的，离职时必须全额退还。', severity: '高' },
-        { keywords: ['甲方保留随时', '甲方有权随时', '随时调整', '随时变更'], title: '用人单位单方随意变更权', legal_reference: '《中华人民共和国劳动合同法》第三十五条（变更须协商一致）；《民法典》第五百四十三条（合同变更）', dispute_rationale: '劳动合同的变更须双方协商一致，用人单位不得以"甲方保留权利"为由单方变更合同核心条款。', plain_language: '合同说公司可以"随时调整"你的岗位、工资、工作地点，但这些必须双方同意，不能公司单方说了算。', severity: '高' },
-    ];
-    for (const pattern of riskPatterns) {
-        const matched = pattern.keywords.some(kw => plainText.includes(kw));
-        if (!matched) continue;
-        let clauseText = '';
-        for (const kw of pattern.keywords) {
-            const idx = plainText.indexOf(kw);
-            if (idx >= 0) { clauseText = plainText.slice(Math.max(0, idx - 60), Math.min(plainText.length, idx + kw.length + 60)).replace(/\s+/g, ' ').trim(); break; }
-        }
-        if (!clauseText) continue;
-        if (existingClauses.has(clauseText.replace(/\s+/g, '').slice(0, 30)) || points.some(p => (p.original_clause || '').includes(pattern.keywords[0]))) continue;
-        existingClauses.add(clauseText.replace(/\s+/g, '').slice(0, 30));
-        points.push({ title: pattern.title, original_clause: clauseText, legal_reference: pattern.legal_reference, dispute_rationale: pattern.dispute_rationale, plain_language: pattern.plain_language, severity: pattern.severity });
-    }
-    analysisResult.dispute_points = points;
-};
-
-const normalizeAnalysisResult = (result) => {
-    const raw = result || {};
-    const points = raw.dispute_points || [];
-    const highCount = points.filter(p => String(p.severity || '').includes('高') || String(p.severity || '').includes('high')).length;
-    const medCount = points.filter(p => String(p.severity || '').includes('中') || String(p.severity || '').includes('medium')).length;
-    const lowCount = points.filter(p => String(p.severity || '').includes('低') || String(p.severity || '').includes('low')).length;
-    const totalCount = points.length;
-    // 加权风险评分：高=10、中=3、低=1；多个中风险叠加可超过单个高风险
-    const riskScore = points.reduce((sum, p) => {
-        const sev = String(p.severity || '').trim();
-        return sum + (RISK_WEIGHTS[sev] || 0);
-    }, 0);
-    let overall_risk_level = typeof raw.overall_risk_level === 'string' ? raw.overall_risk_level.trim() : '';
-    if (!overall_risk_level || !['高','中','低','high','medium','low'].includes(overall_risk_level)) {
-        if (riskScore >= 20) overall_risk_level = '高';
-        else if (riskScore >= 5) overall_risk_level = '中';
-        else overall_risk_level = '低';
-    }
-    let overall_summary = typeof raw.overall_summary === 'string' ? raw.overall_summary.trim() : '';
-    if (!overall_summary && totalCount > 0) {
-        const levelMap = { '高': '高风险', '中': '中等风险', '低': '低风险', 'high': '高风险', 'medium': '中等风险', 'low': '低风险' };
-        const levelLabel = levelMap[overall_risk_level] || '风险';
-        overall_summary = `本合同经 AI 深度审查，共识别出 ${totalCount} 项需关注条款，其中高风险 ${highCount} 项、中风险 ${medCount} 项、低风险 ${lowCount} 项（综合风险评分：${riskScore}）。整体评定为${levelLabel}合同，建议优先处理高风险条款，重点关注试用期工资、合同解除权、竞业限制等核心权益条款。`;
-    }
-    return { overall_summary, overall_risk_level, dispute_points: points, missing_clauses: Array.isArray(raw.missing_clauses) ? raw.missing_clauses : [], party_review: Array.isArray(raw.party_review) ? raw.party_review : [], modification_suggestions: Array.isArray(raw.modification_suggestions) ? raw.modification_suggestions : [], breach_cost_analysis: Array.isArray(raw.breach_cost_analysis) ? raw.breach_cost_analysis : [], seal_analysis: Array.isArray(raw.seal_analysis) ? raw.seal_analysis : [], relevant_laws: Array.isArray(raw.relevant_laws) ? raw.relevant_laws : [], company_review: Array.isArray(raw.company_review) ? raw.company_review : [] };
-};
+const normalizeAnalysisResult = (result) => ({
+    dispute_points: Array.isArray(result.dispute_points) ? result.dispute_points : [],
+    missing_clauses: Array.isArray(result.missing_clauses) ? result.missing_clauses : [],
+    party_review: Array.isArray(result.party_review) ? result.party_review : [],
+    modification_suggestions: Array.isArray(result.modification_suggestions) ? result.modification_suggestions : [],
+    breach_cost_analysis: Array.isArray(result.breach_cost_analysis) ? result.breach_cost_analysis : [],
+    seal_analysis: Array.isArray(result.seal_analysis) ? result.seal_analysis : [],
+    relevant_laws: Array.isArray(result.relevant_laws) ? result.relevant_laws : [],
+    company_review: Array.isArray(result.company_review) ? result.company_review : [],
+});
 
 router.post('/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).send('No file uploaded.');
-    // userId 强制来自 JWT token（经过 authMiddleware 验证），不接受 req.body.userId
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ error: 'User ID is required for upload.' });
-    const { groupId } = req.body;
+    const { userId, groupId } = req.body;
+    if (!userId) return res.status(400).json({ error: 'User ID is required for upload.' });
 
     try {
         const contractRecord = await db.transaction(async (trx) => {
             const safeUserId = await ensureUploadUser(trx, userId);
             const originalFilenameDecoded = iconv.decode(Buffer.from(req.file.originalname, 'binary'), 'utf-8');
             const documentKey = uuidv4();
-
-            // .doc → .docx 转换：WPS WebOffice 不支持 .doc 格式
-            let storagePath = req.file.path;
-            const fileExt = path.extname(originalFilenameDecoded).toLowerCase();
-            if (fileExt === '.doc' || fileExt === '.wps') {
-                const docxPath = storagePath.replace(/\.\w+$/, '') + '.docx';
-                try {
-                    const text = await extractTextFromFile(storagePath);
-                    // 使用 docx 包生成完整 OOXML，确保 WPS 可正常渲染
-                    const { Document, Packer, Paragraph, TextRun } = require('docx');
-                    const lines = text.split('\n');
-                    const paragraphs = lines.map(line => {
-                        const trimmed = line.trim();
-                        if (!trimmed) return new Paragraph({ spacing: { after: 120 } });
-                        return new Paragraph({
-                            spacing: { after: 80, line: 360 },
-                            children: [new TextRun({ text: trimmed, font: '宋体', size: 24 })],
-                        });
-                    });
-                    const doc = new Document({
-                        styles: {
-                            default: {
-                                document: {
-                                    run: { font: '宋体', size: 24 },
-                                    paragraph: { spacing: { line: 360 } },
-                                },
-                            },
-                        },
-                        sections: [{ children: paragraphs }],
-                    });
-                    const buffer = await Packer.toBuffer(doc);
-                    fs.writeFileSync(docxPath, buffer);
-                    // 删除原始 .doc 文件
-                    try { fs.unlinkSync(storagePath); } catch {}
-                    storagePath = docxPath;
-                    console.log(`[UPLOAD] Converted .doc to proper DOCX: ${docxPath} (${buffer.length} bytes)`);
-                } catch (convErr) {
-                    console.warn('[UPLOAD] .doc conversion failed, falling back to original:', convErr.message);
-                }
-            }
             const [newContract] = await trx('contracts').insert({
                 user_id: safeUserId,
                 original_filename: originalFilenameDecoded,
-                storage_path: storagePath,
+                storage_path: req.file.path,
                 document_key: documentKey,
                 group_id: groupId || null,
                 status: 'Uploaded',
@@ -1225,23 +1281,21 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         res.status(201).json({
             message: '文件已上传，编辑器配置已生成。',
             contractId: contractRecord.id,
-            original_filename: contractRecord.original_filename,
-            editorConfig: buildWpsEditorConfig(contractRecord, ext),
+            editorConfig: buildOnlyOfficeConfig(contractRecord, ext),
         });
     } catch (error) {
         if (error.message === 'INVALID_USER_ID') {
             return res.status(400).json({ error: 'Invalid user ID for upload.' });
         }
-        console.error('[ERROR] Error processing upload for WPS WebOffice:', error);
+        console.error('[ERROR] Error processing upload for OnlyOffice:', error);
         res.status(500).json({ error: 'Server error during file upload.' });
     }
 });
 
-// WPS WebOffice v3 协议通过回调自动处理保存，此端点为前端备用
 router.post('/save-callback', async (req, res) => {
     try {
         const body = req.body;
-        console.log('[WPS WebOffice] save callback:', {
+        console.log('[OnlyOffice] save callback:', {
             status: body.status,
             key: body.key,
             hasUrl: Boolean(body.url),
@@ -1258,9 +1312,9 @@ router.post('/save-callback', async (req, res) => {
                     writer.on('error', reject);
                 });
                 await db('contracts').where({ id: contract.id }).update({ updated_at: db.fn.now() });
-                console.log(`[WPS] saved file for contract ${contract.id} from status ${body.status}`);
+                console.log(`[OnlyOffice] saved file for contract ${contract.id} from status ${body.status}`);
             } else {
-                console.warn('[WPS] save callback skipped: contract or download url missing');
+                console.warn('[OnlyOffice] save callback skipped: contract or download url missing');
             }
         }
         res.status(200).json({ error: 0 });
@@ -1432,23 +1486,8 @@ ${documents.map((doc, index) => `[DOCUMENT_${index + 1}: ${doc.filename}]\n${wra
     }
 });
 
-// 加载自定义规则（来自 review_rules 表）
-const loadCustomRule = async (db, templateId) => {
-    if (!String(templateId || '').startsWith('custom-')) return null;
-    const numericId = Number(String(templateId).replace('custom-', ''));
-    if (!Number.isInteger(numericId) || numericId <= 0) return null;
-    const rule = await db('review_rules').where({ id: numericId, is_enabled: true }).first();
-    if (!rule) return null;
-    return {
-        ...rule,
-        review_points: parseJsonField(rule.review_points, []),
-        core_purposes: parseJsonField(rule.core_purposes, []),
-        prompt_rules: parseJsonField(rule.prompt_rules, []),
-    };
-};
-
 router.post('/pre-analyze', async (req, res) => {
-    const { contractId, templateId } = req.body;
+    const { contractId } = req.body;
     if (!contractId) return res.status(400).json({ error: 'Contract ID is required.' });
     const userId = requireRequestUserId(req, res);
     if (!userId) return;
@@ -1503,34 +1542,17 @@ ${wrapContractContent(plainText)}
 ---`;
         const analysisResult = await callJsonLLM(prompt);
         const template = matchTemplate(analysisResult.contract_type, plainText);
-        // 加载用户选择的自定义规则（优先级最高）
-        const customRule = await loadCustomRule(db, templateId);
-        // 确定最终使用的模板ID：自定义规则 > 自动匹配的内置模板
-        analysisResult.template_id = customRule ? templateId : (template?.id || 'general');
-        analysisResult.template_name = customRule ? customRule.name : (template?.name || '通用合同审查模板');
+        analysisResult.template_id = template?.id || 'general';
+        analysisResult.template_name = template?.name || '通用合同审查模板';
         analysisResult.available_templates = undefined;
-        // 自定义规则的审查点优先级：用户配置 > LLM推荐 > 模板默认
         analysisResult.suggested_review_points = Array.from(new Set([
-            ...(customRule?.review_points || []),           // 1. 自定义规则（最高优先）
-            ...(analysisResult.suggested_review_points || []), // 2. LLM推荐
-            ...(template?.review_points || []),             // 3. 内置模板兜底
+            ...(template?.review_points || []),
+            ...(analysisResult.suggested_review_points || []),
         ]));
-        // 核心目的同样合并
         analysisResult.suggested_core_purposes = Array.from(new Set([
-            ...(customRule?.core_purposes || []),
-            ...(analysisResult.suggested_core_purposes || []),
             ...(template?.core_purposes || []),
+            ...(analysisResult.suggested_core_purposes || []),
         ]));
-        // 将自定义规则的额外指令透传给审查阶段
-        if (customRule?.prompt_rules?.length) {
-            analysisResult.prompt_rules = customRule.prompt_rules;
-        }
-        // 标识是否使用了自定义规则（供前端显示）
-        if (customRule) {
-            analysisResult.using_custom_rule = true;
-            analysisResult.custom_rule_id = customRule.id;
-            analysisResult.custom_rule_name = customRule.name;
-        }
         analysisResult.text_stats = textStats;
 
         await db('contracts').where({ id: contractId }).update({
@@ -1546,267 +1568,98 @@ ${wrapContractContent(plainText)}
     }
 });
 
-// 将合同正文按章节拆分为若干组（每组 500-1200 字，约 3-5 个条款）
-const splitContractIntoSections = (plainText) => {
-    if (!plainText || typeof plainText !== 'string') return [];
-    const text = plainText.trim();
-    if (text.length < 200) return [{ index: 0, title: '全文', content: text, combinedContent: text }];
-    const clausePattern = /((?:^|\n)[ \t]*(?:第[一二三四五六七八九十百零\d]+[条章节款])|(?:^|\n)[ \t]*(?:一\s*[、.。]|二\s*[、.。]|三\s*[、.。]|四\s*[、.。]|五\s*[、.。]|六\s*[、.。]|七\s*[、.。]|八\s*[、.。]))/gm;
-    const matches = [{ offset: 0 }, ...Array.from(text.matchAll(clausePattern)).map(m => ({ offset: m.index, text: m[1] }))];
-    const sections = [];
-    for (let i = 0; i < matches.length; i++) {
-        const start = matches[i].offset;
-        const end = i + 1 < matches.length ? matches[i + 1].offset : text.length;
-        const content = text.slice(start, end).trim();
-        const sectionTitle = matches[i].text ? matches[i].text.replace(/[\n\r\s]+/g, ' ').trim() : `第${i + 1}段`;
-        if (content.length >= 50) sections.push({ index: sections.length, title: sectionTitle, content });
+// ============ 逐节结果合并工具 (Step B + C) ============
+
+/**
+ * 将两节审查结果合并，按标题去重 + 跨段线索记入附加信息
+ */
+const mergeSectionResults = (acc, current, clues) => {
+    const result = {
+        dispute_points: [...(acc.dispute_points || [])],
+        missing_clauses: [...(acc.missing_clauses || [])],
+        party_review: [...(acc.party_review || [])],
+        modification_suggestions: [...(acc.modification_suggestions || [])],
+        breach_cost_analysis: [...(acc.breach_cost_analysis || [])],
+    };
+
+    // 添加新发现的 dispute_points（按标题去重）
+    for (const dp of (current.dispute_points || [])) {
+        const exists = result.dispute_points.some(
+            (e) => e.title === dp.title || (dp.title && e.title && e.title.includes(dp.title.slice(0, 10))),
+        );
+        if (!exists) result.dispute_points.push(dp);
     }
-    if (sections.length < 3) {
-        const chunkSize = 800, overlap = 100, batches = [];
-        for (let i = 0; i < text.length; i += chunkSize - overlap) {
-            const content = text.slice(i, Math.min(i + chunkSize, text.length)).trim();
-            if (content.length >= 100) batches.push({ index: batches.length, title: `第${batches.length + 1}部分`, content, combinedContent: content });
-            if (i + chunkSize >= text.length) break;
-        }
-        return batches;
+
+    // 添加缺失条款（直接合并，一般不会重复）
+    for (const mc of (current.missing_clauses || [])) {
+        result.missing_clauses.push(mc);
     }
-    const batches = [];
-    let currentBatch = { sections: [], combinedContent: '', titles: [], startIdx: 0 };
-    let currentSize = 0;
-    const TARGET_SIZE = 1200;
-    for (const section of sections) {
-        if (currentSize + section.content.length > TARGET_SIZE && currentSize > 0) { batches.push(currentBatch); currentBatch = { sections: [], combinedContent: '', titles: [], startIdx: batches.length }; currentSize = 0; }
-        currentBatch.sections.push(section);
-        currentBatch.titles.push(section.title);
-        currentBatch.combinedContent += (currentBatch.combinedContent ? '\n' : '') + section.content;
-        currentSize += section.content.length;
+
+    // 添加主体审查（去重）
+    for (const pr of (current.party_review || [])) {
+        const exists = result.party_review.some(
+            (e) => e.title === pr.title,
+        );
+        if (!exists) result.party_review.push(pr);
     }
-    if (currentBatch.sections.length > 0) batches.push(currentBatch);
-    return batches;
+
+    // 添加修改建议（按 original_text 去重）
+    for (const ms of (current.modification_suggestions || [])) {
+        const exists = result.modification_suggestions.some(
+            (e) => e.original_text && ms.original_text && e.original_text.slice(0, 30) === ms.original_text.slice(0, 30),
+        );
+        if (!exists) result.modification_suggestions.push(ms);
+    }
+
+    // 添加违约成本分析（按 scenario 去重）
+    for (const bc of (current.breach_cost_analysis || [])) {
+        const exists = result.breach_cost_analysis.some(
+            (e) => e.scenario === bc.scenario,
+        );
+        if (!exists) result.breach_cost_analysis.push(bc);
+    }
+
+    return result;
 };
 
-// 并发控制：限制同时进行的 LLM 调用数，避免 API 限流
-const LLM_CONCURRENCY = Math.max(1, Number(process.env.LLM_CONCURRENCY || 3));
-const parallelLimit = async (tasks, limit = LLM_CONCURRENCY) => {
-  const results = [];
-  const executing = new Set();
-  for (const [i, task] of tasks.entries()) {
-    const p = task().then(r => { results[i] = r; executing.delete(p); }, e => { results[i] = Promise.reject(e); executing.delete(p); });
-    executing.add(p);
-    if (executing.size >= limit) await Promise.race(executing);
-  }
-  await Promise.all(executing);
-  return results;
-};
-
-// 逐组并行审查：每个 batch 并行调用 LLM，聚合所有 dispute_points
-const batchReviewSections = async (batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLMFn) => {
-    const knowledgeContext = relevantKnowledge.length > 0
-        ? relevantKnowledge.map((item, idx) => `[${idx + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n')
-        : '未检索到直接依据。';
-    const clauseChecklist = (template.missing_clause_checklist || []).join('；');
-    const buildBatchPrompt = (batchContent, batchIdx, totalBatches) => `你是资深法务专家，请对以下合同章节（第 ${batchIdx + 1}/${totalBatches} 组）进行深度专项审查，并只输出 JSON。
-
-审查模板：${template.name}
-合同类型：${template.name}
-用户立场：${userPerspective}
-审查点：${reviewPoints.join('；')}
-审查目的：${corePurposes.join('；')}
-模板规则：${(template.prompt_rules || []).join('；')}
-
-法律依据（仅引用以下内容，不得虚构）：
-${knowledgeContext}
-
-待审查章节内容：
----
-${batchContent.slice(0, 3000)}
----
-
-【severity 判定标准】（必须严格遵守）：
-  · 高（红色）：违反法律强制性规定（如劳动法、合同法禁止性条款）、导致合同无效或部分无效、剥夺对方核心权利、2N赔偿风险、格式霸王条款
-  · 中（橙色）：明显不公平、加重一方责任、模糊表述存在重大争议风险、程序性违规
-  · 低（绿色）：措辞不够严谨、建议优化但不影响合同效力
-  · 评分必须同时满足：title + original_clause + legal_reference + dispute_rationale 四个字段完整，非简单套用标签
-
-【修改建议格式规范】（每条 modification_suggestions 必须严格包含以下字段）：
-  · original_text: 原文中连续完整的 1-3 个句子（不可截断单词，须包含主谓宾完整结构，用于前端原文定位高亮）
-  · highlight_segment: 原文中需要修改的具体短语（ ≤20 字，用于前端定位锚点）
-  · suggested_text: 可直接复制粘贴到合同的完整替换段落（包含必要上下文，若无法给出则填空字符串 ""，禁止只写"建议修改"等描述性文字）
-  · reason: 修改理由（简明，1-2 句）
-  · plain_language: 大白话解释（1-2 句）
-  · severity: 复制对应 dispute_points 的 severity 值（高/中/低）
-
-【缺失条款检查】：请逐一核对以下标准条款是否在合同中体现，若缺失请在 missing_clauses 中列出：
-${clauseChecklist || '合同标的、价款支付、履行期限、违约责任、争议解决、通知方式、不可抗力'}
-
-硬性要求：
-- 必须识别所有类型的风险（违法条款/霸王条款/不公平条款/缺失条款/程序性违规），即使是常见条款也不能跳过。
-- 重点关注：单方解释权、无偿解除、强制加班、限制生育、押金扣押、单方变更权等典型霸王条款。
-- 如果该章节无任何风险，请在 dispute_points 中返回一个空数组 []。
-- 【核心要求】所有高风险（severity: "高"）的 dispute_points 条目，必须同时在 modification_suggestions 中输出一条对应条目，且 suggested_text 不得为空字符串（不可缺省）。
-- 只输出 JSON，不输出 markdown 包裹。
-
-输出 JSON 结构：
-{
-  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
-  "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
-  "modification_suggestions": [{"title":"建议标题","original_text":"原文完整句子（必须）","highlight_segment":"修改锚点（≤20字）","suggested_text":"推荐替换文本（必须，若无则空字符串）","reason":"修改理由","plain_language":"大白话说明","severity":"高/中/低"}]
-}`;
-    const totalBatches = batches.length;
-    const prompts = batches.map((batch, idx) => {
-      const content = String(batch.content || batch.combinedContent || '');
-      const titleContext = batch.titles?.length ? `所属章节：${batch.titles.join('、')}\n\n` : '';
-      return buildBatchPrompt(content.length >= 50 ? titleContext + content : content, idx, totalBatches);
-    });
-    const batchResults = await parallelLimit(prompts.map(p => () => callJsonLLMFn(p)));
-    const allDisputePoints = [], allMissingClauses = [], allModificationSuggestions = [];
-    const seenClauseKeys = new Set();
-    const addIfNotDuplicate = (arr, item, keyField) => {
-        if (!item || typeof item !== 'object') return;
-        const key = (item[keyField] || '').replace(/\s+/g, '').slice(0, 30);
-        if (!key || seenClauseKeys.has(key)) return;
-        const dupKey = `${item.title || ''}_${key}`;
-        if (seenClauseKeys.has(dupKey)) return;
-        seenClauseKeys.add(dupKey); seenClauseKeys.add(key); arr.push(item);
-    };
-    for (const result of batchResults) {
-        if (!result) continue;
-        if (Array.isArray(result.dispute_points)) result.dispute_points.forEach(p => addIfNotDuplicate(allDisputePoints, p, 'original_clause'));
-        if (Array.isArray(result.missing_clauses)) result.missing_clauses.forEach(c => { if (c && typeof c === 'object') allMissingClauses.push(c); });
-        if (Array.isArray(result.modification_suggestions)) result.modification_suggestions.forEach(s => addIfNotDuplicate(allModificationSuggestions, s, 'original_text'));
-    }
-    return { dispute_points: allDisputePoints, missing_clauses: allMissingClauses, modification_suggestions: allModificationSuggestions, batch_count: totalBatches };
-};
-
-// 带进度回调的分组审查 — 顺序执行每个 batch，每完成一个就回调进度
-// 解决 llm_review 阶段长时间无进度推送导致前端 socket 超时回退问题
-const batchReviewSectionsWithProgress = async (batches, template, userPerspective, relevantKnowledge, reviewPoints, corePurposes, callJsonLLMFn, onProgress) => {
-    const knowledgeContext = relevantKnowledge.length > 0
-        ? relevantKnowledge.map((item, idx) => `[${idx + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n')
-        : '未检索到直接依据。';
-
-    const clauseChecklist = (template.missing_clause_checklist || []).join('；');
-
-    // 构建跨 batch 上下文（前序已识别风险标题，避免重复）
-    const buildCrossBatchContext = (allDisputePointsSoFar) => {
-        if (!allDisputePointsSoFar.length) return '';
-        const titles = allDisputePointsSoFar.map(p => p.title).slice(-8);
-        return `\n\n【前序章节已识别风险】（避免重复，下方风险若已在列表中出现请跳过）：\n${titles.join('；')}。`;
+/**
+ * 全局去重合并 + 风险排序（用于综合会诊前的预清理）
+ */
+const deduplicateSectionResults = (merged) => {
+    const result = {
+        dispute_points: [],
+        missing_clauses: [...(merged.missing_clauses || [])],
+        party_review: [...(merged.party_review || [])],
+        modification_suggestions: [],
+        breach_cost_analysis: [...(merged.breach_cost_analysis || [])],
     };
 
-    const buildBatchPrompt = (batchContent, batchIdx, totalBatches, allDisputePointsSoFar) => {
-        const crossContext = buildCrossBatchContext(allDisputePointsSoFar);
-        return `你是资深法务专家，请对以下合同章节（第 ${batchIdx + 1}/${totalBatches} 组）进行深度专项审查，并只输出 JSON。
-${crossContext}
-审查模板：${template.name}
-合同类型：${template.name}
-用户立场：${userPerspective}
-审查点：${reviewPoints.join('；')}
-审查目的：${corePurposes.join('；')}
-模板规则：${(template.prompt_rules || []).join('；')}
-
-法律依据（仅引用以下内容，不得虚构）：
-${knowledgeContext}
-
-待审查章节内容：
----
-${batchContent.slice(0, 3000)}
----
-
-【severity 判定标准】（必须严格遵守）：
-  · 高（红色）：违反法律强制性规定（如劳动法、合同法禁止性条款）、导致合同无效或部分无效、剥夺对方核心权利、2N赔偿风险、格式霸王条款
-  · 中（橙色）：明显不公平、加重一方责任、模糊表述存在重大争议风险、程序性违规
-  · 低（绿色）：措辞不够严谨、建议优化但不影响合同效力
-  · 评分必须同时满足：title + original_clause + legal_reference + dispute_rationale 四个字段完整，非简单套用标签
-
-【修改建议格式规范】（每条 modification_suggestions 必须严格包含以下字段）：
-  · original_text: 原文中连续完整的 1-3 个句子（不可截断单词，须包含主谓宾完整结构，用于前端原文定位高亮）
-  · highlight_segment: 原文中需要修改的具体短语（ ≤20 字，用于前端定位锚点，建议从 original_text 中提取最具识别性的片段）
-  · suggested_text: 可直接复制粘贴到合同的完整替换段落（包含必要上下文，若无法给出则填空字符串 ""，禁止只写"建议修改"等描述性文字）
-  · reason: 修改理由（简明，1-2 句）
-  · plain_language: 大白话解释（1-2 句）
-  · severity: 复制对应 dispute_points 的 severity 值（高/中/低）
-
-【缺失条款检查】：请逐一核对以下标准条款是否在合同中体现，若缺失请在 missing_clauses 中列出：
-${clauseChecklist || '合同标的、价款支付、履行期限、违约责任、争议解决、通知方式、不可抗力'}
-
-硬性要求：
-- 必须识别所有类型的风险（违法条款/霸王条款/不公平条款/缺失条款/程序性违规），即使是常见条款也不能跳过。
-- 重点关注：单方解释权、无偿解除、强制加班、限制生育、押金扣押、单方变更权等典型霸王条款。
-- 如果该章节无任何风险，请在 dispute_points 中返回一个空数组 []。
-- 【核心要求】所有高风险（severity: "高"）的 dispute_points 条目，必须同时在 modification_suggestions 中输出一条对应条目，且 suggested_text 不得为空字符串（不可缺省）。
-- 只输出 JSON，不输出 markdown 包裹。
-
-输出 JSON 结构：
-{
-  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
-  "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
-  "modification_suggestions": [{"title":"建议标题","original_text":"原文完整句子（必须）","highlight_segment":"修改锚点（≤20字）","suggested_text":"推荐替换文本（必须，若无则空字符串）","reason":"修改理由","plain_language":"大白话说明","severity":"高/中/低"}]
-}`;
-    };
-
-    const totalBatches = batches.length;
-    const allDisputePoints = [], allMissingClauses = [], allModificationSuggestions = [];
-    const seenClauseKeys = new Set();
-    const addIfNotDuplicate = (arr, item, keyField) => {
-        if (!item || typeof item !== 'object') return;
-        const key = (item[keyField] || '').replace(/\s+/g, '').slice(0, 30);
-        if (!key || seenClauseKeys.has(key)) return;
-        const dupKey = `${item.title || ''}_${key}`;
-        if (seenClauseKeys.has(dupKey)) return;
-        seenClauseKeys.add(dupKey); seenClauseKeys.add(key); arr.push(item);
-    };
-
-    // 顺序执行每个 batch，每完成一个回调进度（推送 socket 保持连接活跃）
-    for (let idx = 0; idx < batches.length; idx++) {
-        const batch = batches[idx];
-        let content = String(batch.content || batch.combinedContent || '');
-        const titleContext = batch.titles?.length ? `所属章节：${batch.titles.join('、')}\n\n` : '';
-        const prompt = buildBatchPrompt(content.length >= 50 ? titleContext + content : content, idx, totalBatches, allDisputePoints);
-        try {
-            const result = await callJsonLLMFn(prompt);
-            if (result) {
-                if (Array.isArray(result.dispute_points)) result.dispute_points.forEach(p => addIfNotDuplicate(allDisputePoints, p, 'original_clause'));
-                if (Array.isArray(result.missing_clauses)) result.missing_clauses.forEach(c => { if (c && typeof c === 'object') allMissingClauses.push(c); });
-                if (Array.isArray(result.modification_suggestions)) result.modification_suggestions.forEach(s => addIfNotDuplicate(allModificationSuggestions, s, 'original_text'));
-            }
-        } catch (e) {
-            console.warn(`[Progress Review] Batch ${idx + 1}/${totalBatches} failed:`, e.message);
-        }
-        // 每完成一个 batch 回调进度，保持 socket 活跃
-        if (typeof onProgress === 'function') {
-            try { onProgress(idx + 1, totalBatches); } catch {}
+    // dispute_points 按标题去重，保留最高 severity
+    const dpMap = new Map();
+    for (const dp of (merged.dispute_points || [])) {
+        const key = (dp.title || '').replace(/\s+/g, '').slice(0, 20);
+        const existing = dpMap.get(key);
+        const severityOrder = { '高': 3, '中': 2, '低': 1 };
+        if (!existing || (severityOrder[dp.severity] || 0) > (severityOrder[existing.severity] || 0)) {
+            dpMap.set(key, dp);
         }
     }
-    return { dispute_points: allDisputePoints, missing_clauses: allMissingClauses, modification_suggestions: allModificationSuggestions, batch_count: totalBatches };
-};
+    // 排序：高 → 中 → 低
+    const severityPriority = { '高': 0, '中': 1, '低': 2 };
+    result.dispute_points = Array.from(dpMap.values()).sort(
+        (a, b) => (severityPriority[a.severity] || 99) - (severityPriority[b.severity] || 99),
+    );
 
-// 轻量内存任务队列：大合同分析不阻塞主事件循环
-class AnalysisTaskQueue {
-  constructor(concurrency = 2) {
-    this.concurrency = concurrency;
-    this.queue = [];
-    this.running = 0;
-  }
-  enqueue(task) {
-    return new Promise((resolve, reject) => {
-      this.queue.push({ task, resolve, reject });
-      this.processNext();
-    });
-  }
-  processNext() {
-    if (this.running >= this.concurrency || this.queue.length === 0) return;
-    this.running++;
-    const { task, resolve, reject } = this.queue.shift();
-    Promise.resolve().then(() => task())
-      .then(resolve, reject)
-      .finally(() => {
-        this.running--;
-        this.processNext();
-      });
-  }
-}
-const analysisTaskQueue = new AnalysisTaskQueue(2);
+    // modification_suggestions 按 original_text 去重
+    const msMap = new Map();
+    for (const ms of (merged.modification_suggestions || [])) {
+        const key = (ms.original_text || '').replace(/\s+/g, '').slice(0, 30);
+        if (!msMap.has(key)) msMap.set(key, ms);
+    }
+    result.modification_suggestions = Array.from(msMap.values());
+
+    return result;
+};
 
 // 后台异步执行合同审查（不阻塞 HTTP 响应）
 const runAnalysisInBackground = async (contractId, userId, userPerspective, preAnalysisData) => {
@@ -1834,20 +1687,18 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
         const template = getTemplateById(preAnalysisData.template_id) || matchTemplate(preAnalysisData.contract_type, plainText);
         const reviewPoints = preAnalysisData.reviewPoints?.length ? preAnalysisData.reviewPoints : template.review_points;
         const corePurposes = preAnalysisData.core_purposes?.length ? preAnalysisData.core_purposes : template.core_purposes;
-        // prompt_rules 优先用 preAnalysisData（来自自定义规则），其次用模板内置
-        const promptRules = (preAnalysisData.prompt_rules?.length ? preAnalysisData.prompt_rules : (template.prompt_rules || []));
 
-        // Step 2: 检索法条与案例依据
-        await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'running', message: '正在检索法条与案例依据...' });
-        // 分析整个合同，法律条文适当增加检索范围，如果后续需要，再增加检索数量 30 -> n
-        const relevantKnowledge = await getRelevantKnowledge({
-            text: plainText,
+        // Step 2: 逐节 Multi-Query 知识检索（替代原来单次检索）
+        await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'running', message: '正在按合同结构逐节检索法条与案例依据（分节多角度检索，覆盖率更高）...' });
+        const sections = splitContractIntoSections(plainText);
+        await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'running', message: `合同已分为 ${sections.length} 节，正在进行多角度知识检索...` });
+        const relevantKnowledge = await multiSectionKnowledgeRetrieval(plainText, {
             contractType: preAnalysisData.contract_type,
             reviewPoints,
             corePurposes,
             perspective: userPerspective,
-        }, 40);
-        await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'completed', message: `法条与案例依据检索已完成（${relevantKnowledge.length} 条）。`, partialResult: { relevant_laws: annotateKnowledgeUpdates(relevantKnowledge) } });
+        });
+        await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'completed', message: `逐节 Multi-Query 知识检索已完成（${sections.length} 节 × 多角度查询，合并去重后 ${relevantKnowledge.length} 条依据）。`, partialResult: { relevant_laws: annotateKnowledgeUpdates(relevantKnowledge) } });
 
         // Step 3: 核验合同主体信息
         await emitAnalysisProgress(null, contractId, { step: 'company_search', status: 'running', message: '正在核验合同主体信息...' });
@@ -1863,67 +1714,340 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
             return `${index + 1}. ${company.companyName}\n${evidence || '未检索到可用外部证据'}`;
         }).join('\n');
 
-        // Step 4: AI 逐组并行审查（替代一次性全篇审查，解决上下文过载导致的漏检问题）
-        // 首次 emit 用 40%（前3步累计权重），与后续 batch 回调起点一致，防止进度回退（65%→40%）
-        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', percent: 40, message: 'AI 正在分章节深度审查合同，请耐心等待...' });
+        // ========== Step B + C: 逐节链式审查 + 综合会诊 ==========
+        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', message: `AI 正在逐节深度审查 ${sections.length} 个合同章节，每节独立聚焦，避免信息淹没...` });
 
-        // 按章节/条款拆分合同正文为若干 batch，并行审查每个 batch
-        const batches = splitContractIntoSections(plainText);
-        const reviewResults = await batchReviewSectionsWithProgress(
-            batches, { ...template, prompt_rules: promptRules }, userPerspective, relevantKnowledge,
-            reviewPoints, corePurposes, callJsonLLM,
-            // 每完成一组 batch 推送一次进度，防止 socket 超时导致前端子%回退
-            (completed, total) => {
-                const pct = Math.round((completed / total) * 100);
-                // 百分比映射到 llm_review 阶段（权重50%），范围=前3步累积(40%)~前3步+llm(90%)
-                const overallPct = 40 + Math.round(pct * 0.5);
-                emitAnalysisProgress(null, contractId, {
-                    step: 'llm_review', status: 'running',
-                    message: `AI 正在分章节深度审查合同（已完成 ${completed}/${total} 组）...`,
-                    percent: overallPct,
-                }).catch(() => {});
+        // 构造主体审查补充 prompt（供 fallback 使用）
+        const subjectSearchPrompt = `
+
+主体外部检索证据（来自 Bing/Baidu 搜索，已做基础真实性评分；只能把 verified=true 或可信度较高的结果作为主体审查线索，不能当作最终工商登记结论）：
+${companySearchContext || '未识别到可检索的公司主体名称。'}
+
+请额外输出 company_review 字段，结构为 [{"company_name":"公司名称","status":"已检索/未检索到可靠证据","evidence_summary":"基于外部搜索证据的主体核验摘要","authenticity":"真实性检测结论","sources":["URL"]}]。`;
+
+        // 构建标准审查 JSON schema 说明
+        const reviewSchemaDoc = `{
+  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
+  "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
+  "party_review": [{"title":"主体审查项","description":"审查结论","plain_language":"大白话说明"}],
+  "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}],
+  "breach_cost_analysis": [{"scenario":"违约场景","legal_basis":"依据","estimated_cost":"预计成本"}]
+}`;
+
+        const sectionReviewRules = `硬性要求：
+- modification_suggestions 每一项必须包含 original_text 和 suggested_text。
+- original_text 必须尽量逐字摘录合同原文中的完整句子或段落，用于 OnlyOffice 定位、书签和批注锚点。
+- 如果没有检索依据，不得编造法条或案例，只能说明"当前知识库未检索到直接依据"。
+- 不输出自然语言解释，不输出 markdown。
+- 每节审查仅针对当前节展示的合同段落，不要跨段审查。`;
+
+        // 将全库依据按法条分配到各节
+        const sectionKnowledgeMap = new Map();
+        for (const lawItem of relevantKnowledge) {
+            // 找到最匹配的节：法条 clause 或标题中含有关键词
+            const lawTerms = `${lawItem.law} ${lawItem.clause || ''} ${lawItem.content}`;
+            let bestSection = null;
+            let bestScore = 0;
+            for (const sec of sections) {
+                const secText = `${sec.title} ${sec.content}`;
+                let score = 0;
+                // 法条 clause 号匹配节标题（如 第四条 ↔ "第四条"）
+                if (lawItem.clause && secText.includes(lawItem.clause)) score += 3;
+                // 法条标题匹配（如 民法典 ↔ "适用民法典"）
+                if (lawItem.law && secText.includes(lawItem.law.replace(/^中华人民共和国/, '').slice(0, 8))) score += 2;
+                // 关键词命中 — 扩展关键词列表，支持劳动法专用词
+                const LABOR_KEYWORDS = [
+                    '保密', '违约', '赔偿', '管辖', '仲裁', '诉讼', '知识产权', '产权',
+                    '解除', '时效', '生效', '社保', '社会保险', '档案', '转移', '书面',
+                    '口头', '加班', '工资', '试用', '竞业', '补偿', '福利', '工时',
+                    '休假', '期限', '终止', '安全', '卫生', '变更', '辞职', '通知',
+                    '送达', '培训', '服务期', '工伤', '职业病', '医疗保险', '住房',
+                    '公积金', '经济补偿', '裁员', '罚款', '违纪', '损失', '连带',
+                ];
+                let termHits = 0;
+                for (const kw of LABOR_KEYWORDS) {
+                    if (secText.includes(kw) && (lawItem.content || '').includes(kw)) {
+                        termHits += 1;
+                    }
+                }
+                // 互补关键词匹配：合同节和法条中各含一个互补关键词（如合同写"口头"、法条写"书面"）
+                // 当互补对是直接矛盾型（书面↔口头、十五日↔三十日）时权重更高
+                const COMPLEMENTARY_PAIRS = [
+                    { pair: ['书面', '口头'], weight: 5 },    // 法律规定书面，合同写口头 — 直接违法！最高权重
+                    { pair: ['十五日', '三十日'], weight: 5 }, // 法律规定15日，合同写30日 — 直接违法！最高权重
+                    { pair: ['乙方', '甲方'], weight: 2 },
+                    { pair: ['上限', '下限'], weight: 3 },
+                    { pair: ['不低于', '高于'], weight: 3 },
+                    { pair: ['不得低于', '可以低于'], weight: 3 },
+                ];
+                for (const { pair: [a, b], weight } of COMPLEMENTARY_PAIRS) {
+                    if (secText.includes(a) && (lawItem.content || '').includes(b)) termHits += weight;
+                    if (secText.includes(b) && (lawItem.content || '').includes(a)) termHits += weight;
+                }
+                score += termHits;
+                // 节标题与法条内容的语义邻近加权：当节内容中的关键词与法条内容中的关键词重叠>=3个，额外加分
+                let sharedTermBonus = 0;
+                const secKws = LABOR_KEYWORDS.filter(kw => secText.includes(kw));
+                const lawKws = LABOR_KEYWORDS.filter(kw => (lawItem.content || '').includes(kw));
+                const sharedCount = secKws.filter(kw => lawKws.includes(kw)).length;
+                if (sharedCount >= 3) sharedTermBonus = 2;
+                if (sharedCount >= 5) sharedTermBonus = 4;
+                score += sharedTermBonus;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestSection = sec;
+                }
             }
-        );
+            if (!bestSection) bestSection = sections[0]; // fallback to first section
+            const key = bestSection.index;
+            if (!sectionKnowledgeMap.has(key)) sectionKnowledgeMap.set(key, []);
+            sectionKnowledgeMap.get(key).push(lawItem);
+        }
 
-        // 构造 analysisResult（合并 batch 结果 + 公司主体审查 + 整体摘要）
-        const analysisResult = {
-            ...normalizeAnalysisResult({ dispute_points: reviewResults.dispute_points }),
-            missing_clauses: reviewResults.missing_clauses || [],
-            modification_suggestions: reviewResults.modification_suggestions || [],
-            breach_cost_analysis: [],
-        };
+        // 逐节 LLM 链式审查
+        let chainContext = '';
+        let accumulatedResult = null;
 
-        // 添加 id 和 filtered_content 字段（供前端星法式书签 API 使用）
-        // id: 用于书签命名 risk_title_${id} / risk_edit_${id}
-        // filtered_content: 用于 WPS Find API 定位原文（优先用 anchor_hint，其次 original_text）
-        analysisResult.modification_suggestions = (analysisResult.modification_suggestions || []).map((item, idx) => ({
-            ...item,
-            id: item.id || idx,
-            filtered_content: item.filtered_content || item.anchor_hint || item.original_text || '',
-        }));
+        for (let secIdx = 0; secIdx < sections.length; secIdx += 1) {
+            const section = sections[secIdx];
+            const sectionLaws = sectionKnowledgeMap.get(section.index) || [];
+            // 每节至少保留 2 条法条、最多 5 条
+            const perSectionKnowledge = sectionLaws.length > 5
+                ? sectionLaws.slice(0, 5)
+                : (sectionLaws.length === 0 && relevantKnowledge.length > 0
+                    ? relevantKnowledge.slice(0, 2)
+                    : sectionLaws);
 
-        // 兜底检测：补充 LLM 可能遗漏的典型霸王条款
-        supplementKnownRiskPatterns(analysisResult, plainText);
+            // ===== 关键词匹配过滤审查点：只为当前节注入相关审查点 =====
+            // 构建节内容的关键词向量（提取关键名词）
+            const sectionTextForFilter = `${section.title} ${section.content}`;
+            const FILTER_KEYWORDS = [
+                '主体','资格','合同期限','固定期限','无固定期限','岗位','职责','地点','试用期',
+                '录用','薪酬','绩效','奖金','工资','加班','工时','社保','社会保险','住房','公积金',
+                '竞业','保密','知识','产权','培训','服务期','违约金','解除','终止','补偿','赔偿',
+                '规章','制度','告知','工作内容','工作地点','休息','休假','劳动报酬','计件','单价',
+                '支付','福利','待遇','劳动保护','职业病','商业秘密','变更','续订','通知','送达',
+                '争议','仲裁','诉讼','管辖','书面','口头',
+            ];
+            const sectionKeywords = new Set(
+                FILTER_KEYWORDS.filter(kw => sectionTextForFilter.includes(kw))
+            );
+            // 每个审查点有关键词匹配才保留
+            const filteredReviewPoints = reviewPoints.filter(rp => {
+                const lower = rp;
+                for (const kw of sectionKeywords) {
+                    if (lower.includes(kw)) return true;
+                }
+                // 如果节有法条匹配，保留所有审查点中含该法条关键词的
+                for (const lawItem of perSectionKnowledge) {
+                    const lawText = `${lawItem.law} ${lawItem.clause || ''} ${lawItem.content}`;
+                    for (const kw of sectionKeywords) {
+                        if (lawText.includes(kw)) return true;
+                    }
+                }
+                return false;
+            });
+            // 至少保留 3 个审查点（fallback：按法条和节内容关键词搜索匹配审查点）
+            const finalReviewPoints = filteredReviewPoints.length >= 3
+                ? filteredReviewPoints
+                : (() => {
+                    // 从法条内容提取关键词
+                    const lawKeywords = new Set();
+                    for (const lawItem of perSectionKnowledge) {
+                        const lawText = `${lawItem.law} ${lawItem.clause || ''} ${lawItem.content}`;
+                        for (const kw of FILTER_KEYWORDS) {
+                            if (lawText.includes(kw)) lawKeywords.add(kw);
+                        }
+                    }
+                    // 用节+法条关键词再过滤
+                    const allKeywords = new Set([...sectionKeywords, ...lawKeywords]);
+                    const extended = reviewPoints.filter(rp => {
+                        for (const kw of allKeywords) {
+                            if (rp.includes(kw)) return true;
+                        }
+                        return false;
+                    });
+                    // 只要有关联的审查点就用关联的，只有0时才fallback取前3个
+                    return extended.length >= 1 ? extended : reviewPoints.slice(0, 3);
+                })();
 
-        // 公司主体审查（来自 Step 3 的外部搜索结果，不依赖 LLM）
-        analysisResult.company_review = companySearchResults.map((company) => ({
-            company_name: company.companyName,
-            status: company.verifiedResults.length ? '已检索到可初步核验的主体线索' : '未检索到足够可靠的主体证据',
-            evidence_summary: company.verifiedResults[0]?.snippet || company.results[0]?.snippet || '外部搜索未返回足够证据。',
-            authenticity: company.verifiedResults.length
-                ? '存在官方或多源交叉线索，仍需以国家企业信用信息公示系统等正式渠道为准。'
-                : '搜索结果未通过基础真实性检测，不能据此下结论。',
-            sources: (company.verifiedResults.length ? company.verifiedResults : company.results).slice(0, 3).map((item) => item.url),
-        }));
+            // 审查目的同理按关键词过滤
+            const filteredPurposes = corePurposes.filter(cp => {
+                for (const kw of sectionKeywords) {
+                    if (cp.includes(kw)) return true;
+                }
+                for (const lawItem of perSectionKnowledge) {
+                    const lawText = `${lawItem.law} ${lawItem.clause || ''} ${lawItem.content}`;
+                    for (const kw of sectionKeywords) {
+                        if (lawText.includes(kw)) return true;
+                    }
+                }
+                return false;
+            });
+            const finalPurposes = filteredPurposes.length >= 1
+                ? filteredPurposes
+                : corePurposes.slice(0, 1);
 
-        analysisResult.relevant_laws = annotateKnowledgeUpdates(relevantKnowledge);
-        analysisResult.company_search = companySearchResults;
-        analysisResult.template = {
+            const sectionLabel = `${section.title || `段落 ${section.index + 1}`}`;
+            await emitAnalysisProgress(null, contractId, {
+                step: 'llm_review', status: 'running',
+                message: `逐节审查: 第 ${secIdx + 1}/${sections.length} 节「${sectionLabel}」...`,
+            });
+
+            const sectionPrompt = `你是一名资深法务专家，请逐节审查合同。当前正在审查第 ${secIdx + 1} 节「${sectionLabel}」。
+
+审查模板：
+- 模板名称：${template.name}
+- 合同类型：${preAnalysisData.contract_type}
+- 用户立场：${userPerspective}
+- 本节审查重点：${finalReviewPoints.join('；')}
+- 审查目的：${finalPurposes.join('；')}
+- 模板规则：${(template.prompt_rules || []).join('；')}
+
+法律法规依据（仅限以下，不得虚构）：
+${perSectionKnowledge.map((item, i) => `[${i + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n') || '未检索到与本节直接相关的法条依据——仅在确认确实有关联时引用知识库已有法条，否则标注"当前知识库未检索到直接依据"。'}
+
+${chainContext ? `前序章节已发现的关联风险（供参考，避免重复）：\n${chainContext}\n` : ''}
+
+本节合同原文：
+---
+${wrapContractContent(section.content)}
+---
+
+输出 JSON 结构（只输出本节相关的审查结论，inter_section_clues 为保留给综合会诊的跨段线索）：
+${reviewSchemaDoc}
+
+JSON 中额外添加 inter_section_clues 字段记录：
+- 跨段引用关系（如本条提到"详见第X条"）
+- 需要与其它条款对比的数值（赔偿上限、违约金比例等）
+- 本节与已有分析潜在冲突点
+
+${sectionReviewRules}`;
+
+            try {
+                const sectionResult = await callJsonLLM(sectionPrompt);
+                const normalized = normalizeAnalysisResult(sectionResult);
+
+                // 收集跨段线索
+                const clues = Array.isArray(sectionResult.inter_section_clues) ? sectionResult.inter_section_clues : [];
+                if (clues.length > 0) {
+                    chainContext += `\n第 ${secIdx + 1} 节「${sectionLabel}」跨段线索：${clues.map((c) => String(c).slice(0, 200)).join('；')}\n`;
+                }
+
+                // 合并到累积结果
+                if (!accumulatedResult) {
+                    accumulatedResult = normalized;
+                } else {
+                    accumulatedResult = mergeSectionResults(accumulatedResult, normalized, clues);
+                }
+            } catch (secError) {
+                console.warn(`[Section ${secIdx}] LLM review failed for "${sectionLabel}":`, secError.message);
+                // 单节失败不阻断整体，继续下一节
+            }
+        }
+
+        // 如果没有成功审查任何节，回退到全篇一次审查
+        if (!accumulatedResult) {
+            console.warn('[Step B] All section reviews failed, falling back to full-text single review');
+            const fallbackPrompt = `你是一名资深法务专家，请按审查模板对合同进行深度审查，并只输出 JSON。
+
+审查模板：
+- 模板名称：${template.name}
+- 合同类型：${preAnalysisData.contract_type}
+- 用户立场：${userPerspective}
+- 审查点：${reviewPoints.join('；')}
+- 审查目的：${corePurposes.join('；')}
+- 模板规则：${(template.prompt_rules || []).join('；')}
+- 报告结构偏好：${(template.report_sections || []).join('；')}
+
+法律与裁判依据（向量 RAG + rerank 检索结果，只能引用以下内容，不得虚构法条、案号或裁判观点）：
+${relevantKnowledge.map((item, index) => `[${index + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n') || '未检索到直接依据。'}
+
+输出 JSON 结构：
+${reviewSchemaDoc}
+
+${sectionReviewRules}
+
+合同原文：
+---
+${wrapContractContent(plainText)}
+---`;
+            accumulatedResult = normalizeAnalysisResult(await callJsonLLM(fallbackPrompt + subjectSearchPrompt));
+        }
+
+        // ========== Step C: 综合会诊 ==========
+        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'running', message: '正在综合会诊——去重合并、跨段一致性检查、风险排序...' });
+
+        // 去重合并（按标题相似度去重 + 保留最高严重度）
+        const deduplicated = deduplicateSectionResults(accumulatedResult);
+
+        // 跨段一致性检查 — 第三阶段 LLM 综合会诊
+        const crossSectionContext = chainContext || '无明显跨段关注点。';
+        const synthesisPrompt = `你是一名资深法务专家，负责将逐节审查结果做最终的跨段一致性会诊。
+
+审查模板：${template.name}
+合同类型：${preAnalysisData.contract_type}
+用户立场：${userPerspective}
+
+逐节审查汇聚的跨段线索：
+${crossSectionContext}
+
+已发现的全部风险点（${deduplicated.dispute_points.length} 项）：
+${JSON.stringify(deduplicated.dispute_points.slice(0, 20), null, 2)}
+
+缺失条款（${deduplicated.missing_clauses.length} 项）：
+${JSON.stringify(deduplicated.missing_clauses.slice(0, 10), null, 2)}
+
+修改建议（${deduplicated.modification_suggestions.length} 项）：
+${JSON.stringify(deduplicated.modification_suggestions.slice(0, 10), null, 2)}
+
+违约成本分析（${deduplicated.breach_cost_analysis.length} 项）：
+${JSON.stringify(deduplicated.breach_cost_analysis.slice(0, 5), null, 2)}
+
+综合会诊任务：
+1. 检查跨段一致性：不同章节中对同一事项（赔偿比例、管辖、价格等）的规定是否矛盾
+2. 检查交叉引用：合同各条款之间的相互引用是否匹配
+3. 修复优先级：将所有风险按严重程度重新排序，高风险置顶
+4. 补充跨段发现的全局性风险（各节单独审查时无法发现的跨章节矛盾）
+5. 最终输出去重、排序、补充后的完整 JSON
+
+输出 JSON 结构：
+${reviewSchemaDoc}
+
+${sectionReviewRules}
+
+注意：保留原有内容，只做增补、排序和去重。不要丢失任何已有发现。`;
+
+        let finalAnalysis;
+        try {
+            finalAnalysis = normalizeAnalysisResult(await callJsonLLM(synthesisPrompt));
+        } catch (synthError) {
+            console.warn('[Step C] Synthesis LLM call failed, using deduplicated results:', synthError.message);
+            finalAnalysis = deduplicated;
+        }
+
+        // 补充非审查结论字段
+        finalAnalysis.relevant_laws = annotateKnowledgeUpdates(relevantKnowledge);
+        finalAnalysis.template = {
             id: template.id,
             name: template.name,
             report_sections: template.report_sections || [],
         };
-        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'completed', message: 'AI 审查结论已生成。' });
+
+        // 主体审查（同原有逻辑，注入到结果中）
+        const analysisResult = finalAnalysis;
+        analysisResult.company_search = companySearchResults;
+        if (!analysisResult.company_review.length && companySearchResults.length) {
+            analysisResult.company_review = companySearchResults.map((company) => ({
+                company_name: company.companyName,
+                status: company.verifiedResults.length ? '已检索到可初步核验的主体线索' : '未检索到足够可靠的主体证据',
+                evidence_summary: company.verifiedResults[0]?.snippet || company.results[0]?.snippet || '外部搜索未返回足够证据。',
+                authenticity: company.verifiedResults.length ? '存在官方或多源交叉线索，仍需以国家企业信用信息公示系统等正式渠道为准。' : '搜索结果未通过基础真实性检测，不能据此下结论。',
+                sources: (company.verifiedResults.length ? company.verifiedResults : company.results).slice(0, 3).map((item) => item.url),
+            }));
+        }
+
+        await emitAnalysisProgress(null, contractId, { step: 'llm_review', status: 'completed', message: `逐节链式审查完成：${sections.length} 节逐节分析 + 综合会诊。` });
 
         // Step 5: 印章与签章核验
         await emitAnalysisProgress(null, contractId, { step: 'seal_analysis', status: 'running', message: '正在进行印章与签章核验...' });
@@ -1945,81 +2069,7 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
 
         updateAnalysisJob(contractId, { status: 'completed', result: analysisResult, percent: 100 });
         await emitAnalysisProgress(null, contractId, { step: 'finalize', status: 'completed', message: '审查结果已保存。', partialResult: analysisResult });
-
-        // Step 7: 将识别出的所有风险以批注形式写入 DOCX 文件（不改变 finalize 状态以避免进度回退）
-        const suggestions = analysisResult.modification_suggestions || [];
-        const riskPoints = analysisResult.dispute_points || [];
-        const missingClauses = analysisResult.missing_clauses || [];
-        let newEditorConfig = null;
-        const allAnnotations = [];
-        for (const s of suggestions) {
-            allAnnotations.push({
-                original_text: s.original_text,
-                body: `【AI审查—修改建议】${s.title || '修改建议'}\n建议：${s.suggested_text || ''}\n理由：${s.reason || ''}`,
-            });
-        }
-        for (const r of riskPoints) {
-            allAnnotations.push({
-                original_text: r.original_clause || '',
-                body: `【AI审查—风险】${r.title || '风险'}\n严重程度：${r.severity || '未标明'}\n说明：${r.dispute_rationale || ''}\n法律依据：${r.legal_reference || ''}\n通俗说法：${r.plain_language || ''}`,
-            });
-        }
-        for (const m of missingClauses) {
-            allAnnotations.push({
-                original_text: '',
-                body: `【AI审查—缺失条款】${m.title || '缺失条款'}\n说明：${m.description || ''}\n建议补充：${m.suggested_clause || ''}`,
-            });
-        }
-        // 判断文件是否为可批注格式（基于实际存储文件格式，而非原始文件名）
-        // .doc 文件在上传时已转换为 .docx，因此只需排除 PDF 即可
-        const storageExt = String(contract.storage_path || '').toLowerCase();
-        const isPdfStorage = storageExt.endsWith('.pdf');
-        if (allAnnotations.length > 0 && !isPdfStorage) {
-            await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'running', message: `正在将 ${allAnnotations.length} 条审查结果以批注形式写入合同文件...（修改建议 ${suggestions.length} 条，风险 ${riskPoints.length} 条，缺失条款 ${missingClauses.length} 条）` });
-            try {
-                const { insertReviewComments } = require('../services/docxAnnotator');
-                // ── 通用修复：先备份原始文件，再将批注写入审查版本 ──
-                // 原始文件永久保留在 versions/<id>-original.<ext>
-                // 审查版本写入 versions/<id>-reviewed.<ext>，再复制回 storage_path
-                const ext = storageExt || '.docx';
-                const versionsDir = path.join(__dirname, '..', 'uploads', 'versions');
-                if (!fs.existsSync(versionsDir)) fs.mkdirSync(versionsDir, { recursive: true });
-                const originalBackup = path.join(versionsDir, `${contractId}-original${ext}`);
-                const reviewedFile = path.join(versionsDir, `${contractId}-reviewed${ext}`);
-                // 仅当原始备份不存在时才备份（避免重复覆盖）
-                if (!fs.existsSync(originalBackup) && fs.existsSync(contract.storage_path)) {
-                    fs.copyFileSync(contract.storage_path, originalBackup);
-                    console.log(`[ANNOTATE] Backup original → ${originalBackup}`);
-                }
-                // 将批注写入审查版本文件（不直接修改原始文件）
-                let count = 0;
-                if (fs.existsSync(originalBackup)) {
-                    // 用原始文件生成审查版本
-                    fs.copyFileSync(originalBackup, reviewedFile);
-                    count = insertReviewComments(reviewedFile, allAnnotations);
-                    // 审查版本复制回 storage_path（WPS 显示审查后的文档）
-                    fs.copyFileSync(reviewedFile, contract.storage_path);
-                    console.log(`[ANNOTATE] Reviewed version written → ${contract.storage_path}`);
-                } else {
-                    // 兜底：直接写入 storage_path（旧行为兼容）
-                    count = insertReviewComments(contract.storage_path, allAnnotations);
-                    console.log(`[ANNOTATE] No original backup found, wrote directly to storage_path`);
-                }
-                if (count > 0) {
-                    console.log(`[ANNOTATE] Inserted ${count}/${allAnnotations.length} comments into ${contract.storage_path}`);
-                    const newDocKey = uuidv4();
-                    await db('contracts').where({ id: contractId }).update({ document_key: newDocKey, edit_enabled: true });
-                    const ext = String(contract.original_filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'docx';
-                    newEditorConfig = buildWpsEditorConfig({ ...contract, id: contractId, document_key: newDocKey, original_filename: contract.original_filename }, ext);
-                }
-                await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'completed', message: `审查批注已完成，共 ${count}/${allAnnotations.length} 条。` });
-            } catch (annotateError) {
-                console.warn('[ANNOTATE] Failed to insert comments:', annotateError.message);
-                await emitAnalysisProgress(null, contractId, { step: 'batch_annotations', status: 'failed', message: `批注写入失败：${annotateError.message}` });
-            }
-        }
-
-        if (ioInstance) ioInstance.to(`contract-${contractId}`).emit('analysis-complete', { results: analysisResult, perspective: userPerspective, newEditorConfig });
+        if (ioInstance) ioInstance.to(`contract-${contractId}`).emit('analysis-complete', { results: analysisResult, perspective: userPerspective });
     } catch (error) {
         console.error('Error during background AI analysis:', error);
         updateAnalysisJob(contractId, { status: 'failed', error: error.message });
@@ -2062,10 +2112,8 @@ router.post('/analyze', async (req, res) => {
             estimatedTotalSeconds: TOTAL_EST_SECONDS,
         });
 
-        // 后台异步执行（通过任务队列，限制并发数，避免大合同阻塞）
-        analysisTaskQueue.enqueue(() =>
-            runAnalysisInBackground(contractId, userId, userPerspective, preAnalysisData)
-        ).catch((err) => {
+        // 后台异步执行（不 await）
+        runAnalysisInBackground(contractId, userId, userPerspective, preAnalysisData).catch((err) => {
             console.error('[ANALYSIS] Background task crashed:', err);
         });
     } catch (error) {
@@ -2121,25 +2169,12 @@ router.post('/review-text', async (req, res) => {
             corePurposes: template.core_purposes || [],
             question,
             perspective,
-        }, 8);
+        }, 6);
         const prompt = `你是专业合同审查助手。用户选中了合同中的一段文本，请进行专项审查，只输出 JSON。
 
 审查模板：${template.name}
 审查立场：${perspective || '未指定'}
 专项问题：${question || '识别该段文本的法律风险、可修改点，并给出可替换文本。'}
-
-【severity 判定标准】：
-  · 高：违反法律强制性规定、导致合同无效、剥夺对方核心权利、2N赔偿风险
-  · 中：明显不公平、加重一方责任、模糊表述存在争议风险
-  · 低：措辞不够严谨、建议优化但不影响合同效力
-
-【修改建议格式规范】：
-  · original_text: 原文中连续完整的 1-3 个句子（不可截断单词，须包含主谓宾完整结构）
-  · highlight_segment: 原文中需要修改的具体短语（ ≤20 字，用于前端定位锚点）
-  · suggested_text: 可直接复制粘贴到合同的完整替换段落（若无需修改则填空字符串 ""，禁止只写"建议修改"等描述性文字）
-  · reason: 修改理由（简明，1-2 句）
-  · plain_language: 大白话解释（1-2 句）
-  · severity: 高/中/低
 
 可引用依据（只能引用以下内容，不得虚构）：
 ${relevantKnowledge.map((item, index) => `[${index + 1}] [${item.source_type}] ${item.law} ${item.clause || ''}：${item.content}`).join('\n') || '未检索到直接依据。'}
@@ -2149,17 +2184,10 @@ ${relevantKnowledge.map((item, index) => `[${index + 1}] [${item.source_type}] $
 ${wrapContractContent(text)}
 ---
 
-硬性要求：
-- 必须逐条比对「可引用依据」中每一条法律条文与待审查文本，特别关注天数、期限、比例、金额、次数等强制性数字是否一致；若存在不一致（例如法定 15 日被写成 30 日），必须在 risk_summary 中明确指出并在 suggested_text 中修正。
-- 如果没有检索依据，不得编造法条或案例，只能说明"当前知识库未检索到直接依据"。
-- 只输出 JSON，不输出自然语言解释，不输出 markdown。
-
 输出 JSON：
 {
-  "severity": "高/中/低",
   "risk_summary": "风险结论",
   "suggested_text": "可直接替换原文的完整文本；如无需修改则为空字符串",
-  "highlight_segment": "修改锚点（≤20字）",
   "reason": "专业理由",
   "plain_language": "大白话说明",
   "citations": [{"source_type":"law/case","title":"依据名称","clause":"条号或片段","content":"引用内容"}]}`;
@@ -2210,7 +2238,7 @@ router.get('/:id/focused-reviews', async (req, res) => {
             .select('id', 'source_text', 'question', 'perspective', 'contract_type', 'result', 'created_at');
 
         const items = rows.map((row) => {
-            let parsed = {};
+            let parsed;
             try { parsed = JSON.parse(row.result); } catch { parsed = {}; }
             return {
                 id: row.id,
@@ -2269,14 +2297,6 @@ router.post('/:id/replace-text', async (req, res) => {
         }
 
         const version = await createContractVersionSnapshot(contract, 'replace-text');
-        // ── 替换前确保有原始文件备份（避免直接覆盖原始文件）──
-        const versionsDir = path.join(__dirname, '..', 'uploads', 'versions');
-        const ext2 = path.extname(contract.storage_path).toLowerCase() || '.docx';
-        const originalBackup = path.join(versionsDir, `${contract.id}-original${ext2}`);
-        if (!fs.existsSync(originalBackup) && fs.existsSync(contract.storage_path)) {
-            fs.copyFileSync(contract.storage_path, originalBackup);
-            console.log(`[REPLACE] Backup original → ${originalBackup}`);
-        }
         const replacements = replaceTextInDocx(contract.storage_path, originalText, suggestedText, originalCandidates);
         const nextKey = uuidv4();
         await db('contracts').where({ id: contract.id }).update({
@@ -2287,7 +2307,7 @@ router.post('/:id/replace-text', async (req, res) => {
         res.json({
             replacements,
             version,
-            editorConfig: buildWpsEditorConfig(updatedContract, ext),
+            editorConfig: buildOnlyOfficeConfig(updatedContract, ext),
         });
     } catch (error) {
         if (error.message === 'DOCX_EXACT_TEXT_NOT_FOUND') {
@@ -2319,14 +2339,6 @@ router.post('/:id/batch-replace-text', async (req, res) => {
         }
 
         const version = await createContractVersionSnapshot(contract, 'batch-replace-text');
-        // ── 批量替换前确保有原始文件备份 ──
-        const versionsDir2 = path.join(__dirname, '..', 'uploads', 'versions');
-        const ext3 = path.extname(contract.storage_path).toLowerCase() || '.docx';
-        const originalBackup2 = path.join(versionsDir2, `${contract.id}-original${ext3}`);
-        if (!fs.existsSync(originalBackup2) && fs.existsSync(contract.storage_path)) {
-            fs.copyFileSync(contract.storage_path, originalBackup2);
-            console.log(`[BATCH-REPLACE] Backup original → ${originalBackup2}`);
-        }
         const results = [];
         let totalReplacements = 0;
         let succeededCount = 0;
@@ -2368,7 +2380,7 @@ router.post('/:id/batch-replace-text', async (req, res) => {
             succeededCount,
             failedCount,
             results,
-            editorConfig: buildWpsEditorConfig({ ...contract, document_key: nextKey }, ext),
+            editorConfig: buildOnlyOfficeConfig({ ...contract, document_key: nextKey }, ext),
         });
     } catch (error) {
         console.error('[ERROR] Batch DOCX replacement failed:', error);
@@ -2435,7 +2447,7 @@ router.post('/:id/append-clause', async (req, res) => {
             ok: true,
             version,
             message: `已追加条款「${title || '未命名条款'}」到文档末尾。`,
-            editorConfig: buildWpsEditorConfig({ ...contract, document_key: nextKey }, ext),
+            editorConfig: buildOnlyOfficeConfig({ ...contract, document_key: nextKey }, ext),
         });
     } catch (error) {
         console.error('[ERROR] Append clause failed:', error);
@@ -2529,82 +2541,6 @@ router.get('/:id/export-report', async (req, res) => {
     res.send(html);
 });
 
-router.get('/:id/export-annotated-docx', async (req, res) => {
-    const userId = requireRequestUserId(req, res);
-    if (!userId) return;
-    const contractIdNum = Number(req.params.id);
-    const contract = await findOwnedContract(contractIdNum, userId);
-    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
-
-    // 从 contract.analysis_result 提取批注（dispute_points / missing_clauses / modification_suggestions）
-    // 正确列名是 analysis_result，不是 review_data
-    const analysisResult = contract.analysis_result ? (
-        typeof contract.analysis_result === 'string' ? JSON.parse(contract.analysis_result) : contract.analysis_result
-    ) : null;
-
-    const ext = (contract.storage_path ? path.extname(contract.storage_path) : '.docx').toLowerCase();
-    if (ext !== '.docx') {
-        return res.status(400).json({ error: 'Only DOCX files support annotated export.' });
-    }
-    if (!contract.storage_path || !fs.existsSync(contract.storage_path)) {
-        return res.status(404).json({ error: 'Contract file not found on disk.' });
-    }
-
-    // 从 reviewData 提取批注（dispute_points / missing_clauses / modification_suggestions）
-    // review_comments 表只有操作记录，不存储原文定位信息
-    const annotations = [];
-    if (analysisResult) {
-        for (const r of (analysisResult.dispute_points || [])) {
-            annotations.push({
-                original_text: r.original_clause || r.title || '',
-                body: `【AI审查—风险·${r.severity || ''}】${r.title || '风险'}\n${r.dispute_rationale || ''}\n法律依据：${r.legal_reference || ''}\n通俗说法：${r.plain_language || ''}`,
-            });
-        }
-        for (const m of (analysisResult.missing_clauses || [])) {
-            annotations.push({
-                original_text: m.title || '',
-                body: `【AI审查—缺失条款】${m.title || '缺失条款'}\n${m.description || ''}\n建议补充：${m.suggested_clause || ''}`,
-            });
-        }
-        for (const s of (analysisResult.modification_suggestions || [])) {
-            annotations.push({
-                original_text: s.original_text || s.anchor_hint || '',
-                body: `【AI审查—修改建议】${s.title || '修改建议'}\n建议：${s.suggested_text || ''}\n理由：${s.reason || ''}\n通俗说法：${s.plain_language || ''}`,
-            });
-        }
-    }
-
-    const basename = path.basename(contract.original_filename, ext).replace(/[^a-zA-Z0-9._-]/g, '_') || 'contract';
-    const filenameAscii = basename + '-annotated.docx';
-    const filenameUtf8 = encodeURIComponent(basename + '-批注版.docx');
-    res.setHeader('Content-Disposition', `attachment; filename="${filenameAscii}"; filename*=UTF-8''${filenameUtf8}`);
-
-    if (annotations.length === 0) {
-        // 无批注时直接返回原文件
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-        if (!safeSendFile(res, contract.storage_path)) return res.status(404).json({ error: 'File not found.' });
-    }
-
-    // 生成临时文件写入批注
-    const tmpPath = `/tmp/annotated-${contract.id}-${Date.now()}.docx`;
-    const { insertReviewComments } = require('../services/docxAnnotator');
-    try {
-        await insertReviewComments(contract.storage_path, annotations, tmpPath);
-        // 流式传输，出错时删临时文件
-        const fstream = fs.createReadStream(tmpPath);
-        fstream.on('error', () => { try{fs.unlinkSync(tmpPath);}catch(e){} });
-        fstream.on('end', () => { try{fs.unlinkSync(tmpPath);}catch(e){} });
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-        fstream.pipe(res);
-    } catch(err) {
-        try{fs.unlinkSync(tmpPath);}catch(e){}
-        console.error('[export-annotated-docx] insertReviewComments error:', err.message);
-        // 降级：返回原文件
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-        if (!safeSendFile(res, contract.storage_path)) return res.status(404).json({ error: 'File not found.' });
-    }
-});
-
 router.get('/:id/pdf-annotations', async (req, res) => {
     const userId = requireRequestUserId(req, res);
     if (!userId) return;
@@ -2642,11 +2578,19 @@ router.post('/:id/force-save', async (req, res) => {
         const key = String(documentKey || contract.document_key || '').trim();
         if (!key) return res.status(400).json({ error: 'Document key is required for force-save.' });
 
-        // WPS WebOffice 通过 v3 回调协议自动保存，前端仅触发标记
-        res.json({ ok: true, note: 'WPS WebOffice 自动处理保存，无需手动触发 force-save' });
+        const result = await postOnlyOfficeCommand({
+            c: 'forcesave',
+            key,
+        });
+
+        if (result?.error && result.error !== 0) {
+            return res.status(502).json({ error: `OnlyOffice force-save failed: ${result.error}`, result });
+        }
+
+        res.json({ ok: true, result });
     } catch (error) {
         console.error(`[ERROR] Failed to force-save contract ${req.params.id}:`, error.response?.data || error.message);
-        res.status(500).json({ error: 'Failed to trigger force-save.' });
+        res.status(500).json({ error: 'Failed to trigger OnlyOffice force-save.' });
     }
 });
 
@@ -2661,265 +2605,11 @@ router.get('/:id/editor-config', async (req, res) => {
 
         const ext = path.extname(contractRecord.storage_path).toLowerCase().replace('.', '') || 'docx';
         res.json({
-            editorConfig: buildWpsEditorConfig(contractRecord, ext),
+            editorConfig: buildOnlyOfficeConfig(contractRecord, ext),
         });
     } catch (error) {
         console.error(`[ERROR] Failed to fetch fresh editor config for id ${id}:`, error);
         res.status(500).json({ error: 'Server error while fetching editor config.' });
-    }
-});
-
-// ============ 批注交互 (review_comments) API ============
-
-// POST /api/contracts/:id/comments — 添加批注/反馈
-router.post('/:id/comments', async (req, res) => {
-    const userId = requireRequestUserId(req, res);
-    if (!userId) return;
-    const contract = await findOwnedContract(req.params.id, userId);
-    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
-
-    const { item_type, item_index, action_type, comment_text } = req.body;
-    if (!item_type || item_index === undefined || !action_type) {
-        return res.status(400).json({ error: 'item_type, item_index, action_type are required.' });
-    }
-    if (action_type === 'comment' && !comment_text) {
-        return res.status(400).json({ error: 'comment_text is required when action_type is comment.' });
-    }
-
-    try {
-        const now = new Date();
-        const userIdNum = Number(userId);
-        const itemIndexNum = Number(item_index);
-
-        // 对于 agree/disagree：同类型投票 toggle（重复点击取消），不同类型切换
-        if (action_type === 'agree' || action_type === 'disagree') {
-            // 检查用户是否已对此条目投过同类型票
-            const existing = await db('review_comments')
-                .where({ contract_id: contract.id, user_id: userIdNum, item_type, item_index: itemIndexNum, action_type })
-                .first();
-            if (existing) {
-                // 重复点击 → 取消投票（删除）
-                await db('review_comments').where({ id: existing.id }).delete();
-                const row = await db('review_comments')
-                    .where({ contract_id: contract.id, user_id: userIdNum, item_type, item_index: itemIndexNum })
-                    .orderBy('id', 'desc').first();
-                return res.status(200).json(row || { deleted: true });
-            }
-            // 不同类型切换：先删除对方的旧票
-            const oppositeType = action_type === 'agree' ? 'disagree' : 'agree';
-            await db('review_comments')
-                .where({ contract_id: contract.id, user_id: userIdNum, item_type, item_index: itemIndexNum, action_type: oppositeType })
-                .delete();
-        }
-
-        await db('review_comments').insert({
-            contract_id: contract.id,
-            user_id: userIdNum,
-            item_type,
-            item_index: itemIndexNum,
-            action_type,
-            comment_text: comment_text || null,
-            is_resolved: false,
-            created_at: now,
-            updated_at: now,
-        });
-        // 用 max(id) 获取刚插入的行的 id
-        const row = await db('review_comments')
-            .where({ contract_id: contract.id, user_id: userIdNum, item_type, item_index: itemIndexNum, action_type })
-            .orderBy('id', 'desc')
-            .first();
-        res.status(201).json(row);
-    } catch (error) {
-        console.error('[ERROR] Failed to add review comment:', error.message, error.code, error.stack);
-        res.status(500).json({ error: 'Failed to add comment.' });
-    }
-});
-
-// GET /api/contracts/:id/comments — 获取所有批注
-router.get('/:id/comments', async (req, res) => {
-    const userId = requireRequestUserId(req, res);
-    if (!userId) return;
-    const contract = await findOwnedContract(req.params.id, userId);
-    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
-
-    try {
-        const rows = await db('review_comments')
-            .where({ contract_id: contract.id })
-            .orderBy('id', 'desc')  // id DESC = 最新记录在前
-            .select();
-        // 按 item_type + item_index 分组
-        const grouped = {};
-        rows.forEach((row) => {
-            const key = `${row.item_type}:${row.item_index}`;
-            if (!grouped[key]) grouped[key] = [];
-            grouped[key].push(row);
-        });
-        // 统计各索引的 agree/disagree/comment 数量
-        const summary = {};
-        rows.forEach((row) => {
-            const key = `${row.item_type}:${row.item_index}`;
-            if (!summary[key]) summary[key] = { agree: 0, disagree: 0, comment: 0, resolved: false };
-            if (row.action_type === 'agree') summary[key].agree += 1;
-            else if (row.action_type === 'disagree') summary[key].disagree += 1;
-            else if (row.action_type === 'comment') summary[key].comment += 1;
-            if (row.is_resolved) summary[key].resolved = true;
-        });
-        res.json({ comments: rows, grouped, summary });
-    } catch (error) {
-        console.error('[ERROR] Failed to list review comments:', error);
-        res.status(500).json({ error: 'Failed to list comments.' });
-    }
-});
-
-// PUT /api/contracts/comments/:id — 更新/解决批注
-router.put('/comments/:id', async (req, res) => {
-    const userId = requireRequestUserId(req, res);
-    if (!userId) return;
-    const { comment_text, is_resolved } = req.body;
-
-    try {
-        const comment = await db('review_comments').where({ id: req.params.id, user_id: Number(userId) }).first();
-        if (!comment) return res.status(404).json({ error: 'Comment not found.' });
-
-        const update = {};
-        if (comment_text !== undefined) update.comment_text = comment_text;
-        if (is_resolved !== undefined) update.is_resolved = is_resolved;
-        update.updated_at = db.fn.now();
-
-        await db('review_comments').where({ id: req.params.id }).update(update);
-        const updated = await db('review_comments').where({ id: req.params.id }).first();
-        res.json(updated);
-    } catch (error) {
-        console.error('[ERROR] Failed to update review comment:', error);
-        res.status(500).json({ error: 'Failed to update comment.' });
-    }
-});
-
-// DELETE /api/contracts/comments/:id — 删除批注
-router.delete('/comments/:id', async (req, res) => {
-    const userId = requireRequestUserId(req, res);
-    if (!userId) return;
-    try {
-        const deleted = await db('review_comments').where({ id: req.params.id, user_id: Number(userId) }).del();
-        if (!deleted) return res.status(404).json({ error: 'Comment not found.' });
-        res.json({ ok: true });
-    } catch (error) {
-        console.error('[ERROR] Failed to delete review comment:', error);
-        res.status(500).json({ error: 'Failed to delete comment.' });
-    }
-});
-
-// GET /api/contracts/:id/risk-score — 计算风险评分仪表盘
-router.get('/:id/risk-score', async (req, res) => {
-    const userId = requireRequestUserId(req, res);
-    if (!userId) return;
-    const contract = await findOwnedContract(req.params.id, userId);
-    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
-
-    try {
-        const reviewData = contract.analysis_result
-            ? JSON.parse(contract.analysis_result)
-            : parseJsonField(contract.analysis_partial_result, {});
-
-        const disputes = reviewData.dispute_points || [];
-        const missing = reviewData.missing_clauses || [];
-        const suggestions = reviewData.modification_suggestions || [];
-        const breach = reviewData.breach_cost_analysis || [];
-        const party = reviewData.party_review || [];
-        const laws = reviewData.relevant_laws || [];
-
-        // 风险评分算法
-        const severityScore = (severity) => ({ '高': 100, '中': 55, '低': 20 })[String(severity).trim()] || 40;
-
-        // 1. 风险总分 (0-100)
-        const totalItems = disputes.length + missing.length + suggestions.length + breach.length;
-        const rawTotalScore = disputes.reduce((sum, d) => sum + severityScore(d.severity), 0)
-            + missing.length * 50 + breach.reduce((sum, b) => sum + 60, 0);
-        const overallScore = totalItems > 0
-            ? Math.min(100, Math.round(rawTotalScore / totalItems))
-            : 0;
-
-        // 2. 按类别统计
-        const categoryRisk = {
-            dispute_points: { label: '风险争议点', count: disputes.length, avgSeverity: 0, items: [] },
-            missing_clauses: { label: '缺失条款', count: missing.length, avgSeverity: 0, items: [] },
-            breach_cost_analysis: { label: '违约成本', count: breach.length, avgSeverity: 0, items: [] },
-            party_review: { label: '主体审查', count: party.length, avgSeverity: 0, items: [] },
-        };
-
-        // 各风险点的严重程度分布
-        const severityDist = { 高: 0, 中: 0, 低: 0 };
-        disputes.forEach((d) => {
-            const s = String(d.severity || '中').trim();
-            if (severityDist[s] !== undefined) severityDist[s] += 1;
-            else severityDist['中'] += 1;
-        });
-
-        // 类别平均严重度
-        if (disputes.length > 0) {
-            const avg = Math.round(disputes.reduce((sum, d) => sum + severityScore(d.severity), 0) / disputes.length);
-            categoryRisk.dispute_points.avgSeverity = avg;
-            categoryRisk.dispute_points.items = disputes.map((d, i) => ({
-                index: i, title: d.title || d.type || `风险点${i + 1}`,
-                severity: d.severity || '中', score: severityScore(d.severity),
-            }));
-        }
-        if (missing.length > 0) {
-            categoryRisk.missing_clauses.avgSeverity = 50;
-            categoryRisk.missing_clauses.items = missing.map((d, i) => ({
-                index: i, title: d.title || d.clause_type || `缺失条款${i + 1}`,
-                severity: '中', score: 50,
-            }));
-        }
-        if (breach.length > 0) {
-            categoryRisk.breach_cost_analysis.avgSeverity = 60;
-            categoryRisk.breach_cost_analysis.items = breach.map((d, i) => ({
-                index: i, title: d.scenario || `违约场景${i + 1}`,
-                severity: '中', score: 60,
-            }));
-        }
-        if (party.length > 0) {
-            const partyAvg = Math.round(party.reduce((sum) => sum + 20, 0) / party.length);
-            categoryRisk.party_review.avgSeverity = partyAvg;
-        }
-
-        // 3. 整体风险等级
-        let overallLevel = 'low';
-        let overallLabel = '低风险';
-        if (severityDist['高'] > 0 || overallScore >= 70) {
-            overallLevel = 'high'; overallLabel = '高风险';
-        } else if (severityDist['中'] > 0 || overallScore >= 40) {
-            overallLevel = 'medium'; overallLabel = '中风险';
-        }
-
-        // 4. 雷达图数据（五维度）
-        const radarData = [
-            { axis: '法律风险', value: Math.min(100, severityDist['高'] * 100 + severityDist['中'] * 50 + disputes.length * 10) },
-            { axis: '条款完整性', value: Math.max(0, 100 - missing.length * 20) },
-            { axis: '修改建议', value: suggestions.length > 0 ? Math.min(80, suggestions.length * 15) : 0 },
-            { axis: '违约风险', value: breach.length > 0 ? Math.min(100, breach.length * 30 + 20) : 0 },
-            { axis: '主体合规', value: Math.max(10, 100 - party.length * 15) },
-        ];
-
-        res.json({
-            overallScore,
-            overallLevel,
-            overallLabel,
-            severityDist,
-            categoryRisk,
-            radarData,
-            stats: {
-                totalDisputes: disputes.length,
-                totalMissing: missing.length,
-                totalSuggestions: suggestions.length,
-                totalBreach: breach.length,
-                totalParty: party.length,
-                totalLaws: laws.length,
-            },
-        });
-    } catch (error) {
-        console.error('[ERROR] Failed to compute risk score:', error);
-        res.status(500).json({ error: 'Failed to compute risk score.' });
     }
 });
 
@@ -2937,37 +2627,11 @@ router.get('/:id', async (req, res) => {
         const reviewData = contractRecord.analysis_result
             ? JSON.parse(contractRecord.analysis_result)
             : parseJsonField(contractRecord.analysis_partial_result, {});
-
-        // 为已有的 modification_suggestions 和 dispute_points 补充 id 和 filtered_content 字段
-        // 这些字段在新的分析流程中由后端自动注入，但已有合同需要在此补全
-        // 同时将 dispute_points 的 severity 同步到 modification_suggestions（severity 传递）
-        if (reviewData.modification_suggestions?.length) {
-            // 建立 title → severity 映射（从 dispute_points）
-            const severityMap = {};
-            (reviewData.dispute_points || []).forEach(dp => {
-                if (dp.title) severityMap[dp.title] = dp.severity;
-            });
-            reviewData.modification_suggestions = reviewData.modification_suggestions.map((item, idx) => ({
-                ...item,
-                id: item.id ?? idx,
-                filtered_content: item.filtered_content || item.anchor_hint || item.original_text || '',
-                // severity 传递：如果 modification_suggestion 没有 severity，尝试从 dispute_points 映射
-                severity: item.severity || severityMap[item.title] || null,
-            }));
-        }
-        // 为 dispute_points 也补充 id
-        if (reviewData.dispute_points?.length) {
-            reviewData.dispute_points = reviewData.dispute_points.map((item, idx) => ({
-                ...item,
-                id: item.id ?? idx,
-            }));
-        }
-
         res.json({
             contract: {
                 id: contractRecord.id,
                 original_filename: contractRecord.original_filename,
-                editorConfig: buildWpsEditorConfig(contractRecord, ext),
+                editorConfig: buildOnlyOfficeConfig(contractRecord, ext),
             },
             preAnalysisData,
             reviewData,
@@ -3061,254 +2725,9 @@ router.get('/', async (req, res) => {
     }
 });
 
-// ========== 开启在线编辑模式 ==========
-// POST /api/contracts/:id/enable-edit
-router.post('/:id/enable-edit', async (req, res) => {
-    try {
-        const contractId = Number(req.params.id);
-        const contract = await db('contracts').where({ id: contractId }).first();
-        if (!contract) return res.status(404).json({ error: 'Contract not found.' });
-
-        await db('contracts').where({ id: contractId }).update({ edit_enabled: true });
-
-        const ext = String(contract.original_filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'docx';
-        const editorConfig = buildWpsEditorConfig(contract, ext);
-
-        res.json({ success: true, editorConfig });
-    } catch (error) {
-        console.error('[ERROR] enable-edit:', error);
-        res.status(500).json({ error: 'Failed to enable edit mode.' });
-    }
-});
-
-// ========== 获取最新编辑器配置（供刷新使用） ==========
-// GET /api/contracts/:id/fresh-editor-config
-router.get('/:id/fresh-editor-config', async (req, res) => {
-    try {
-        const contractId = Number(req.params.id);
-        const contractRecord = await db('contracts').where({ id: contractId }).first();
-        if (!contractRecord) return res.status(404).json({ error: 'Contract not found or you do not have permission to access it.' });
-
-        const ext = String(contractRecord.original_filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'docx';
-        res.json({
-            editorConfig: buildWpsEditorConfig(contractRecord, ext),
-        });
-    } catch (error) {
-        console.error('[ERROR] fresh-editor-config:', error);
-        res.status(500).json({ error: 'Failed to get fresh editor config.' });
-    }
-});
-
-// ========== 恢复指定历史版本 ==========
-// POST /api/contracts/:id/restore-version
-router.post('/:id/restore-version', async (req, res) => {
-    const userId = requireRequestUserId(req, res);
-    if (!userId) return;
-    const contractId = Number(req.params.id);
-    const { version } = req.body; // version = unix timestamp (seconds)
-
-    const contract = await findOwnedContract(contractId, userId);
-    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
-    if (!version) return res.status(400).json({ error: 'version is required.' });
-
-    try {
-        const versionsDir = path.join(__dirname, '..', 'uploads', 'versions');
-        const ext = path.extname(contract.storage_path).toLowerCase() || '.docx';
-        const versionTimestamp = parseInt(version, 10) * 1000; // 转换为毫秒
-        const versionFilePath = path.join(versionsDir, `${contractId}-${versionTimestamp}${ext}`);
-
-        if (!fs.existsSync(versionFilePath)) {
-            // 尝试不带扩展名匹配
-            const files = fs.readdirSync(versionsDir).filter(f => f.startsWith(`${contractId}-${versionTimestamp}`));
-            if (files.length === 0) return res.status(404).json({ error: 'Version file not found.' });
-            const matched = path.join(versionsDir, files[0]);
-            fs.copyFileSync(matched, contract.storage_path);
-        } else {
-            fs.copyFileSync(versionFilePath, contract.storage_path);
-        }
-
-        // 更新合同时间戳和文档 key（触发编辑器重新加载）
-        const { v4: uuidv4 } = require('uuid');
-        await db('contracts').where({ id: contractId }).update({
-            document_key: uuidv4(),
-            updated_at: db.fn.now(),
-        });
-
-        res.json({ success: true, message: 'Version restored successfully.' });
-    } catch (error) {
-        console.error('[ERROR] restore-version:', error);
-        res.status(500).json({ error: 'Failed to restore version: ' + error.message });
-    }
-});
-
-// ========== 获取 WPS 编辑器配置（参考网站方式）==========
-// GET /api/contracts/:id/wps-config
-// 返回 { appId, fileSuffix, mode } 用于前端初始化 WPS SDK
-router.get('/:id/wps-config', async (req, res) => {
-    const userId = requireRequestUserId(req, res);
-    if (!userId) return;
-    const contractId = Number(req.params.id);
-
-    const contract = await findOwnedContract(contractId, userId);
-    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
-
-    // contracts 表的正确列名是 analysis_result，不是 review_data
-    const rawAnalysisResult = contract.analysis_result;
-
-    // 从原始文件名推断文件类型
-    const filename = contract.original_filename || '';
-    let fileSuffix = 'docx';
-    if (filename.toLowerCase().endsWith('.pdf')) {
-        fileSuffix = 'pdf';
-    } else if (filename.toLowerCase().endsWith('.doc')) {
-        fileSuffix = 'doc';
-    } else if (filename.toLowerCase().endsWith('.xls') || filename.toLowerCase().endsWith('.xlsx')) {
-        fileSuffix = 'xls';
-    }
-
-    // officeType 映射：docx/doc → w, pdf → f, xls/xlsx → s
-    const officeTypeMap = { docx: 'w', doc: 'w', pdf: 'f', xls: 's', xlsx: 's' };
-    const officeType = officeTypeMap[fileSuffix] || 'w';
-
-    // WPS AppID 从环境变量读取
-    const WPS_APP_ID = process.env.WPS_APP_ID || 'SX20260630QNEJSR';
-    const WPS_ENDPOINT = process.env.WPS_ENDPOINT || 'https://o.wpsgo.com';
-    const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || 'wps-secret-key';
-    const fileId = `contract-${contractId}`;
-
-    // SDK mode 有效值：'nomal' | 'simple' | 'embed'
-    // 审查完成的合同（有 analysis_result）返回 nomal，浏览模式；其他返回 simple
-    const analysisResultVal = (typeof rawAnalysisResult === 'string') ? rawAnalysisResult : (rawAnalysisResult ? JSON.stringify(rawAnalysisResult) : '');
-    const hasAnalysisResult = !!(analysisResultVal && analysisResultVal !== 'null' && analysisResultVal !== '{}');
-    const mode = hasAnalysisResult ? 'nomal' : 'simple';
-
-    // 生成 WPS SDK JWT token（参考网站方式：直接返回 token 字符串，SDK 用 token 直连）
-    const wpsToken = jwt.sign(
-      { fileId, appId: WPS_APP_ID, mode, userId: userId },
-      WPS_TOKEN_SECRET,
-      { expiresIn: '2h' }
-    );
-
-    res.json({
-        appId: WPS_APP_ID,
-        endpoint: WPS_ENDPOINT,
-        fileSuffix: officeType,
-        mode,
-        fileId,
-        originalFilename: contract.original_filename,
-        token: wpsToken,  // 直接返回 JWT 字符串，SDK 用此 token 直连 WPS 服务器
-    });
-});
-
-// ========== 修复 contracts storage_path（工具端点）==========
-// POST /api/contracts/:id/repair-storage
-// 将 storage_path 指向正确文件，并重建批注
-// ========== 修复 contracts storage_path（内部工具端点）==========
-// POST /api/internal/repair-contract-146
-router.post('/internal/repair-contract-146', async (req, res) => {
-    try {
-        const contractId = 146;
-        const contract = await db('contracts').where({ id: contractId }).first();
-        if (!contract) return res.status(404).json({ error: 'Contract not found.' });
-
-        // versions 目录中包含完整内容的备份文件
-        const versionFile = '/root/data/disk/apps/wps-contract-review/backend/uploads/versions/146-v1782894107190.bak.docx';
-        if (!fs.existsSync(versionFile)) {
-            return res.status(500).json({ error: 'Version backup not found: ' + versionFile });
-        }
-
-        // 复制正确文件到 storage_path
-        const newStoragePath = contract.storage_path;
-        fs.copyFileSync(versionFile, newStoragePath);
-        console.log(`[REPAIR] Copied ${versionFile} → ${newStoragePath}`);
-
-        // 重新读取批注数据（从 analysis_result）
-        const analysisResult = contract.analysis_result;
-        let annotations = [];
-        try {
-            const parsed = (typeof analysisResult === 'string') ? JSON.parse(analysisResult) : (analysisResult || {});
-            annotations = (parsed.dispute_points || []).map((dp, i) => ({
-                original_text: dp.original_text || '',
-                body: `【AI审查】${dp.title || `风险点 ${i + 1}`}\n${dp.description || ''}\n建议：${dp.suggestion || ''}`,
-            }));
-        } catch (e) { /* no analysis result */ }
-
-        // 如果有批注，重新写入
-        if (annotations.length > 0) {
-            try {
-                const { insertReviewComments } = require('../services/docxAnnotator');
-                const count = insertReviewComments(newStoragePath, annotations);
-                console.log(`[REPAIR] Re-inserted ${count} comments into ${newStoragePath}`);
-            } catch (e) {
-                console.warn('[REPAIR] Re-annotation failed:', e.message);
-            }
-        }
-
-        res.json({ success: true, newStoragePath, annotationCount: annotations.length });
-    } catch (error) {
-        console.error('[REPAIR] Error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ========== WPS SDK 文档下载（用于 WPS WebOffice 加载文档）==========
-// GET /api/contracts/:id/download?token=xxx
-router.get('/:id/download', async (req, res) => {
-    const contractId = Number(req.params.id);
-    const { token } = req.query;
-
-    if (!token) return res.status(401).json({ error: 'Token required.' });
-
-    try {
-        const decoded = jwt.verify(token, WPS_TOKEN_SECRET || 'wps-secret-key');
-        if (decoded.contractId !== contractId) return res.status(403).json({ error: 'Invalid token.' });
-
-        const contract = await db('contracts').where({ id: contractId }).first();
-        if (!contract) return res.status(404).json({ error: 'Contract not found.' });
-
-        if (!contract.storage_path || !fs.existsSync(contract.storage_path)) {
-            return res.status(404).json({ error: 'File not found.' });
-        }
-
-        const filename = encodeURIComponent(contract.original_filename || 'document.docx');
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-        fs.createReadStream(contract.storage_path).pipe(res);
-    } catch (error) {
-        console.error('[download] Error:', error.message);
-        res.status(401).json({ error: 'Invalid or expired token.' });
-    }
-});
-
-// ========== 获取 WPS 下载配置（参考网站方式）==========
-// GET /api/contracts/:id/wps-download
-// 返回 { url, filename } 用于 WPS SDK 下载文档
-router.get('/:id/wps-download', async (req, res) => {
-    const userId = requireRequestUserId(req, res);
-    if (!userId) return;
-    const contractId = Number(req.params.id);
-
-    const contract = await findOwnedContract(contractId, userId);
-    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
-
-    // 检查文件是否存在
-    if (!contract.storage_path || !fs.existsSync(contract.storage_path)) {
-        return res.status(404).json({ error: 'File not found.' });
-    }
-
-    const downloadToken = jwt.sign(
-        { contractId, userId, exp: Math.floor(Date.now() / 1000) + 3600 },
-        WPS_TOKEN_SECRET || 'wps-secret-key'
-    );
-
-    const filename = contract.original_filename || 'document.docx';
-    const downloadUrl = `${BACKEND_URL_FOR_DOCKER || 'http://localhost:8089'}/api/contracts/${contractId}/download?token=${downloadToken}`;
-
-    res.json({
-        url: downloadUrl,
-        filename,
-    });
-});
-
 module.exports = router;
 module.exports.setIoInstance = setIoInstance;
+module.exports.splitContractIntoSections = splitContractIntoSections;
+module.exports.runAnalysisInBackground = runAnalysisInBackground;
+module.exports.buildSectionQueries = buildSectionQueries;
+module.exports.multiSectionKnowledgeRetrieval = multiSectionKnowledgeRetrieval;
