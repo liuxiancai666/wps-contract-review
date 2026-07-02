@@ -3,8 +3,8 @@
     <div class="login-card">
       <div class="login-header">
         <img src="/asserts/logo_v2.png" alt="牛马在线" class="login-logo" />
-        <h1>合同审查系统</h1>
-        <p class="login-subtitle">{{ isLogin ? '登录以继续' : '创建新账号' }}</p>
+        <h1>牛马在线</h1>
+        <p class="login-slogan">遇事找牛马，风险全排查</p>
       </div>
 
       <form @submit.prevent="handleSubmit" class="login-form">
@@ -138,10 +138,12 @@ export default {
   color: #111;
 }
 
-.login-subtitle {
+.login-slogan {
   margin: 0;
-  color: #666;
+  color: #f39c12;
   font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 2px;
 }
 
 .login-form {
