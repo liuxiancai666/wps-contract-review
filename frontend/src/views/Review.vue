@@ -286,6 +286,7 @@
                 <div>
                     <button @click="exportReport('pdf')" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出PDF</button>
                     <button @click="exportReport('word')" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出Word</button>
+                    <button v-if="!isPdfContract" @click="exportAnnotatedDocx" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">导出带批注文档</button>
                     <button @click="downloadPdfAnnotations" class="mr-3 text-sm font-medium text-primary hover:text-primary-dark">PDF批注</button>
                     <template v-if="cameFromHistory">
                         <button @click="goBackToUpload" class="text-sm font-medium text-primary hover:text-primary-dark">重新上传</button>
@@ -2753,6 +2754,15 @@ export default {
         }
     };
 
+    const exportAnnotatedDocx = async () => {
+        try {
+            const response = await api.exportAnnotatedDocx(contract.id);
+            downloadBlob(response.data, `${contract.original_filename.replace(/\.[^.]+$/, '')}-带批注.docx`);
+        } catch (error) {
+            ElMessage.error(error.response?.data?.error || '导出带批注文档失败。');
+        }
+    };
+
     return {
       activeStep,
       loading,
@@ -2867,7 +2877,8 @@ export default {
       diffLoading,
       loadLatestDiff,
       exportReport,
-      downloadPdfAnnotations
+      downloadPdfAnnotations,
+      exportAnnotatedDocx
     };
   }
 };

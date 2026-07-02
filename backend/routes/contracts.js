@@ -718,6 +718,182 @@ ${paragraphs.join('\n')}
     return zip.toBuffer();
 };
 
+const generateAnnotatedDocxBuffer = (contract, reviewData = {}) => {
+    const fs = require('fs');
+    const storagePath = contract.storage_path;
+    if (!fs.existsSync(storagePath)) {
+        throw new Error('Original file not found');
+    }
+
+    const ext = path.extname(storagePath).toLowerCase();
+    if (ext !== '.docx') {
+        throw new Error('Only DOCX files support annotations');
+    }
+
+    const zip = new AdmZip(fs.readFileSync(storagePath));
+
+    const escapeXml = (text) => String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+
+    const normalizeText = (text) => String(text || '')
+        .replace(/\s+/g, '')
+        .replace(/[“”]/g, '"')
+        .replace(/[‘’]/g, "'")
+        .replace(/[：]/g, ':')
+        .replace(/[，]/g, ',')
+        .replace(/[。]/g, '.')
+        .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
+
+    const documentEntry = zip.getEntry('word/document.xml');
+    if (!documentEntry) {
+        throw new Error('document.xml not found in DOCX');
+    }
+
+    let documentXml = documentEntry.getData().toString('utf8');
+    let commentsXml = '';
+    let commentId = 0;
+    let existingComments = [];
+
+    const commentsEntry = zip.getEntry('word/comments.xml');
+    if (commentsEntry) {
+        commentsXml = commentsEntry.getData().toString('utf8');
+        const idMatch = commentsXml.match(/<w:comment[^>]*w:id="(\d+)"/g);
+        if (idMatch) {
+            const ids = idMatch.map(m => parseInt(m.match(/w:id="(\d+)"/)[1]));
+            commentId = Math.max(...ids) + 1;
+        }
+        const docCommentMatch = commentsXml.match(/<w:comment[^>]*>([\s\S]*?)<\/w:comment>/g);
+        if (docCommentMatch) {
+            existingComments = docCommentMatch;
+        }
+    } else {
+        commentsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+</w:comments>`;
+    }
+
+    const allItems = [
+        ...(reviewData.dispute_points || []).map(item => ({
+            type: 'risk',
+            text: item.original_clause,
+            comment: item.dispute_rationale,
+            title: item.title,
+            severity: item.severity,
+        })),
+        ...(reviewData.modification_suggestions || []).map(item => ({
+            type: 'suggestion',
+            text: item.original_text || item.original_clause,
+            comment: item.reason || item.rationale,
+            title: item.title,
+        })),
+    ].filter(item => item.text && item.comment);
+
+    const docText = documentXml.replace(/<[^>]+>/g, '');
+    const normalizedDocText = normalizeText(docText);
+
+    const insertedComments = [];
+
+    for (const item of allItems) {
+        const normalizedSearch = normalizeText(item.text);
+        if (normalizedSearch.length < 6) continue;
+
+        const idx = normalizedDocText.indexOf(normalizedSearch);
+        if (idx === -1) continue;
+
+        let charCount = 0;
+        let xmlIdx = 0;
+        while (charCount < idx && xmlIdx < documentXml.length) {
+            const tagStart = documentXml.indexOf('<', xmlIdx);
+            const tagEnd = documentXml.indexOf('>', xmlIdx);
+            if (tagStart === -1) break;
+            if (tagStart > xmlIdx) {
+                charCount += tagStart - xmlIdx;
+            }
+            xmlIdx = tagEnd + 1;
+        }
+
+        const startPos = xmlIdx;
+        let endPos = startPos;
+        let matchedChars = 0;
+
+        while (matchedChars < normalizedSearch.length && endPos < documentXml.length) {
+            const tagStart = documentXml.indexOf('<', endPos);
+            if (tagStart === -1) {
+                endPos += normalizedSearch.length - matchedChars;
+                break;
+            }
+            if (tagStart > endPos) {
+                const textChunk = normalizeText(documentXml.substring(endPos, tagStart));
+                const take = Math.min(textChunk.length, normalizedSearch.length - matchedChars);
+                matchedChars += take;
+                endPos = endPos + (tagStart - endPos);
+            }
+            const tagEnd = documentXml.indexOf('>', endPos);
+            if (tagEnd === -1) break;
+            endPos = tagEnd + 1;
+        }
+
+        if (matchedChars < normalizedSearch.length * 0.8) continue;
+
+        const prefix = documentXml.substring(0, startPos);
+        const targetText = documentXml.substring(startPos, endPos);
+        const suffix = documentXml.substring(endPos);
+
+        const commentText = `${item.title || (item.type === 'risk' ? '风险提示' : '修改建议')}\n${item.comment}`;
+
+        const commentEntry = `<w:comment w:id="${commentId}" w:author="合同审查系统" w:date="${new Date().toISOString()}"><w:p><w:r><w:t>${escapeXml(commentText)}</w:t></w:r></w:p></w:comment>`;
+
+        documentXml = `${prefix}<w:commentRangeStart w:id="${commentId}"/>${targetText}<w:commentRangeEnd w:id="${commentId}"/><w:commentReference w:id="${commentId}"/>${suffix}`;
+
+        insertedComments.push(commentEntry);
+        commentId++;
+
+        const newDocText = documentXml.replace(/<[^>]+>/g, '');
+        normalizedDocText = normalizeText(newDocText);
+    }
+
+    if (insertedComments.length > 0) {
+        const commentsEnd = commentsXml.lastIndexOf('</w:comments>');
+        if (commentsEnd !== -1) {
+            commentsXml = commentsXml.substring(0, commentsEnd) + '\n' + insertedComments.join('\n') + '\n</w:comments>';
+        }
+
+        const relsEntry = zip.getEntry('word/_rels/document.xml.rels');
+        let relsXml = '';
+        if (relsEntry) {
+            relsXml = relsEntry.getData().toString('utf8');
+        } else {
+            relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+</Relationships>`;
+        }
+
+        if (!relsXml.includes('http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments')) {
+            const lastRel = relsXml.lastIndexOf('</Relationships>');
+            if (lastRel !== -1) {
+                relsXml = relsXml.substring(0, lastRel) +
+                    `<Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>
+</Relationships>`;
+            }
+        }
+
+        zip.deleteFile('word/comments.xml');
+        zip.addFile('word/comments.xml', Buffer.from(commentsXml, 'utf8'));
+
+        zip.deleteFile('word/_rels/document.xml.rels');
+        zip.addFile('word/_rels/document.xml.rels', Buffer.from(relsXml, 'utf8'));
+    }
+
+    zip.deleteFile('word/document.xml');
+    zip.addFile('word/document.xml', Buffer.from(documentXml, 'utf8'));
+
+    return zip.toBuffer();
+};
+
 const findPdfFont = () => {
     const candidates = [
         'C:\\Windows\\Fonts\\simhei.ttf',
@@ -2405,6 +2581,31 @@ router.post('/:id/append-clause', async (req, res) => {
     } catch (error) {
         console.error('[ERROR] Append clause failed:', error);
         res.status(500).json({ error: '追加条款失败。' });
+    }
+});
+
+router.get('/:id/export-annotated', async (req, res) => {
+    const userId = requireRequestUserId(req, res);
+    if (!userId) return;
+    const contract = await findOwnedContract(req.params.id, userId);
+    if (!contract) return res.status(404).json({ error: 'Contract not found.' });
+
+    const ext = path.extname(contract.storage_path).toLowerCase();
+    if (ext !== '.docx') {
+        return res.status(400).json({ error: '仅 DOCX 文档支持导出带批注的文档。' });
+    }
+
+    try {
+        const reviewData = parseJsonField(contract.analysis_result, parseJsonField(contract.analysis_partial_result, {}));
+        const docxBuffer = generateAnnotatedDocxBuffer(contract, reviewData);
+
+        const basename = path.basename(contract.original_filename, path.extname(contract.original_filename)).replace(/[^a-zA-Z0-9._-]/g, '_') || 'contract';
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        res.setHeader('Content-Disposition', `attachment; filename="${basename}-annotated.docx"`);
+        res.send(docxBuffer);
+    } catch (error) {
+        console.error('[ERROR] Export annotated document failed:', error);
+        res.status(500).json({ error: '导出带批注文档失败。' });
     }
 });
 
