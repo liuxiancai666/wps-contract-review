@@ -358,35 +358,53 @@ export default defineComponent({
     };
 
     // 查找所有匹配的原始位置（使用 WPS Find API）
+    // 使用 Selection.Find 查找文本（WebOffice 中比 doc.Find 更可靠）
     const findAllMatchPositions = async (originalText) => {
       const app = await getApplication();
-      if (!app || !app.ActiveDocument) { console.warn('[WPS] findAllMatchPositions: no app'); return []; }
+      if (!app) { console.warn('[WPS] findAllMatchPositions: no app'); return []; }
+      const doc = app.ActiveDocument;
+      if (!doc) { console.warn('[WPS] findAllMatchPositions: no ActiveDocument'); return []; }
       const positions = [];
       try {
-        const doc = app.ActiveDocument;
-        await doc.Range.SetRange(0, 0);
         const normText = normalizeText(originalText);
         console.log('[WPS] findAllMatchPositions searching:', JSON.stringify(normText.substring(0, 50)));
-        let findResults = await doc.Find.Execute(normText, false);
-        console.log('[WPS] findAllMatchPositions result:', JSON.stringify(findResults));
-        
-        // WebOffice Find API 可能对长文本匹配失败，尝试缩短文本
-        if ((!Array.isArray(findResults) || !findResults.length) && normText.length > 15) {
-          console.log('[WPS] findAllMatchPositions: trying shorter text...');
-          // 尝试前15字（去掉末尾标点和空格）
-          const shortText = normText.substring(0, 15).replace(/[，。、；：""'']$/, '').trim();
-          findResults = await doc.Find.Execute(shortText, false);
-          console.log('[WPS] findAllMatchPositions short result:', JSON.stringify(findResults), 'for:', shortText);
+
+        // 方案1：使用 Selection.Find（WebOffice 中更可靠）
+        try {
+          const sel = doc.ActiveWindow.Selection;
+          // 清空当前选区，从头开始搜索
+          await sel.SetRange(0, 0);
+          let findResults = await sel.Find.Execute(normText, false);
+          console.log('[WPS] Selection.Find result:', JSON.stringify(findResults));
+
+          if (Array.isArray(findResults) && findResults.length > 0) {
+            for (const result of findResults) {
+              positions.push([result.pos, result.pos + result.len]);
+            }
+          }
+        } catch (selError) {
+          console.warn('[WPS] Selection.Find failed, trying doc.Find:', selError.message);
         }
-        
-        if (!Array.isArray(findResults) || !findResults.length) return positions;
-        for (const result of findResults) {
-          const startPos = await doc.Range.SetRange(result.pos, result.pos + result.len);
-          const start = await startPos.Start;
-          const end = await startPos.End;
-          positions.push([start, end]);
+
+        // 方案2：若 Selection.Find 无结果，尝试 doc.Range.Find
+        if (positions.length === 0 && normText.length > 15) {
+          try {
+            const shortText = normText.substring(0, 15).replace(/[，。、；：""'']$/, '').trim();
+            console.log('[WPS] Trying short text:', shortText);
+            let findResults = await doc.Range(0, 0).Find.Execute(shortText, false);
+            console.log('[WPS] Range.Find short result:', JSON.stringify(findResults));
+
+            if (Array.isArray(findResults) && findResults.length > 0) {
+              for (const result of findResults) {
+                positions.push([result.pos, result.pos + result.len]);
+              }
+            }
+          } catch (rangeError) {
+            console.warn('[WPS] Range.Find also failed:', rangeError.message);
+          }
         }
-        console.log('[WPS] findAllMatchPositions positions:', positions);
+
+        console.log('[WPS] findAllMatchPositions final positions:', positions);
       } catch (error) {
         console.error('[WPS] findAllMatchPositions error:', error.message, error.stack);
       }
@@ -518,6 +536,13 @@ export default defineComponent({
       }
 
       try {
+        // 优先使用 SDK 级别的 GoTo 方法
+        if (wpsInstance?.GoTo) {
+          const sdkResult = await wpsInstance.GoTo(targetBookmark);
+          console.log('[WPS] wpsInstance.GoTo result:', sdkResult);
+          if (sdkResult !== false && sdkResult !== null) return true;
+        }
+        // fallback: 使用 Selection.GoTo
         await doc.ActiveWindow.Selection.GoTo({
           What: app.Enum.WdGoToItem.wdGoToBookmark,
           Name: targetBookmark,
@@ -701,6 +726,8 @@ export default defineComponent({
       setCommandBars: (bars) => wpsInstance?.setCommandBars(bars),
       executeCommandBar: (cmbId) => wpsInstance?.executeCommandBar(cmbId),
       getWpsInstance: () => wpsInstance,
+      // SDK 级别导航（比 Selection.GoTo 更可靠）
+      wpsGoTo: (bookmarkName) => wpsInstance?.GoTo?.(bookmarkName),
     };
   },
 });
