@@ -2700,84 +2700,111 @@ export default {
         }
     };
 
+    // =============================================
+    // 原文定位：doLocateText（完整重写）
+    // WebOffice Find.Execute 返回 [{ found, pos, len }] 而非 boolean
+    // 方案1: 书签定位 → 方案2: anchor_hint 搜索 → 方案3: contract_start → 方案4: 提示手动
+    // =============================================
     const doLocateText = async (text, itemType, itemIndex, app) => {
-        const doc = app.ActiveDocument;
-        const selection = doc?.Selection;
+        // 局部 normalizeText（与 WpsEditor.vue 保持一致）
+        const norm = (t) => String(t || '')
+            .replace(/\s+/g, ' ')
+            .replace(/[""]/g, '"')
+            .replace(/['']/g, "'")
+            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+            .trim();
 
-        // 获取 anchor_hint（用于精确定位，比完整原文更可靠）
-        let anchorHint = text;
-        if (itemType === 'suggestion' && itemIndex >= 0) {
-            const suggestion = reviewData.modification_suggestions?.[itemIndex];
-            if (suggestion?.anchor_hint) {
-                anchorHint = suggestion.anchor_hint;
-            }
-        }
+        const doc = app?.ActiveDocument;
+        if (!doc) { console.warn('[doLocateText] no doc'); return; }
 
-        // 方案1: 尝试通过书签定位（书签由后端预创建）
+        const normText = norm(text);
+        if (!normText) { ElMessage.info('无原文文本，无法定位'); return; }
+
+        // ── 方案1: 书签直接定位（如果有对应书签）─────────────
         if (itemType === 'suggestion' && itemIndex >= 0 && doc?.Bookmarks) {
-            const bookmarkName = `suggestion_${itemIndex}`;
+            const bmName = `suggestion_${itemIndex}`;
             try {
-                const bm = doc.Bookmarks.Item(bookmarkName);
-                if (bm?.Range) {
-                    await bm.Range.Select();
-                    if (typeof selection?.ScrollIntoView === 'function') {
-                        await selection.ScrollIntoView();
-                    }
-                    await highlightCurrentRange('info');
+                const bm = await doc.Bookmarks.Item(bmName);
+                const bmRange = await bm?.Range;
+                if (bmRange) {
+                    await bmRange.Select();
+                    doc.ActiveWindow?.ScrollIntoView?.(bmRange);
                     ElMessage.success(`已定位到建议 ${itemIndex + 1} 对应原文位置`);
                     return;
                 }
-            } catch {}
+            } catch (e) {
+                console.warn(`[doLocateText] bookmark ${bmName} not found:`, e.message);
+            }
         }
 
-        // 方案2: 尝试用 anchor_hint 文本搜索定位（WPS Range.Find）
-        let textSearchFailed = false;
+        // ── 方案2: anchor_hint / 原文字段搜索定位 ────────────
+        let anchorHint = normText;
+        if (itemType === 'suggestion' && itemIndex >= 0) {
+            const suggestion = reviewData.modification_suggestions?.[itemIndex];
+            if (suggestion?.anchor_hint) {
+                anchorHint = norm(suggestion.anchor_hint);
+            }
+        }
+        const searchText = anchorHint.length >= 2 ? anchorHint : normText;
+
         try {
-            if (doc?.Range) {
-                // anchor_hint 通常是 2-10 个字符的短文本片断，更容易匹配
-                const searchText = anchorHint.trim();
-                if (searchText.length >= 2) {
-                    // 尝试在文档中查找 anchor_hint
-                    const range = doc.Range(0, doc.Content.End || 0);
-                    const found = range.Find;
-                    if (found) {
-                        found.Text = searchText;
-                        found.Forward = true;
-                        found.Wrap = 1; // wdFindStop
-                        const success = found.Execute();
-                        if (success) {
-                            if (typeof selection?.ScrollIntoView === 'function') {
-                                await selection.ScrollIntoView();
-                            }
-                            await highlightCurrentRange('info');
-                            ElMessage.success(`已定位到：\"${searchText.substring(0, 10)}...\"`);
-                            return;
-                        }
-                        textSearchFailed = true;
+            if (doc?.Range && doc?.Content) {
+                // 获取文档实际末尾位置
+                const docEnd = doc.Content?.End ?? doc.Content?.Range?.End ?? 999999;
+                const searchRange = doc.Range(0, docEnd);
+                const findObj = searchRange.Find;
+
+                findObj.Text = searchText;
+                findObj.Forward = true;
+                findObj.Wrap = 0; // wdFindStop=0
+
+                let loop = 0;
+                while (loop < 100) {
+                    loop++;
+                    // Execute() 在 WebOffice 返回 [{ found: bool, pos: int, len: int }]
+                    const result = await findObj.Execute();
+
+                    // 标准化返回值
+                    let found = false, pos = -1, len = 0;
+                    if (Array.isArray(result) && result.length > 0) {
+                        found = !!result[0].found;
+                        pos = Number(result[0].pos) || -1;
+                        len = Number(result[0].len) || 0;
+                    } else if (typeof result === 'boolean') {
+                        found = result;
                     }
+
+                    if (!found || pos < 0) break;
+
+                    // 找到了！选中文本并滚动
+                    try {
+                        const foundRange = doc.Range(pos, pos + len);
+                        await foundRange.Select();
+                        doc.ActiveWindow?.ScrollIntoView?.(foundRange);
+                    } catch {
+                        // 选区失败也继续
+                    }
+
+                    ElMessage.success(`已定位："${searchText.substring(0, 12)}..."`);
+                    return;
                 }
             }
         } catch (e) {
-            console.warn('[doLocateText] anchor_hint search failed:', e.message);
-            textSearchFailed = true;
-        }
-        if (textSearchFailed) {
-            console.warn('[doLocateText] text search unavailable in WebOffice, falling back to contract_start');
+            console.warn('[doLocateText] Range.Find failed:', e.message);
         }
 
-        // 方案3: 书签不存在且搜索失败 → 跳转到 contract_start 书签
+        // ── 方案3: 跳转到 contract_start 书签 ────────────────
         try {
             if (doc?.Bookmarks) {
-                const startBm = doc.Bookmarks.Item('contract_start');
-                if (startBm?.Range) {
-                    await startBm.Range.Select();
-                    if (typeof selection?.ScrollIntoView === 'function') {
-                        await selection.ScrollIntoView();
-                    }
-                    ElMessage.warning({
-                        message: `无法定位到原文，已跳转到文档开头。请在左侧文档中手动查找："${anchorHint.substring(0, 12)}..."`,
-                        duration: 5000
-                    });
+                const startBm = await doc.Bookmarks.Item('contract_start');
+                const startRange = await startBm?.Range;
+                if (startRange) {
+                    await startRange.Select();
+                    doc.ActiveWindow?.ScrollIntoView?.(startRange);
+                    ElMessage.warning(
+                        `无法定位到原文，已跳转到文档开头。\n请手动查找："${searchText.substring(0, 15)}..."`,
+                        { duration: 5000 }
+                    );
                     return;
                 }
             }
@@ -2785,11 +2812,11 @@ export default {
             console.warn('[doLocateText] contract_start fallback failed:', e.message);
         }
 
-        // 方案4: 完全无法定位
-        ElMessage.warning({
-            message: `无法定位"${anchorHint.substring(0, 10)}..."，请在左侧文档中手动查找。`,
-            duration: 4000
-        });
+        // ── 方案4: 完全无法定位 ──────────────────────────────
+        ElMessage.warning(
+            `无法定位 "${searchText.substring(0, 15)}..."，请在左侧文档中手动查找。`,
+            { duration: 4000 }
+        );
     };
 
     const replaceTextOnServer = async (originalText, suggestedText, item = {}) => {

@@ -357,57 +357,110 @@ export default defineComponent({
       return t;
     };
 
-    // 查找所有匹配的原始位置（使用 WPS Find API）
-    // 使用 Selection.Find 查找文本（WebOffice 中比 doc.Find 更可靠）
+    // =============================================
+    // 原文定位核心：findAllMatchPositions
+    // 使用 sel.Find.Execute 遍历全文，返回所有匹配位置
+    // WebOffice 返回 [{ found, pos, len, wrap }]
+    // =============================================
     const findAllMatchPositions = async (originalText) => {
       const app = await getApplication();
-      if (!app) { console.warn('[WPS] findAllMatchPositions: no app'); return []; }
+      if (!app) { console.warn('[WPS] findAll: no app'); return []; }
       const doc = app.ActiveDocument;
-      if (!doc) { console.warn('[WPS] findAllMatchPositions: no ActiveDocument'); return []; }
+      if (!doc) { console.warn('[WPS] findAll: no doc'); return []; }
+
+      const normText = normalizeText(originalText);
+      if (!normText || normText.length < 2) return [];
+      console.log('[WPS] findAll:', normText.substring(0, 40));
+
       const positions = [];
+
+      // 方案A: sel.Find.Execute 遍历（WebOffice 中最可靠）
       try {
-        const normText = normalizeText(originalText);
-        console.log('[WPS] findAllMatchPositions searching:', JSON.stringify(normText.substring(0, 50)));
+        const sel = doc.ActiveWindow.Selection;
+        await sel.SetRange(0, 0);
+        let iter = 0;
+        const MAX_LOOPS = 200; // 防止死循环
 
-        // 方案1：使用 Selection.Find（WebOffice 中更可靠）
-        try {
-          const sel = doc.ActiveWindow.Selection;
-          // 清空当前选区，从头开始搜索
-          await sel.SetRange(0, 0);
-          let findResults = await sel.Find.Execute(normText, false);
-          console.log('[WPS] Selection.Find result:', JSON.stringify(findResults));
+        while (iter < MAX_LOOPS) {
+          iter++;
+          // Execute(matchText, wrap) — wrap=false 表示不环绕搜索
+          // WebOffice 返回 [{ found: bool, pos: int, len: int }]
+          let result = await sel.Find.Execute(normText, false);
 
-          if (Array.isArray(findResults) && findResults.length > 0) {
-            for (const result of findResults) {
-              positions.push([result.pos, result.pos + result.len]);
+          // 标准化返回值：可能是 [{...}], [bool], bool
+          let found = false, pos = -1, len = 0;
+          if (Array.isArray(result) && result.length > 0) {
+            found = !!result[0].found;
+            pos = Number(result[0].pos) || -1;
+            len = Number(result[0].len) || 0;
+          } else if (typeof result === 'boolean') {
+            found = result;
+          }
+
+          if (!found || pos < 0) break;
+
+          positions.push([pos, pos + len]);
+          console.log(`[WPS] findAll match ${positions.length}: pos=${pos} len=${len}`);
+
+          // 移动选区到匹配之后，准备下一次搜索
+          if (iter < MAX_LOOPS) {
+            try {
+              await sel.SetRange(pos + len, pos + len);
+            } catch {
+              break; // 无法移动就停止
             }
           }
-        } catch (selError) {
-          console.warn('[WPS] Selection.Find failed, trying doc.Find:', selError.message);
         }
-
-        // 方案2：若 Selection.Find 无结果，尝试 doc.Range.Find
-        if (positions.length === 0 && normText.length > 15) {
-          try {
-            const shortText = normText.substring(0, 15).replace(/[，。、；：""'']$/, '').trim();
-            console.log('[WPS] Trying short text:', shortText);
-            let findResults = await doc.Range(0, doc.Content.End || doc.Content.Range?.End || 0).Find.Execute(shortText, false);
-            console.log('[WPS] Range.Find short result:', JSON.stringify(findResults));
-
-            if (Array.isArray(findResults) && findResults.length > 0) {
-              for (const result of findResults) {
-                positions.push([result.pos, result.pos + result.len]);
-              }
-            }
-          } catch (rangeError) {
-            console.warn('[WPS] Range.Find also failed:', rangeError.message);
-          }
-        }
-
-        console.log('[WPS] findAllMatchPositions final positions:', positions);
-      } catch (error) {
-        console.error('[WPS] findAllMatchPositions error:', error.message, error.stack);
+        console.log(`[WPS] findAll: ${positions.length} matches found`);
+      } catch (e) {
+        console.warn('[WPS] findAll sel.Find failed:', e.message);
       }
+
+      // 方案B: 如果方案A失败，用 doc.Range.Find 搜索短文本片断
+      if (positions.length === 0 && normText.length > 10) {
+        try {
+          // 截取有辨识度的片段（前30字符，跳过开头常用词）
+          const shortText = normText.length > 30
+            ? normText.substring(10, 40).replace(/[，。、；：""'']$/, '').trim()
+            : normText.replace(/[，。、；：""'']$/, '').trim();
+
+          if (shortText.length >= 4) {
+            // doc.Content.End = 文档末尾位置（Word API）
+            const docEnd = doc.Content?.End ?? doc.Content?.Range?.End ?? 999999;
+            const searchRange = doc.Range(0, docEnd);
+            const findObj = searchRange.Find;
+
+            findObj.Text = shortText;
+            findObj.Forward = true;
+            findObj.Wrap = 0; // wdFindStop=0
+
+            let loop2 = 0;
+            while (loop2 < 50) {
+              loop2++;
+              const r = await findObj.Execute();
+              let found = false, pos = -1, len2 = 0;
+              if (Array.isArray(r) && r.length > 0) {
+                found = !!r[0].found;
+                pos = Number(r[0].pos) || -1;
+                len2 = Number(r[0].len) || 0;
+              } else if (typeof r === 'boolean') {
+                found = r;
+              }
+
+              if (!found || pos < 0) break;
+              positions.push([pos, pos + len2]);
+
+              // 移动到匹配之后
+              try { await searchRange.SetRange(pos + len2, pos + len2); } catch { break; }
+              findObj.Text = shortText; // 重设搜索文本
+            }
+            console.log(`[WPS] findAll Range.Find: ${positions.length} matches`);
+          }
+        } catch (e) {
+          console.warn('[WPS] findAll Range.Find failed:', e.message);
+        }
+      }
+
       return positions;
     };
 
@@ -539,13 +592,8 @@ export default defineComponent({
       }
 
       try {
-        // 优先使用 SDK 级别的 GoTo 方法
-        if (wpsInstance?.GoTo) {
-          const sdkResult = await wpsInstance.GoTo(targetBookmark);
-          console.log('[WPS] wpsInstance.GoTo result:', sdkResult);
-          if (sdkResult !== false && sdkResult !== null) return true;
-        }
-        // fallback: 使用 Selection.GoTo
+        // 使用 Selection.GoTo 定位书签（Word API 标准方式）
+        // WdGoToItem.wdGoToBookmark = -1
         await doc.ActiveWindow.Selection.GoTo({
           What: app.Enum.WdGoToItem.wdGoToBookmark,
           Name: targetBookmark,
@@ -553,8 +601,8 @@ export default defineComponent({
         return true;
       } catch (error) {
         console.error('[WPS] gotoBookmark error:', error.message);
-        ElMessage.warning('定位失败：' + error.message);
-        return false;
+        // 抛出异常让调用方 catch 住，以便触发书签重建逻辑
+        throw new Error('书签定位失败：' + error.message);
       }
     };
 
