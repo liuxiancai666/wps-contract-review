@@ -466,10 +466,11 @@ const replaceTextInDocx = (filePath, originalText, suggestedText, originalCandid
 };
 
 const createContractVersionSnapshot = async (contract, sourceAction = 'replace-text') => {
-    const [{ next_version_no: nextVersionNo }] = await db('contract_versions')
+    const result = await db('contract_versions')
         .where({ contract_id: contract.id })
-        .max({ next_version_no: 'version_no' });
-    const versionNo = Number(nextVersionNo || 0) + 1;
+        .max('version_no as next_version_no');
+    const nextVersionNo = result[0] ? (result[0].next_version_no || result[0].max || 0) : 0;
+    const versionNo = Number(nextVersionNo) + 1;
     const ext = path.extname(contract.storage_path).toLowerCase();
     const snapshotDir = path.join(__dirname, '..', 'uploads', 'versions');
     await fs.promises.mkdir(snapshotDir, { recursive: true });

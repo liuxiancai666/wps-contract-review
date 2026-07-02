@@ -2042,19 +2042,71 @@ export default {
 
     const normalizeSearchText = (text) => {
         return String(text || '')
-            .replace(/\s+/g, ' ')      // 统一空白
+            .replace(/\s+/g, ' ')
             .replace(/[“”]/g, '"')
             .replace(/[‘’]/g, "'")
-            .replace(/[\u200B-\u200D\uFEFF]/g, '') // 零宽字符
+            .replace(/[：]/g, ':')
+            .replace(/[，]/g, ',')
+            .replace(/[。]/g, '.')
+            .replace(/[、]/g, ',')
+            .replace(/[；]/g, ';')
+            .replace(/[！]/g, '!')
+            .replace(/[？]/g, '?')
+            .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '')
             .trim();
     };
 
-    const findTextRange = async (text) => {
+    const findTextRange = async (text, maxRetries = 2) => {
         const normalized = normalizeSearchText(text);
-        const candidates = [normalized, ...splitCandidateSentences(normalized).filter(s => s.length >= 10)];
-        for (const candidate of candidates) {
-            const result = await executeEditorMethod('Search', [candidate]);
-            if (Array.isArray(result) && result.length > 0) return result[0];
+        if (!normalized) return null;
+
+        const generateCandidates = (base) => {
+            const candidates = [base];
+            const segments = splitCandidateSentences(base);
+            
+            for (let i = 0; i < segments.length; i++) {
+                if (segments[i].length >= 8) candidates.push(segments[i]);
+                if (i < segments.length - 1) {
+                    const combined = segments[i] + ' ' + segments[i + 1];
+                    if (combined.length >= 15) candidates.push(combined);
+                }
+            }
+            
+            if (base.length > 60) {
+                candidates.push(base.slice(0, 60));
+                candidates.push(base.slice(-60));
+                candidates.push(base.slice(0, 40));
+                candidates.push(base.slice(-40));
+            }
+            
+            if (base.length > 30) {
+                candidates.push(base.slice(10, 50));
+                candidates.push(base.slice(-50, -10));
+            }
+
+            const compact = base.replace(/\s+/g, '');
+            if (compact && compact.length >= 8 && compact !== base) candidates.push(compact);
+            
+            return [...new Set(candidates.filter(c => c.length >= 8))];
+        };
+
+        const candidates = generateCandidates(normalized);
+        
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            for (const candidate of candidates) {
+                try {
+                    const result = await executeEditorMethod('Search', [candidate]);
+                    if (Array.isArray(result) && result.length > 0) {
+                        return result[0];
+                    }
+                } catch {
+                    continue;
+                }
+            }
+            
+            if (attempt < maxRetries) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
         }
         return null;
     };
@@ -2062,6 +2114,9 @@ export default {
     const normalizeCandidate = (text) => String(text || '')
         .replace(/[“”]/g, '"')
         .replace(/[‘’]/g, "'")
+        .replace(/[：]/g, ':')
+        .replace(/[，]/g, ',')
+        .replace(/[。]/g, '.')
         .replace(/\s+/g, '')
         .trim();
 
@@ -2083,6 +2138,12 @@ export default {
         if (originalText && originalText.length > 80) {
             candidates.push(originalText.slice(0, 80));
             candidates.push(originalText.slice(-80));
+            candidates.push(originalText.slice(0, 50));
+            candidates.push(originalText.slice(-50));
+        }
+        if (originalText && originalText.length > 50) {
+            candidates.push(originalText.slice(10, 60));
+            candidates.push(originalText.slice(-60, -10));
         }
         const seen = new Set();
         return candidates
@@ -2096,17 +2157,27 @@ export default {
             });
     };
 
-    const findTextRangeByCandidates = async (candidates) => {
-        for (const candidate of candidates) {
-            const range = await findTextRange(candidate);
-            if (range) return { range, matchedText: candidate };
+    const findTextRangeByCandidates = async (candidates, maxRetries = 1) => {
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            for (const candidate of candidates) {
+                const range = await findTextRange(candidate, 0);
+                if (range) return { range, matchedText: candidate };
+            }
+            if (attempt < maxRetries) {
+                await new Promise(resolve => setTimeout(resolve, 300));
+            }
         }
         return null;
     };
 
     const ensureEditorReady = () => {
-        if (!getEditor()) {
+        const editor = getEditor();
+        if (!editor) {
             ElMessage.warning('编辑器尚未就绪，请等待左侧文档加载完成。');
+            return false;
+        }
+        if (typeof editor.executeMethod !== 'function' && typeof editor.createConnector !== 'function') {
+            ElMessage.warning('编辑器 API 未就绪，请稍候重试。');
             return false;
         }
         return true;
@@ -2139,18 +2210,34 @@ export default {
         }
     };
 
-    const replaceTextOnServer = async (originalText, suggestedText, item = {}) => {
-        const response = await api.replaceContractText(contract.id, {
-            originalText,
-            suggestedText,
-            originalCandidates: buildSuggestionCandidates(originalText, item),
-        });
-        return response.data.replacements || 0;
+    const replaceTextOnServer = async (originalText, suggestedText, item = {}, retryCount = 0) => {
+        const maxRetries = 2;
+        try {
+            const response = await api.replaceContractText(contract.id, {
+                originalText,
+                suggestedText,
+                originalCandidates: buildSuggestionCandidates(originalText, item),
+            });
+            return response.data.replacements || 0;
+        } catch (error) {
+            if (retryCount < maxRetries && (error.response?.status === 500 || error.response?.status === 409)) {
+                await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
+                return replaceTextOnServer(originalText, suggestedText, item, retryCount + 1);
+            }
+            throw error;
+        }
     };
 
     const markAdoptedText = async (originalText, suggestedText) => {
         try {
-            const replacement = await findTextRangeByCandidates([suggestedText, suggestedText.slice(0, 80), suggestedText.slice(-80)]);
+            const searchCandidates = [
+                suggestedText,
+                suggestedText.slice(0, 80),
+                suggestedText.slice(-80),
+                suggestedText.slice(0, 50),
+                suggestedText.slice(-50),
+            ];
+            const replacement = await findTextRangeByCandidates(searchCandidates);
             if (!replacement?.range) return;
             await executeEditorMethod('SelectRange', [replacement.range]);
             const highlightMethods = [
@@ -2163,48 +2250,12 @@ export default {
                     await executeEditorMethod(method, args);
                     break;
                 } catch {
-                    // Try the next OnlyOffice build-specific method name.
+                    continue;
                 }
             }
             await executeEditorMethod('AddComment', [{ text: `采纳前原文：${originalText}`, author: 'AI 审查' }]).catch(() => null);
         } catch {
             // Highlight/comment support depends on the deployed OnlyOffice build.
-        }
-    };
-
-    const replaceTextInEditor = async (originalText, suggestedText, onSuccess, onFailure, item = {}) => {
-        const runServerFallback = async (statusPrefix = 'OnlyOffice 未开放当前编辑方法，已更新源文件') => {
-            try {
-                const replacements = await replaceTextOnServer(originalText, suggestedText, item);
-                onSuccess?.({ fallback: true, replacements });
-                ElMessage.success(`${statusPrefix}；当前编辑器不刷新，重新打开该合同后可见。`);
-            } catch (serverError) {
-                const message = serverError.response?.data?.error || '服务器替换失败，请缩短原文片段后重试。';
-                ElMessage.error(message);
-                onFailure?.(message);
-            }
-        };
-
-        if (!ensureEditorReady()) {
-            onFailure?.('编辑器尚未就绪，请稍候');
-            return;
-        }
-        try {
-            const matched = await findTextRangeByCandidates(buildSuggestionCandidates(originalText, item));
-            if (!matched?.range) {
-                await runServerFallback('编辑器未匹配到原文，已尝试从 DOCX 源文件替换');
-                return;
-            }
-            await executeEditorMethod('SelectRange', [matched.range]);
-            try {
-                await executeEditorMethod('PasteText', [suggestedText]);
-            } catch {
-                await executeEditorMethod('ReplaceText', [matched.range, suggestedText]);
-            }
-            await markAdoptedText(originalText, suggestedText);
-            onSuccess?.();
-        } catch (error) {
-            await runServerFallback();
         }
     };
 
@@ -2215,12 +2266,14 @@ export default {
         try {
             const res = await api.getFreshEditorConfig(contract.id);
             const editorConfig = res.data?.editorConfig;
-            if (editorConfig && typeof editor.refreshFile === 'function') {
+            if (!editorConfig) return false;
+
+            if (typeof editor.refreshFile === 'function') {
                 editor.refreshFile(editorConfig.document || editorConfig);
                 contract.editorConfig = editorConfig;
                 return true;
             }
-            if (editorConfig && typeof editor.setConfig === 'function') {
+            if (typeof editor.setConfig === 'function') {
                 editor.setConfig(editorConfig);
                 contract.editorConfig = editorConfig;
                 return true;
@@ -2249,38 +2302,43 @@ export default {
                 ElMessage.success('已更新源文件，刷新页面后可查看变更');
             }
         } catch (err) {
-            const msg = err.response?.data?.error || '替换失败';
+            const msg = err.response?.data?.error || '替换失败，请检查网络连接或稍后重试。';
             ElMessage.error(msg);
             onFailure?.(msg);
         }
     };
 
-    const replaceTextInEditorFinal = async (originalText, suggestedText, onSuccess, onFailure, item = {}) => {
+    const replaceTextInEditor = async (originalText, suggestedText, onSuccess, onFailure, item = {}) => {
+        if (!originalText || !suggestedText) {
+            ElMessage.warning('缺少原文或建议修改文本');
+            onFailure?.('缺少必要参数');
+            return;
+        }
+
         if (!ensureEditorReady()) {
             await serverFallback(originalText, suggestedText, onSuccess, onFailure, item);
             return;
         }
 
-        let success = false;
         const editor = getEditor();
+        let success = false;
 
         try {
-            const canUseLiveApi = typeof editor.executeMethod === 'function'
-                || typeof editor.createConnector === 'function'
-                || Boolean(window.Asc?.plugin?.callCommand);
-            if (!canUseLiveApi) {
+            const matched = await findTextRangeByCandidates(buildSuggestionCandidates(originalText, item));
+            
+            if (!matched?.range) {
+                ElMessage.info('编辑器未匹配到原文，尝试从源文件替换...');
                 await serverFallback(originalText, suggestedText, onSuccess, onFailure, item);
                 return;
             }
 
-            const matched = await findTextRangeByCandidates(buildSuggestionCandidates(originalText, item));
-            if (matched?.range) {
-                await executeEditorMethod('SelectRange', [matched.range]);
-            }
+            await executeEditorMethod('SelectRange', [matched.range]);
 
-            if (matched?.range && typeof editor.createConnector === 'function') {
-                const connector = editor.createConnector();
-                if (connector?.callCommand) {
+            const replacementMethods = [
+                async () => {
+                    if (typeof editor.createConnector !== 'function') return false;
+                    const connector = editor.createConnector();
+                    if (!connector?.callCommand) return false;
                     const asc = window.Asc || (window.Asc = {});
                     asc.scope = asc.scope || {};
                     asc.scope.suggestedText = suggestedText;
@@ -2297,40 +2355,43 @@ export default {
                         }, true);
                         setTimeout(resolve, 800);
                     });
-                    success = true;
-                }
-            }
-
-            if (!success && matched?.range && window.Asc?.plugin?.callCommand) {
-                window.Asc.scope = window.Asc.scope || {};
-                window.Asc.scope.suggestedText = suggestedText;
-                await new Promise((resolve) => {
-                    window.Asc.plugin.callCommand(function() {
-                        try {
-                            const oDocument = Api.GetDocument();
-                            const oRange = oDocument.GetRangeBySelect?.() || null;
-                            if (oRange) oRange.Delete();
-                            const oParagraph = Api.CreateParagraph();
-                            oParagraph.AddText(Asc.scope.suggestedText);
-                            oDocument.InsertContent([oParagraph], false, { KeepTextOnly: false });
-                        } catch (e) {}
-                    }, true);
-                    setTimeout(resolve, 800);
-                });
-                success = true;
-            }
-
-            if (!success && matched?.range) {
-                await executeEditorMethod('SelectRange', [matched.range]);
-                try {
+                    return true;
+                },
+                async () => {
+                    if (!window.Asc?.plugin?.callCommand) return false;
+                    window.Asc.scope = window.Asc.scope || {};
+                    window.Asc.scope.suggestedText = suggestedText;
+                    await new Promise((resolve) => {
+                        window.Asc.plugin.callCommand(function() {
+                            try {
+                                const oDocument = Api.GetDocument();
+                                const oRange = oDocument.GetRangeBySelect?.() || null;
+                                if (oRange) oRange.Delete();
+                                const oParagraph = Api.CreateParagraph();
+                                oParagraph.AddText(Asc.scope.suggestedText);
+                                oDocument.InsertContent([oParagraph], false, { KeepTextOnly: false });
+                            } catch (e) {}
+                        }, true);
+                        setTimeout(resolve, 800);
+                    });
+                    return true;
+                },
+                async () => {
+                    await executeEditorMethod('ReplaceText', [matched.range, suggestedText]);
+                    return true;
+                },
+                async () => {
                     await executeEditorMethod('PasteText', [suggestedText]);
-                    success = true;
-                } catch {}
-                if (!success) {
-                    try {
-                        await executeEditorMethod('ReplaceText', [matched.range, suggestedText]);
-                        success = true;
-                    } catch {}
+                    return true;
+                },
+            ];
+
+            for (const method of replacementMethods) {
+                try {
+                    success = await method();
+                    if (success) break;
+                } catch {
+                    continue;
                 }
             }
 
@@ -2447,14 +2508,14 @@ export default {
 
     const applyFocusedSuggestion = () => {
         if (!focusedReviewResult.value?.suggested_text) return;
-        replaceTextInEditorFinal(focusedReviewText.value, focusedReviewResult.value.suggested_text, () => {
+        replaceTextInEditor(focusedReviewText.value, focusedReviewResult.value.suggested_text, (result = {}) => {
             selectedSuggestionPreview.value = {
                 before: focusedReviewText.value,
                 after: focusedReviewResult.value.suggested_text,
-                status: '专项审查建议已替换到左侧文档',
+                status: result.fallback ? '已写入源文件，当前页面未刷新' : '专项审查建议已替换到左侧文档',
             };
             focusedReviewText.value = focusedReviewResult.value.suggested_text;
-            ElMessage.success('专项审查建议已更新到左侧文档。');
+            ElMessage.success(result.fallback ? '专项审查建议已更新到源文件，刷新页面后可见。' : '专项审查建议已更新到左侧文档。');
         }, (status) => {
             selectedSuggestionPreview.value = {
                 before: focusedReviewText.value,
@@ -2470,24 +2531,33 @@ export default {
             return;
         }
         if (!ensureEditorReady()) return;
+
+        const commentText = comment || 'AI 审查建议';
+        const commentAuthor = 'AI 审查专家';
+
         try {
-            const range = await findTextRange(text);
-            if (!range) {
-                ElMessage.info('定位原文失败，无法添加批注。');
+            const candidates = buildSuggestionCandidates(text);
+            const matched = await findTextRangeByCandidates(candidates);
+            
+            if (!matched?.range) {
+                ElMessage.info('定位原文失败，无法添加批注。请尝试手动选中后添加。');
                 return;
             }
-            await executeEditorMethod('SelectRange', [range]);
 
-            // 通过 Plugin API callCommand 添加批注（OnlyOffice v9 唯一可靠方式）
+            await executeEditorMethod('SelectRange', [matched.range]);
+
             const editor = getEditor();
             const asc = window.Asc || (window.Asc = {});
             asc.scope = asc.scope || {};
-            asc.scope.commentText = comment || 'AI 审查建议';
-            asc.scope.commentAuthor = 'AI 审查专家';
+            asc.scope.commentText = commentText;
+            asc.scope.commentAuthor = commentAuthor;
 
-            if (typeof editor.createConnector === 'function') {
-                const connector = editor.createConnector();
-                if (connector?.callCommand) {
+            const addCommentMethods = [
+                async () => {
+                    if (typeof editor.createConnector !== 'function') return false;
+                    const connector = editor.createConnector();
+                    if (!connector?.callCommand) return false;
+                    let success = false;
                     await new Promise((resolve) => {
                         connector.callCommand(function() {
                             try {
@@ -2495,43 +2565,68 @@ export default {
                                 const oRange = oDocument.GetRangeBySelect?.() || oDocument.GetSelection();
                                 if (!oRange) return;
                                 oRange.AddComment(Asc.scope.commentText, Asc.scope.commentAuthor);
+                                success = true;
                             } catch (e) {
-                                console.warn('[addDocComment] callCommand failed:', e);
+                                console.warn('[addDocComment] createConnector.callCommand failed:', e);
                             }
                         }, true);
                         setTimeout(resolve, 1000);
                     });
-                    ElMessage.success('已在文档中添加批注。');
-                    return;
+                    return success;
+                },
+                async () => {
+                    if (!window.Asc?.plugin?.callCommand) return false;
+                    let success = false;
+                    await new Promise((resolve) => {
+                        window.Asc.plugin.callCommand(function() {
+                            try {
+                                const oDocument = Api.GetDocument();
+                                const oRange = oDocument.GetRangeBySelect?.() || oDocument.GetSelection();
+                                if (!oRange) return;
+                                oRange.AddComment(Asc.scope.commentText, Asc.scope.commentAuthor);
+                                success = true;
+                            } catch (e) {
+                                console.warn('[addDocComment] plugin.callCommand failed:', e);
+                            }
+                        }, true);
+                        setTimeout(resolve, 1000);
+                    });
+                    return success;
+                },
+                async () => {
+                    try {
+                        await executeEditorMethod('AddComment', [{ text: commentText, author: commentAuthor }]);
+                        return true;
+                    } catch {
+                        try {
+                            await executeEditorMethod('AddComment', [{ text: commentText }]);
+                            return true;
+                        } catch {
+                            return false;
+                        }
+                    }
+                },
+            ];
+
+            let success = false;
+            for (const method of addCommentMethods) {
+                try {
+                    success = await method();
+                    if (success) break;
+                } catch (e) {
+                    console.warn('[addDocComment] method failed:', e);
+                    continue;
                 }
             }
 
-            // 降级：window.Asc.plugin.callCommand
-            if (window.Asc?.plugin?.callCommand) {
-                await new Promise((resolve) => {
-                    window.Asc.plugin.callCommand(function() {
-                        try {
-                            const oDocument = Api.GetDocument();
-                            const oRange = oDocument.GetRangeBySelect?.() || oDocument.GetSelection();
-                            if (!oRange) return;
-                            oRange.AddComment(Asc.scope.commentText, Asc.scope.commentAuthor);
-                        } catch (e) {
-                            console.warn('[addDocComment] plugin.callCommand failed:', e);
-                        }
-                    }, true);
-                    setTimeout(resolve, 1000);
-                });
+            if (success) {
                 ElMessage.success('已在文档中添加批注。');
-                return;
+            } else {
+                ElMessage.warning('批注接口调用失败，请检查 OnlyOffice 版本或手动添加批注。');
             }
-
-            // 终极降级：executeMethod 对象参数
-            await executeEditorMethod('AddComment', [{ text: comment || 'AI 审查建议', author: 'AI 审查专家' }]).catch(async () => {
-                await executeEditorMethod('AddComment', [{ text: comment || 'AI 审查建议' }]);
-            });
-            ElMessage.success('已在文档中添加批注，并尝试写入书签锚点。');
         } catch (error) {
-            ElMessage.error('添加批注失败：当前 OnlyOffice 未开放批注接口。');
+            console.error('[addDocComment] error:', error);
+            ElMessage.error('添加批注失败，请检查 OnlyOffice 是否已完全加载或稍后重试。');
         }
     };
 
@@ -2545,7 +2640,7 @@ export default {
         }
 
         previewSuggestion(item, '正在采纳');
-        replaceTextInEditorFinal(originalText, suggestedText, (result = {}) => {
+        replaceTextInEditor(originalText, suggestedText, (result = {}) => {
             item.adopted = true;
             item.adopted_original = originalText;
             adoptedHighlights.value[suggestionTitle(item, 0)] = originalText;
