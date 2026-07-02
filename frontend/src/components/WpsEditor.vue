@@ -347,14 +347,26 @@ export default defineComponent({
     // ============================================================
 
     // 规范化文本（用于 WPS Find API 匹配）
+    // 升级版：全角→半角 + 零宽字符清理 + Word 特殊字符
     const normalizeText = (text) => {
       if (!text) return '';
       let t = String(text);
-      t = t.replace(/[\r\n\v]+/g, '^p');  // 换行 → ^p
-      t = t.replace(/\t/g, '^t');          // 制表符 → ^t
-      t = t.replace(/\u0007/g, '');        // 移除 bell 字符
-      t = t.replace(/[\x00-\x08\x0C-\x1F\x7F]/g, ''); // 移除控制字符
-      return t;
+      // 零宽字符、不间断空格
+      t = t.replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '');
+      // 全角标点 → 半角（中文文档常见全角逗号句号）
+      t = t.replace(/[""]/g, '"').replace(/['']/g, "'");
+      t = t.replace(/[：]/g, ':').replace(/[，]/g, ',');
+      t = t.replace(/[。]/g, '.').replace(/[、]/g, ',');
+      t = t.replace(/[；]/g, ';').replace(/[！]/g, '!');
+      t = t.replace(/[？]/g, '?');
+      // 连续空白合并
+      t = t.replace(/\s+/g, ' ');
+      // Word 换行/制表符（Find API 专用）
+      t = t.replace(/[\r\n\v]+/g, '^p');
+      t = t.replace(/\t/g, '^t');
+      t = t.replace(/\u0007/g, '');
+      t = t.replace(/[\x00-\x08\x0C-\x1F\x7F]/g, '');
+      return t.trim();
     };
 
     // =============================================
@@ -458,6 +470,43 @@ export default defineComponent({
           }
         } catch (e) {
           console.warn('[WPS] findAll Range.Find failed:', e.message);
+        }
+      }
+
+      // 方案C: JS全文匹配（终极fallback，来自trae分支思路）
+      // 当 WPS Find API 无法找到时，用 JS 在完整文档文本中搜索
+      if (positions.length === 0) {
+        try {
+          const fullDocContent = await doc.Content;
+          const fullText = String(await fullDocContent?.Text || '');
+          if (fullText && normText) {
+            // 归一化后匹配
+            const normalizeForMatch = (s) => s
+              .replace(/\s+/g, '').replace(/[""]/g, '"')
+              .replace(/['']/g, "'").replace(/[：]/g, ':')
+              .replace(/[，]/g, ',').replace(/[。]/g, '.')
+              .replace(/[、]/g, ',').replace(/[；]/g, ';')
+              .replace(/[！]/g, '!').replace(/[？]/g, '?');
+            const normFull = normalizeForMatch(fullText);
+            const idx = normFull.indexOf(normalizeForMatch(normText));
+            if (idx >= 0) {
+              // 将归一化位置映射回原文位置
+              let rawStart = 0, normCount = 0;
+              while (rawStart < fullText.length && normCount < idx) {
+                if (!/\s/.test(fullText[rawStart])) normCount++;
+                rawStart++;
+              }
+              let rawEnd = rawStart, matchLen = 0;
+              while (rawEnd < fullText.length && matchLen < normalizeForMatch(normText).length) {
+                if (!/\s/.test(fullText[rawEnd])) matchLen++;
+                rawEnd++;
+              }
+              positions.push([rawStart, rawEnd]);
+              console.log(`[WPS] findAll JS-match: pos=[${rawStart},${rawEnd}], text="${fullText.substring(rawStart, rawEnd).substring(0,30)}"`);
+            }
+          }
+        } catch (e) {
+          console.warn('[WPS] findAll JS-match failed:', e.message);
         }
       }
 
@@ -627,11 +676,12 @@ export default defineComponent({
           if (!existing.includes(targetBookmark)) {
             const positions = await findAllMatchPositions(searchText);
             if (positions?.length > 0) {
-              await doc.Bookmarks.Add({ Name: targetBookmark, Range: { Start: positions[0][0], End: positions[0][1] } });
+              const range = doc.Range(positions[0][0], positions[0][1]);
+              await doc.Bookmarks.Add({ Name: targetBookmark, Range: range });
               // 同步创建标题书签（定位用）
               const titleBm = `risk_title_${iId}`;
               if (!existing.includes(titleBm)) {
-                await doc.Bookmarks.Add({ Name: titleBm, Range: { Start: positions[0][0], End: positions[0][1] } });
+                await doc.Bookmarks.Add({ Name: titleBm, Range: range });
               }
               if (item) { item.titleBookmark = titleBm; item.editBookmark = targetBookmark; }
               ElMessage.success('已创建批注书签');
@@ -705,10 +755,11 @@ export default defineComponent({
           if (!existing.includes(targetBookmark)) {
             const positions = await findAllMatchPositions(searchText);
             if (positions?.length > 0) {
-              await doc.Bookmarks.Add({ Name: targetBookmark, Range: { Start: positions[0][0], End: positions[0][1] } });
+              const range = doc.Range(positions[0][0], positions[0][1]);
+              await doc.Bookmarks.Add({ Name: targetBookmark, Range: range });
               const titleBm = `risk_title_${iId}`;
               if (!existing.includes(titleBm)) {
-                await doc.Bookmarks.Add({ Name: titleBm, Range: { Start: positions[0][0], End: positions[0][1] } });
+                await doc.Bookmarks.Add({ Name: titleBm, Range: range });
               }
               if (item) { item.titleBookmark = titleBm; item.editBookmark = targetBookmark; }
               ElMessage.success('已创建修订书签');

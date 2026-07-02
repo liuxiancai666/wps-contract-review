@@ -2706,13 +2706,14 @@ export default {
     // 方案1: 书签定位 → 方案2: anchor_hint 搜索 → 方案3: contract_start → 方案4: 提示手动
     // =============================================
     const doLocateText = async (text, itemType, itemIndex, app) => {
-        // 局部 normalizeText（与 WpsEditor.vue 保持一致）
+        // 局部 normalizeText（与 WpsEditor.vue 保持一致，全角→半角）
         const norm = (t) => String(t || '')
-            .replace(/\s+/g, ' ')
-            .replace(/[""]/g, '"')
-            .replace(/['']/g, "'")
             .replace(/[\u200B-\u200D\uFEFF]/g, '')
-            .trim();
+            .replace(/[""]/g, '"').replace(/['']/g, "'")
+            .replace(/[：]/g, ':').replace(/[，]/g, ',')
+            .replace(/[。]/g, '.').replace(/[、]/g, ',')
+            .replace(/[；]/g, ';').replace(/[！]/g, '!').replace(/[？]/g, '?')
+            .replace(/\s+/g, ' ').trim();
 
         const doc = app?.ActiveDocument;
         if (!doc) { console.warn('[doLocateText] no doc'); return; }
