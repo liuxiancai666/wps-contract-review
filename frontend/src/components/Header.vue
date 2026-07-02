@@ -1,6 +1,6 @@
 <template>
   <div class="header-component">
-    <img src="/asserts/logo.png" alt="合同审查" class="logo">
+    <img src="/asserts/logo_v2.png" alt="牛马在线" class="logo">
     <h1>合同审查 AI 应用</h1>
   </div>
 </template>

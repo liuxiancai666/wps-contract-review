@@ -2,7 +2,7 @@
   <div class="login-page">
     <div class="login-card">
       <div class="login-header">
-        <img src="/asserts/logo.png" alt="合同审查" class="login-logo" />
+        <img src="/asserts/logo_v2.png" alt="牛马在线" class="login-logo" />
         <h1>合同审查系统</h1>
         <p class="login-subtitle">{{ isLogin ? '登录以继续' : '创建新账号' }}</p>
       </div>
