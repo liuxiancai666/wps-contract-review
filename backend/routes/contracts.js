@@ -229,6 +229,46 @@ const callJsonLLM = async (prompt) => {
     return cleanJsonResponse(completion.choices[0].message.content);
 };
 
+const buildWpsConfig = (contractRecord, userId) => {
+    const ext = path.extname(contractRecord.storage_path || '').toLowerCase().replace('.', '') || 'docx';
+    const fileId = `contract-${contractRecord.id}`;
+    const hasReviewResult = !!(contractRecord.analysis_result && contractRecord.analysis_status === 'completed');
+    const mode = hasReviewResult ? 'nomal' : 'simple';
+    const WPS_APP_ID = process.env.WPS_APP_ID || 'SX20260701SKURKN';
+    const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET;
+    const WPS_ENDPOINT = process.env.WPS_ENDPOINT || 'https://o.wpsgo.com';
+
+    // 生成 JWT token（供 WPS SDK 初始化用）
+    let token = null;
+    if (WPS_TOKEN_SECRET) {
+        try {
+            token = jwt.sign(
+                {
+                    appId: WPS_APP_ID,
+                    userId: String(userId),
+                    contractId: String(contractRecord.id),
+                    fileId,
+                    exp: Math.floor(Date.now() / 1000) + 7200, // 2小时有效期
+                },
+                WPS_TOKEN_SECRET,
+                { algorithm: 'HS256' }
+            );
+        } catch (err) {
+            console.error('[buildWpsConfig] JWT sign error:', err.message);
+        }
+    }
+
+    return {
+        appId: WPS_APP_ID,
+        fileId,
+        fileSuffix: ext,
+        mode,          // 'nomal'=有审查结果/'simple'=编辑模式
+        endpoint: WPS_ENDPOINT,
+        token,         // JWT token（SDK 初始化用）
+        hasReviewResult,
+    };
+};
+
 const buildOnlyOfficeConfig = (contractRecord, ext = 'docx') => {
     const isPdf = ext === 'pdf';
     const fileUrl = `${BACKEND_URL_FOR_DOCKER}/api/uploads/${path.basename(contractRecord.storage_path)}`;
@@ -2591,6 +2631,21 @@ router.post('/:id/force-save', async (req, res) => {
     } catch (error) {
         console.error(`[ERROR] Failed to force-save contract ${req.params.id}:`, error.response?.data || error.message);
         res.status(500).json({ error: 'Failed to trigger OnlyOffice force-save.' });
+    }
+});
+
+router.get('/:id/wps-config', async (req, res) => {
+    const { id } = req.params;
+    const userId = req.header('X-User-ID');
+    if (!userId) return res.status(401).json({ error: 'User ID is required.' });
+
+    try {
+        const contractRecord = await db('contracts').where({ id, user_id: userId }).first();
+        if (!contractRecord) return res.status(404).json({ error: 'Contract not found.' });
+        res.json(buildWpsConfig(contractRecord, userId));
+    } catch (error) {
+        console.error('[ERROR] Failed to fetch wps-config:', error);
+        res.status(500).json({ error: 'Server error while fetching WPS config.' });
     }
 });
 
