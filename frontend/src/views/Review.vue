@@ -370,12 +370,36 @@
                             <div v-for="(item, index) in filteredAndSortedDisputePoints" :key="'dp-' + index" :class="['p-4 bg-bg-subtle rounded-md border border-border-color', normalizeSeverity(item.severity) === 'high' ? 'border-l-4 border-l-red-500' : normalizeSeverity(item.severity) === 'medium' ? 'border-l-4 border-l-amber-500' : 'border-l-4 border-l-blue-500']">
                                 <div class="flex justify-between items-start gap-2">
                                     <p class="font-semibold text-text-dark">{{ disputeTitle(item, index) }}</p>
-                                    <span v-if="item.severity" :class="severityClass(item.severity)" class="px-2 py-0.5 text-xs font-bold rounded border whitespace-nowrap">{{ severityLabel(item.severity) }}</span>
+                                    <div class="flex items-center gap-2">
+                                        <span v-if="item.severity" :class="severityClass(item.severity)" class="px-2 py-0.5 text-xs font-bold rounded border whitespace-nowrap">{{ severityLabel(item.severity) }}</span>
+                                        <div class="flex space-x-1">
+                                            <el-tooltip v-if="editorEnabled" content="在文档中定位" placement="top">
+                                                <button @click="locateText(item.original_clause)" class="p-1 text-gray-400 hover:text-primary transition-colors">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                                                </button>
+                                            </el-tooltip>
+                                            <el-tooltip v-if="editorEnabled" content="添加批注" placement="top">
+                                                <button @click="addDocComment(item.original_clause, item.dispute_rationale)" class="p-1 text-gray-400 hover:text-primary transition-colors">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" /></svg>
+                                                </button>
+                                            </el-tooltip>
+                                        </div>
+                                    </div>
                                 </div>
                                 <p v-if="!showPlainLanguage" class="mt-2 text-sm text-text-main whitespace-pre-line">{{ disputeDescription(item) }}</p>
                                 <div v-else class="mt-2 p-3 bg-blue-50 text-blue-800 rounded-md border-l-4 border-blue-400">
                                     <p class="text-xs font-bold mb-1">📢 大白话解释：</p>
                                     <p class="text-sm">{{ item.plain_language || disputeDescription(item) }}</p>
+                                </div>
+                                <div v-if="item.suggested_text" class="mt-3 p-3 bg-green-50 rounded-md border-l-4 border-green-400">
+                                    <p class="text-xs font-bold text-green-800 mb-1">💡 修改建议：</p>
+                                    <p class="text-sm text-green-900 whitespace-pre-line">{{ item.suggested_text }}</p>
+                                    <div v-if="editorEnabled" class="mt-2 flex justify-end">
+                                        <button @click="adoptDisputeSuggestion(item)" :disabled="isPdfContract" class="px-3 py-1.5 text-xs font-medium text-white bg-green-600 rounded hover:bg-green-700 transition-colors flex items-center disabled:opacity-50 disabled:cursor-not-allowed">
+                                            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+                                            采纳建议
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -2625,6 +2649,37 @@ export default {
         }, item);
     };
 
+    const adoptDisputeSuggestion = (item) => {
+        const originalText = item.original_clause;
+        const suggestedText = item.suggested_text;
+
+        if (!originalText || !suggestedText) {
+            ElMessage.warning('该风险点缺少可自动替换的原文或建议文本，请手动修改。');
+            return;
+        }
+
+        selectedSuggestionPreview.value = {
+            before: originalText,
+            after: suggestedText,
+            status: '正在采纳',
+        };
+
+        replaceTextInEditor(originalText, suggestedText, (result = {}) => {
+            item.adopted = true;
+            item.adopted_original = originalText;
+            adoptedHighlights.value[item.title] = originalText;
+            if (result.fallback) {
+                selectedSuggestionPreview.value.status = '已写入源文件，当前页面未刷新';
+                ElMessage.success('风险点建议已采纳，源文件已更新；当前页面未刷新。');
+            } else {
+                selectedSuggestionPreview.value.status = '已实时更新到左侧文档';
+                ElMessage.success('风险点建议已采纳，左侧文档已更新。');
+            }
+        }, (status) => {
+            selectedSuggestionPreview.value.status = status;
+        }, item);
+    };
+
     const downloadBlob = (blob, filename) => {
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
@@ -2790,6 +2845,7 @@ export default {
       locateText,
       addDocComment,
       adoptSuggestion,
+      adoptDisputeSuggestion,
       analysisProgress,
       visibleAnalysisProgress,
       isPdfContract,

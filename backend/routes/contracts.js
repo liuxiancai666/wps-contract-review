@@ -1681,7 +1681,7 @@ ${companySearchContext || '未识别到可检索的公司主体名称。'}
 
         // 构建标准审查 JSON schema 说明
         const reviewSchemaDoc = `{
-  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","plain_language":"大白话说明","severity":"高/中/低"}],
+  "dispute_points": [{"title":"风险标题","original_clause":"合同原文","legal_reference":"依据","dispute_rationale":"风险说明","suggested_text":"针对该风险的修改建议","plain_language":"大白话说明","severity":"高/中/低"}],
   "missing_clauses": [{"title":"缺失条款","description":"为什么缺失","suggested_clause":"可补充条款"}],
   "party_review": [{"title":"主体审查项","description":"审查结论","plain_language":"大白话说明"}],
   "modification_suggestions": [{"title":"建议标题","original_text":"合同中可定位的完整原文句子或段落","suggested_text":"可直接替换 original_text 的完整文本","reason":"修改理由","plain_language":"大白话说明","anchor_hint":"用于定位的短语"}],
