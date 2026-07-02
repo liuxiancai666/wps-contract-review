@@ -2,8 +2,8 @@
   <div id="app">
     <header class="app-header" v-if="showHeader">
       <router-link to="/" class="brand" aria-label="合同审查首页">
-        <img src="/asserts/logo.png" alt="合同审查" />
-        <span>合同审查</span>
+        <img src="/asserts/logo_v2.png" alt="牛马在线" />
+        <span>牛马在线</span>
       </router-link>
       <nav class="app-nav">
         <router-link to="/" class="nav-link" active-class="nav-link-active">工作台</router-link>

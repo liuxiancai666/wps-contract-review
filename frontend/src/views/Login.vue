@@ -125,15 +125,16 @@ export default {
 }
 
 .login-logo {
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
-  margin-bottom: 12px;
+  width: 96px;
+  height: 96px;
+  border-radius: 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.12);
 }
 
 .login-header h1 {
-  margin: 0 0 4px;
-  font-size: 20px;
+  margin: 0 0 6px;
+  font-size: 28px;
   font-weight: 800;
   color: #111;
 }

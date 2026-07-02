@@ -30,8 +30,21 @@ const io = new Server(server, {
 const port = process.env.PORT || 3000;
 
 // Middleware
+const allowedOrigins = (process.env.CORS_ORIGIN || process.env.APP_HOST || '').split(',').map(s => s.trim()).filter(Boolean);
 app.use(cors({
-    origin: process.env.CORS_ORIGIN || process.env.APP_HOST || false,  // false=同源，APP_HOST指定前端域名
+    origin: function(origin, callback) {
+        // 允许没有 origin 的请求（如测试工具、服务器内部调用）
+        if (!origin) return callback(null, true);
+        // 允许明确配置的域名，或在开发环境允许所有 localhost
+        if (allowedOrigins.includes(origin)) return callback(null, true);
+        if (process.env.NODE_ENV !== 'production') {
+            if (origin && (origin.includes('localhost') || origin.includes('127.0.0.1'))) {
+                return callback(null, true);
+            }
+        }
+        console.warn('[CORS] Blocked origin:', origin, '| allowed:', allowedOrigins);
+        callback(new Error('Not allowed by CORS'));
+    },
     credentials: true,
 }));
 app.use(express.json({ limit: '50mb' }));

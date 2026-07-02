@@ -1670,7 +1670,7 @@ export default {
         preAnalyzing.value = true;
 
         // 后台异步启动预分析（非阻塞），完成后填充数据、显示确认界面
-        api.preAnalyzeContract({ contractId: contract.id }).then(preAnalysisRes => {
+        api.preAnalyzeContract({ contractId: contract.id, templateId: selectedTemplateId.value }).then(preAnalysisRes => {
             Object.assign(preAnalysisData, preAnalysisRes.data);
             selectedTemplateId.value = preAnalysisData.template_id || selectedTemplateId.value || 'general';
             allSuggestedReviewPoints.value = [...preAnalysisData.suggested_review_points];

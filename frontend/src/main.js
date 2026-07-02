@@ -5,12 +5,10 @@ import 'element-plus/dist/index.css';
 import './assets/css/tailwind.css';
 import { identifyUser } from './user';
 
-const logoUrl = '/asserts/logo.png';
-
-document.title = '合同审查';
+document.title = '牛马在线 - 合同审查';
 const favicon = document.querySelector('link[rel="icon"]') || document.createElement('link');
 favicon.rel = 'icon';
-favicon.href = logoUrl;
+favicon.href = '/favicon.ico';
 document.head.appendChild(favicon);
 
 async function main() {

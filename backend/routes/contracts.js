@@ -1432,8 +1432,23 @@ ${documents.map((doc, index) => `[DOCUMENT_${index + 1}: ${doc.filename}]\n${wra
     }
 });
 
+// 加载自定义规则（来自 review_rules 表）
+const loadCustomRule = async (db, templateId) => {
+    if (!String(templateId || '').startsWith('custom-')) return null;
+    const numericId = Number(String(templateId).replace('custom-', ''));
+    if (!Number.isInteger(numericId) || numericId <= 0) return null;
+    const rule = await db('review_rules').where({ id: numericId, is_enabled: true }).first();
+    if (!rule) return null;
+    return {
+        ...rule,
+        review_points: parseJsonField(rule.review_points, []),
+        core_purposes: parseJsonField(rule.core_purposes, []),
+        prompt_rules: parseJsonField(rule.prompt_rules, []),
+    };
+};
+
 router.post('/pre-analyze', async (req, res) => {
-    const { contractId } = req.body;
+    const { contractId, templateId } = req.body;
     if (!contractId) return res.status(400).json({ error: 'Contract ID is required.' });
     const userId = requireRequestUserId(req, res);
     if (!userId) return;
@@ -1488,17 +1503,34 @@ ${wrapContractContent(plainText)}
 ---`;
         const analysisResult = await callJsonLLM(prompt);
         const template = matchTemplate(analysisResult.contract_type, plainText);
-        analysisResult.template_id = template?.id || 'general';
-        analysisResult.template_name = template?.name || '通用合同审查模板';
+        // 加载用户选择的自定义规则（优先级最高）
+        const customRule = await loadCustomRule(db, templateId);
+        // 确定最终使用的模板ID：自定义规则 > 自动匹配的内置模板
+        analysisResult.template_id = customRule ? templateId : (template?.id || 'general');
+        analysisResult.template_name = customRule ? customRule.name : (template?.name || '通用合同审查模板');
         analysisResult.available_templates = undefined;
+        // 自定义规则的审查点优先级：用户配置 > LLM推荐 > 模板默认
         analysisResult.suggested_review_points = Array.from(new Set([
-            ...(template?.review_points || []),
-            ...(analysisResult.suggested_review_points || []),
+            ...(customRule?.review_points || []),           // 1. 自定义规则（最高优先）
+            ...(analysisResult.suggested_review_points || []), // 2. LLM推荐
+            ...(template?.review_points || []),             // 3. 内置模板兜底
         ]));
+        // 核心目的同样合并
         analysisResult.suggested_core_purposes = Array.from(new Set([
-            ...(template?.core_purposes || []),
+            ...(customRule?.core_purposes || []),
             ...(analysisResult.suggested_core_purposes || []),
+            ...(template?.core_purposes || []),
         ]));
+        // 将自定义规则的额外指令透传给审查阶段
+        if (customRule?.prompt_rules?.length) {
+            analysisResult.prompt_rules = customRule.prompt_rules;
+        }
+        // 标识是否使用了自定义规则（供前端显示）
+        if (customRule) {
+            analysisResult.using_custom_rule = true;
+            analysisResult.custom_rule_id = customRule.id;
+            analysisResult.custom_rule_name = customRule.name;
+        }
         analysisResult.text_stats = textStats;
 
         await db('contracts').where({ id: contractId }).update({
@@ -1802,6 +1834,8 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
         const template = getTemplateById(preAnalysisData.template_id) || matchTemplate(preAnalysisData.contract_type, plainText);
         const reviewPoints = preAnalysisData.reviewPoints?.length ? preAnalysisData.reviewPoints : template.review_points;
         const corePurposes = preAnalysisData.core_purposes?.length ? preAnalysisData.core_purposes : template.core_purposes;
+        // prompt_rules 优先用 preAnalysisData（来自自定义规则），其次用模板内置
+        const promptRules = (preAnalysisData.prompt_rules?.length ? preAnalysisData.prompt_rules : (template.prompt_rules || []));
 
         // Step 2: 检索法条与案例依据
         await emitAnalysisProgress(null, contractId, { step: 'knowledge_search', status: 'running', message: '正在检索法条与案例依据...' });
@@ -1836,7 +1870,7 @@ const runAnalysisInBackground = async (contractId, userId, userPerspective, preA
         // 按章节/条款拆分合同正文为若干 batch，并行审查每个 batch
         const batches = splitContractIntoSections(plainText);
         const reviewResults = await batchReviewSectionsWithProgress(
-            batches, template, userPerspective, relevantKnowledge,
+            batches, { ...template, prompt_rules: promptRules }, userPerspective, relevantKnowledge,
             reviewPoints, corePurposes, callJsonLLM,
             // 每完成一组 batch 推送一次进度，防止 socket 超时导致前端子%回退
             (completed, total) => {
