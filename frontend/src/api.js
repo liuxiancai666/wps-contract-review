@@ -25,6 +25,16 @@ apiClient.interceptors.request.use(config => {
     return Promise.reject(error);
 });
 
+apiClient.interceptors.response.use(response => {
+    return response;
+}, error => {
+    if (error.response && error.response.status === 401) {
+        localStorage.removeItem(TOKEN_KEY);
+        window.location.href = '/login';
+    }
+    return Promise.reject(error);
+});
+
 export default {
     uploadContract(formData) {
         return apiClient.post('/contracts/upload', formData, {

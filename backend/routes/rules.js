@@ -1,22 +1,8 @@
 const express = require('express');
 const db = require('../database');
+const { requireRequestUserId, parseJsonField } = require('../middleware/common');
 
 const router = express.Router();
-
-const getRequestUserId = (req) => {
-    const raw = req.header('X-User-ID') || req.body?.userId || req.query?.userId;
-    const id = Number(raw);
-    return Number.isInteger(id) && id > 0 ? id : null;
-};
-
-const requireRequestUserId = (req, res) => {
-    const userId = getRequestUserId(req);
-    if (!userId) {
-        res.status(401).json({ error: 'User ID is required for access.' });
-        return null;
-    }
-    return userId;
-};
 
 // GET /api/rules — 列出当前用户的所有自定义规则（含系统默认规则）
 router.get('/', async (req, res) => {
@@ -149,15 +135,5 @@ router.delete('/:id', async (req, res) => {
         res.status(500).json({ error: '删除规则失败。' });
     }
 });
-
-function parseJsonField(value, fallback = []) {
-    if (!value) return fallback;
-    try {
-        const parsed = JSON.parse(value);
-        return Array.isArray(parsed) ? parsed : fallback;
-    } catch {
-        return fallback;
-    }
-}
 
 module.exports = router;

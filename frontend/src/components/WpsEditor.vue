@@ -27,6 +27,7 @@
 
 <script>
 import { ref, onMounted, onUnmounted, watch, nextTick, defineComponent } from 'vue';
+import { ElMessage } from 'element-plus';
 import { getUserId } from '../user';
 
 /**

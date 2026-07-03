@@ -16,6 +16,8 @@ const { searchVectorDocuments } = require('../services/vectorStore');
 const { getTemplateById, matchTemplate } = require('../services/reviewTemplates');
 const { extractCompanyNames, searchCompanyInfo } = require('../services/webSearch');
 const { createChatCompletion } = require('../services/llmClient');
+const { getRequestUserId, requireRequestUserId, findOwnedContract, parseJsonField } = require('../middleware/common');
+const { extractTextFromFile, detectScannedPdf } = require('../services/fileParser');
 
 const router = express.Router();
 
@@ -50,47 +52,6 @@ const upload = multer({
     },
 });
 
-// 检测 PDF 是否为扫描件（图像型）：文本极少且页数大于0
-const detectScannedPdf = (pdfData) => {
-    const text = String(pdfData.text || '').replace(/\s+/g, '');
-    const pageCount = pdfData.numpages || (pdfData.info && pdfData.info.Pages) || 1;
-    // 每页平均有效字符少于 50 视为扫描件
-    const avgCharsPerPage = text.length / Math.max(pageCount, 1);
-    return {
-        isScanned: pageCount > 0 && avgCharsPerPage < 50,
-        textLength: text.length,
-        pageCount,
-        avgCharsPerPage: Math.round(avgCharsPerPage),
-    };
-};
-
-const extractTextFromFile = async (filePath) => {
-    const ext = path.extname(filePath).toLowerCase();
-    if (ext === '.docx') {
-        const { value } = await mammoth.extractRawText({ path: filePath });
-        if (!value || !value.trim()) {
-            const err = new Error('DOCX 文本提取为空，文件可能已损坏或为空文档。');
-            err.code = 'EMPTY_TEXT';
-            throw err;
-        }
-        return value;
-    }
-    if (ext === '.pdf') {
-        const data = await pdf(fs.readFileSync(filePath));
-        const scanInfo = detectScannedPdf(data);
-        if (scanInfo.isScanned || !data.text || !data.text.trim()) {
-            const err = new Error('该 PDF 疑似扫描件（图像型），无法提取文本内容。请上传可复制的文字版 PDF，或先用 OCR 工具转换为文字版后再上传。');
-            err.code = 'SCANNED_PDF';
-            err.scanInfo = scanInfo;
-            throw err;
-        }
-        return data.text;
-    }
-    const err = new Error(`Unsupported file extension: ${ext}`);
-    err.code = 'UNSUPPORTED_FILE_TYPE';
-    throw err;
-};
-
 const CONTRACT_CONTENT_BEGIN = '[BEGIN_CONTRACT_CONTENT]';
 const CONTRACT_CONTENT_END = '[END_CONTRACT_CONTENT]';
 
@@ -99,23 +60,6 @@ const wrapContractContent = (text) => [
     String(text || ''),
     CONTRACT_CONTENT_END,
 ].join('\n');
-
-const getRequestUserId = (req) => {
-    const raw = req.header('X-User-ID') || req.body?.userId || req.query?.userId;
-    const id = Number(raw);
-    return Number.isInteger(id) && id > 0 ? id : null;
-};
-
-const requireRequestUserId = (req, res) => {
-    const userId = getRequestUserId(req);
-    if (!userId) {
-        res.status(401).json({ error: 'User ID is required for access.' });
-        return null;
-    }
-    return userId;
-};
-
-const findOwnedContract = (id, userId) => db('contracts').where({ id, user_id: userId }).first();
 
 // ===== 异步分析任务管理 =====
 // 内存级任务存储，用于追踪分析进度并支持断线恢复
@@ -505,15 +449,6 @@ const escapeHtml = (value) => String(value || '')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-
-const parseJsonField = (value, fallback = {}) => {
-    if (!value) return fallback;
-    try {
-        return JSON.parse(value);
-    } catch {
-        return fallback;
-    }
-};
 
 const renderReviewReportHtml = (contract, reviewData = {}, _format = 'html') => {
     const rows = (items = [], render) => items.map(render).join('\n') || '<p>暂无数据。</p>';
@@ -1381,7 +1316,10 @@ const normalizeAnalysisResult = (result) => ({
 router.post('/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).send('No file uploaded.');
     const { userId, groupId } = req.body;
-    if (!userId) return res.status(400).json({ error: 'User ID is required for upload.' });
+    if (!userId) {
+        if (req.file.path) fs.unlinkSync(req.file.path, () => {});
+        return res.status(400).json({ error: 'User ID is required for upload.' });
+    }
 
     try {
         const contractRecord = await db.transaction(async (trx) => {
@@ -1406,6 +1344,9 @@ router.post('/upload', upload.single('file'), async (req, res) => {
             editorConfig: buildEditorConfig(contractRecord, ext),
         });
     } catch (error) {
+        if (req.file.path) {
+            try { fs.unlinkSync(req.file.path); } catch (e) { console.warn('[Upload] Failed to cleanup temp file:', e.message); }
+        }
         if (error.message === 'INVALID_USER_ID') {
             return res.status(400).json({ error: 'Invalid user ID for upload.' });
         }
@@ -1424,7 +1365,6 @@ router.post('/save-callback', async (req, res) => {
             hasUrl: Boolean(body.url),
             forcesavetype: body.forcesavetype,
         });
-        // status 2=保存, 6=强制保存
         if (body.status === 2 || body.status === 6) {
             const contract = await db('contracts').where({ document_key: body.key }).first();
             if (contract && body.url) {
@@ -1444,7 +1384,7 @@ router.post('/save-callback', async (req, res) => {
         res.status(200).json({ error: 0 });
     } catch (error) {
         console.error('[ERROR] Save callback failed:', error);
-        res.status(200).json({ error: 0 });
+        res.status(500).json({ error: 1, message: error.message });
     }
 });
 

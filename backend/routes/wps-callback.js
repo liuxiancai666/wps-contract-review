@@ -21,7 +21,11 @@ const WPS_APP_SECRET = process.env.WPS_APP_SECRET || '';
 // 回调外网基础 URL（WPS 服务器可达），从环境变量读取，或自动推断
 const WPS_CALLBACK_BASE = process.env.WPS_CALLBACK_BASE || '';
 // JWT 签名密钥（与 services/wpsEditor.js 保持一致）
-const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET || 'change-me';
+const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET;
+if (!WPS_TOKEN_SECRET) {
+    console.error('[WPS-CALLBACK] WPS_TOKEN_SECRET environment variable is required');
+    process.exit(1);
+}
 // 文件上传目录
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
 
@@ -33,37 +37,38 @@ if (!fs.existsSync(UPLOAD_TEMP_DIR)) {
 
 // ========== WPS-2 签名验证中间件（非严格模式） ==========
 const verifyWpsSignature = (req, res, next) => {
-  // 签名算法：SHA1(AppSecret + Content-Md5 + Content-Type + Date)
-  // 请求头格式：Authorization: WPS-2:AppId:SHA1值
-  // 注意：当前以非严格模式运行——签名失败时只记录警告不拒绝请求
-  //       待确认 WPS v3 回调的精确签名行为后改为严格模式
   try {
     const auth = req.headers['authorization'] || '';
-    if (auth.startsWith('WPS-2:')) {
-      const parts = auth.split(':');
-      if (parts.length >= 3) {
-        const appId = parts[1];
-        const signature = parts.slice(2).join(':');
-        if (appId !== WPS_APP_ID) {
-          console.warn('[WPS-CALLBACK] WPS-2 AppId mismatch, continuing in non-strict mode');
-          return next();
-        }
-
-        const contentMd5 = req.headers['content-md5'] || '';
-        const contentType = req.headers['content-type'] || '';
-        const date = req.headers['date'] || '';
-        const payload = WPS_APP_SECRET + contentMd5 + contentType + date;
-        const expectedSig = crypto.createHash('sha1').update(payload).digest('hex').toLowerCase();
-
-        if (signature.toLowerCase() !== expectedSig) {
-          console.warn('[WPS-CALLBACK] WPS-2 signature mismatch, continuing in non-strict mode');
-        }
-      }
+    if (!auth.startsWith('WPS-2:')) {
+      return res.status(401).json(fail('缺少 WPS-2 签名'));
     }
+
+    const parts = auth.split(':');
+    if (parts.length < 3) {
+      return res.status(401).json(fail('WPS-2 签名格式错误'));
+    }
+
+    const appId = parts[1];
+    const signature = parts.slice(2).join(':');
+
+    if (appId !== WPS_APP_ID) {
+      return res.status(401).json(fail('WPS-2 AppId 不匹配'));
+    }
+
+    const contentMd5 = req.headers['content-md5'] || '';
+    const contentType = req.headers['content-type'] || '';
+    const date = req.headers['date'] || '';
+    const payload = WPS_APP_SECRET + contentMd5 + contentType + date;
+    const expectedSig = crypto.createHash('sha1').update(payload).digest('hex').toLowerCase();
+
+    if (signature.toLowerCase() !== expectedSig) {
+      return res.status(401).json(fail('WPS-2 签名验证失败'));
+    }
+
     next();
   } catch (error) {
-    console.error('[WPS-CALLBACK] Signature verification error (non-fatal):', error.message);
-    next();
+    console.error('[WPS-CALLBACK] Signature verification error:', error.message);
+    return res.status(401).json(fail('签名验证异常'));
   }
 };
 

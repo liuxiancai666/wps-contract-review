@@ -812,12 +812,11 @@ const listKnowledgeDocuments = async ({
 const pgVectorSearch = async (query, queryVector, { limit, sourceTypes }) => {
     let rowsQuery = db('vector_documents');
     if (sourceTypes.length > 0) rowsQuery = rowsQuery.whereIn('source_type', sourceTypes);
-    // Ensure queryVector is an array of floats
     const vectorStr = `[${queryVector.join(',')}]`;
     const rows = await rowsQuery
-        .select('*', db.raw(`1 - (embedding_vec <=> '${vectorStr}'::vector) as score`))
+        .select('*', db.raw(`1 - (embedding_vec <=> ?::vector) as score`, [vectorStr]))
         .whereNotNull('embedding_vec')
-        .orderByRaw(`embedding_vec <=> '${vectorStr}'::vector`)
+        .orderByRaw(`embedding_vec <=> ?::vector`, [vectorStr])
         .limit(limit);
     return rows.map((row) => ({
         id: row.id,

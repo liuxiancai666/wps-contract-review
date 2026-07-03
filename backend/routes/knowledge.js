@@ -15,6 +15,7 @@ const {
     clearAllVectorDocuments,
 } = require('../services/vectorStore');
 const { parseLegalMarkdown, parseLegalMarkdownFile } = require('../services/legalMarkdownParser');
+const { extractTextFromFile } = require('../services/fileParser');
 
 const router = express.Router();
 const BATCH_IMPORT_FILE_LIMIT = Math.max(1, Number(process.env.KNOWLEDGE_BATCH_FILE_LIMIT || 200));
@@ -28,19 +29,6 @@ const upload = multer({
 });
 const legalTemplatePath = path.join(__dirname, '..', 'data', '法律法规模版.md');
 const caseTemplatePath = path.join(__dirname, '..', 'data', '裁判文书模版.json');
-
-const extractTextFromFile = async (filePath) => {
-    const ext = path.extname(filePath).toLowerCase();
-    if (ext === '.docx') {
-        const { value } = await mammoth.extractRawText({ path: filePath });
-        return value;
-    }
-    if (ext === '.pdf') {
-        const data = await pdf(fs.readFileSync(filePath));
-        return data.text;
-    }
-    return fs.readFileSync(filePath, 'utf8');
-};
 
 const looksLikeLegalMarkdown = (content) => String(content || '').includes('<!-- INFO END -->')
     && /^第[〇零一二两三四五六七八九十百千万亿\d]+条/m.test(content);

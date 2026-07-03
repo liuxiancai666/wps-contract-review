@@ -1,14 +1,9 @@
 const express = require('express');
 const db = require('../database');
 const { getAllTemplates } = require('../services/reviewTemplates');
+const { getRequestUserId, parseJsonField } = require('../middleware/common');
 
 const router = express.Router();
-
-const getRequestUserId = (req) => {
-    const raw = req.header('X-User-ID') || req.query?.userId;
-    const id = Number(raw);
-    return Number.isInteger(id) && id > 0 ? id : null;
-};
 
 // GET /api/templates — 返回预设模板 + 用户自定义规则 + 系统默认规则
 router.get('/', async (req, res) => {
@@ -45,14 +40,6 @@ router.get('/', async (req, res) => {
         res.json(getAllTemplates());
     }
 });
-
-function parseJsonField(value, fallback = []) {
-    if (!value) return fallback;
-    try {
-        const parsed = JSON.parse(value);
-        return Array.isArray(parsed) ? parsed : fallback;
-    } catch { return fallback; }
-}
 
 function parseKeywords(value) {
     if (!value) return [];

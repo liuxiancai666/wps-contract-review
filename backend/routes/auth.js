@@ -4,7 +4,11 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const db = require('../database');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'wps-contract-review-jwt-secret-2026';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    console.error('[Auth] JWT_SECRET environment variable is required');
+    process.exit(1);
+}
 const JWT_EXPIRES = '7d';
 
 // 角色枚举

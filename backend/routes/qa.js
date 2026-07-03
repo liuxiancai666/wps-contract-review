@@ -1,12 +1,9 @@
 const express = require('express');
-const mammoth = require('mammoth');
-const path = require('path');
-const fs = require('fs');
-const pdf = require('pdf-parse');
 const db = require('../database');
 const { searchVectorDocumentsMulti } = require('../services/vectorStore');
 const { searchWeb } = require('../services/webSearch');
 const { createChatCompletion } = require('../services/llmClient');
+const { extractTextFromFile } = require('../services/fileParser');
 
 const router = express.Router();
 
@@ -44,19 +41,6 @@ const BLOCKED_WEB_TERMS = [
 ];
 
 const includesAny = (text, terms) => terms.some((term) => String(text || '').includes(term));
-
-const extractTextFromFile = async (filePath) => {
-    const ext = path.extname(filePath).toLowerCase();
-    if (ext === '.docx') {
-        const { value } = await mammoth.extractRawText({ path: filePath });
-        return value;
-    }
-    if (ext === '.pdf') {
-        const data = await pdf(fs.readFileSync(filePath));
-        return data.text;
-    }
-    return '';
-};
 
 const normalizeHistory = (history = []) => {
     if (!Array.isArray(history)) return [];
