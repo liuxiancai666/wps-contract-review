@@ -101,6 +101,12 @@ const wrapContractContent = (text) => [
 ].join('\n');
 
 const getRequestUserId = (req) => {
+    // 优先从 JWT payload 获取（authMiddleware 已设置 req.user）
+    if (req.user && req.user.id) {
+        const id = Number(req.user.id);
+        if (Number.isInteger(id) && id > 0) return id;
+    }
+    // 降级：从请求头获取（仅用于兼容未完全迁移的调用）
     const raw = req.header('X-User-ID') || req.body?.userId || req.query?.userId;
     const id = Number(raw);
     return Number.isInteger(id) && id > 0 ? id : null;
@@ -109,7 +115,7 @@ const getRequestUserId = (req) => {
 const requireRequestUserId = (req, res) => {
     const userId = getRequestUserId(req);
     if (!userId) {
-        res.status(401).json({ error: 'User ID is required for access.' });
+        res.status(401).json({ error: '需要登录后才能访问，请重新登录。' });
         return null;
     }
     return userId;

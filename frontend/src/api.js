@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getUserId } from './user'; // Assuming user.js is in the same src directory
+import router from './router';
 
 const TOKEN_KEY = 'auth_token';
 
@@ -10,12 +10,8 @@ const apiClient = axios.create({
     }
 });
 
-// 使用拦截器，在每个请求中自动注入用户ID和Authorization到请求头
+// 请求拦截器：自动注入 Authorization
 apiClient.interceptors.request.use(config => {
-    const userId = getUserId();
-    if (userId) {
-        config.headers['X-User-ID'] = userId;
-    }
     const token = localStorage.getItem(TOKEN_KEY);
     if (token) {
         config.headers['Authorization'] = `Bearer ${token}`;
@@ -24,6 +20,22 @@ apiClient.interceptors.request.use(config => {
 }, error => {
     return Promise.reject(error);
 });
+
+// 响应拦截器：统一处理 401 未授权
+apiClient.interceptors.response.use(
+    response => response,
+    error => {
+        if (error.response && error.response.status === 401) {
+            console.warn('[API] 401 Unauthorized — 清除登录状态并跳转登录页');
+            localStorage.removeItem(TOKEN_KEY);
+            localStorage.removeItem('user_info');
+            if (router.currentRoute.value.path !== '/login') {
+                router.push('/login');
+            }
+        }
+        return Promise.reject(error);
+    }
+);
 
 export default {
     uploadContract(formData) {
@@ -139,9 +151,8 @@ export default {
 
     // This function is now corrected to fetch history for the current user via headers
     // The userId parameter is kept for compatibility with the calling component but is no longer used in the URL.
-    getUserHistory(userId) {
-        console.log(`Fetching history for user ${userId} (via headers)`);
-        return apiClient.get('/contracts'); // Corrected endpoint
+    getUserHistory() {
+        return apiClient.get('/contracts');
     },
 
     getContractDetails(contractId) {

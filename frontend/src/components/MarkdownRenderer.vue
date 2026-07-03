@@ -5,6 +5,17 @@
 <script>
 import { marked } from 'marked';
 
+// 简单的 HTML 转义函数，防止 XSS
+const escapeHtml = (text) => {
+  if (!text) return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+};
+
 export default {
   name: 'MarkdownRenderer',
   props: {
@@ -18,11 +29,10 @@ export default {
       if (!this.markdownText) {
         return '<p style="color: #909399;">暂无AI审查建议。</p>';
       }
-      // Configure marked to handle line breaks properly
-      marked.setOptions({
-        breaks: true,
-      });
-      return marked.parse(this.markdownText);
+      // 先转义 HTML 特殊字符，防止 XSS 注入
+      const safeText = escapeHtml(this.markdownText);
+      // 再用 marked 解析 markdown（此时 HTML 标签已被转义为纯文本）
+      return marked.parse(safeText, { breaks: true });
     },
   },
 };

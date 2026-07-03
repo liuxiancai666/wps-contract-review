@@ -8,7 +8,12 @@ const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 
 const WPS_APP_ID = process.env.WPS_APP_ID || '';
-const WPS_TOKEN_SECRET=process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET || 'change-me';
+const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET;
+
+// 启动时强制校验 WPS_TOKEN_SECRET
+if (!WPS_TOKEN_SECRET || WPS_TOKEN_SECRET.length < 32) {
+    throw new Error('环境变量 WPS_TOKEN_SECRET 必须设置且长度不少于 32 个字符。请检查 .env 文件。');
+}
 
 /**
  * 生成 WPS WebOffice 前端 SDK init 配置

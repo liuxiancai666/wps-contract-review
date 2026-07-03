@@ -4,26 +4,34 @@
 
 | 项目 | 内容 |
 |------|------|
-| **端口** | 8085 |
-| **后端端口** | 8089 |
-| **数据库** | `wps_contract_review`（PostgreSQL Docker）|
-| **前端目录** | `/var/www/wps-contract-review` |
-| **后端目录** | `/root/data/disk/apps/wps-contract-review` |
-| **PM2 进程** | `wps-contract-review-backend` |
-| **ONLYOFFICE** | 共享 8086 实例 |
+| **端口** | 由环境变量 `PORT` / `APP_HOST` 决定 |
+| **后端端口** | 由环境变量 `PORT` 决定（默认 3000） |
+| **数据库** | PostgreSQL（通过 Docker Compose 启动） |
+| **前端目录** | 由部署环境决定 |
+| **后端目录** | 由部署环境决定 |
+| **PM2 进程** | 参考 `ecosystem.config.js` 配置 |
 
 ## Nginx
 
-端口 8085，配置: `/etc/nginx/sites-enabled/wps-contract-review`
+前端通过 Nginx 反向代理到后端 API。
 
 ## 外网访问
 
-`http://82.157.138.176:8085`
+由环境变量 `APP_HOST` / `CORS_ORIGIN` 配置。
 
-## 克隆来源
+## 环境变量
 
-从原合同审查系统（contract-review，8082端口）完整克隆：
-- 复制 `/root/data/disk/apps/contract-review-v2` → `wps-contract-review`
-- 后端端口 8689 → 8089
-- 数据库 `contract_review` → `wps_contract_review`
-- 前端端口 8082 → 8085
+请参考 `.env.example` 文件配置所有必要的环境变量：
+
+- `JWT_SECRET` — 必须设置且长度 >= 32 字符
+- `WPS_TOKEN_SECRET` — 必须设置且长度 >= 32 字符
+- `DATABASE_URL` — PostgreSQL 连接字符串
+- `WPS_APP_ID` / `WPS_APP_SECRET` — WPS 开放平台凭证
+
+## 启动步骤
+
+1. 复制环境变量：`cp .env.example .env`（Linux/Mac）或 `copy .env.example .env`（Windows）
+2. 编辑 `.env` 填入所有必要配置
+3. 启动基础设施：`docker compose up -d`
+4. 启动后端：`cd backend && npm start`
+5. 启动前端：`cd frontend && npm run dev`

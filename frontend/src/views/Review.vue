@@ -1816,7 +1816,6 @@ export default {
     };
 
     const goBackToUpload = () => {
-        console.log('[DEBUG] goBackToUpload clicked.');
         resetState();
     };
 
@@ -1985,17 +1984,13 @@ export default {
         }
 
         // 如果是从历史记录加载的合同，且有未插入的批注，自动插入
-        console.log('[DEBUG] onDocumentReady - needsAutoInsert:', needsAutoInsert.value, 'modification_suggestions:', reviewData.modification_suggestions?.length);
         if (needsAutoInsert.value && reviewData.modification_suggestions?.length > 0) {
           needsAutoInsert.value = false; // 重置标志
-          console.log('[DEBUG] Calling autoInsertAnnotations...');
           // 延迟一下确保文档完全就绪
           await new Promise(r => setTimeout(r, 1000));
           // 先创建星法式风险书签（用于定位原文/原位批注/一键调整）
           if (wpsEditorRef.value && typeof wpsEditorRef.value.batchCreateRiskBookmarks === 'function') {
-            console.log('[DEBUG] Calling batchCreateRiskBookmarks with', reviewData.modification_suggestions.length, 'items');
             await wpsEditorRef.value.batchCreateRiskBookmarks(reviewData.modification_suggestions);
-            console.log('[DEBUG] batchCreateRiskBookmarks done');
           }
           await autoInsertAnnotations();
         }
@@ -2080,10 +2075,8 @@ export default {
             Object.assign(reviewData, contractData.reviewData || {});
 
             // 标记需要自动插入批注（当文档加载完成后）
-            console.log('[DEBUG] loadContractFromServer - reviewData.modification_suggestions:', reviewData.modification_suggestions?.length);
             if (reviewData.modification_suggestions?.length > 0) {
                 needsAutoInsert.value = true;
-                console.log('[DEBUG] needsAutoInsert set to TRUE');
             }
 
             // Save this loaded state to localStorage so a refresh works correctly
@@ -2247,7 +2240,6 @@ export default {
     };
 
     const resetState = () => {
-      console.log('[DEBUG] resetState called.');
       isResetting = true; // Lock the saving mechanism
       // 销毁 WPS 编辑器实例
       destroyWpsEditor();
@@ -2282,24 +2274,20 @@ export default {
       focusedReviewLoading.value = false;
       // Clear the session from localStorage
       localStorage.removeItem('review_session');
-      console.log('[DEBUG] review_session removed from localStorage.');
 
       // Use nextTick to ensure the DOM has updated and state changes have propagated
       // before we unlock the saving mechanism.
       nextTick(() => {
         isResetting = false;
-        console.log('[DEBUG] resetState finished and lock released.');
       });
     };
 
     // This is the correct guard for handling navigation that reuses the same component instance.
     onBeforeRouteUpdate((to, from) => {
-      console.log(`[DEBUG] onBeforeRouteUpdate: from ${from.fullPath} to ${to.fullPath}`);
       // When navigating from a history-loaded review page (which has a contract_id)
       // back to the main 'start' page (which does not), we must reset the entire state
       // to ensure a completely fresh start.
       if (from.query.contract_id && !to.query.contract_id) {
-          console.log('[DEBUG] Route condition met. Calling resetState.');
           resetState();
       }
     });
@@ -2413,17 +2401,14 @@ export default {
 
     const findTextRange = async (text) => {
       if (!text || text.length < 2) return null;
-      console.log('[DEBUG] findTextRange searching:', text.substring(0, 50));
       try {
         const app = await getWpsApplication();
         if (!app) {
-          console.log('[DEBUG] findTextRange: no app');
           return null;
         }
 
         const doc = app.ActiveDocument;
         if (!doc) {
-          console.log('[DEBUG] findTextRange: no ActiveDocument');
           return null;
         }
 
@@ -2433,18 +2418,15 @@ export default {
 
         // 方式1: Selection.Find (桌面Word方式)
         const selection = doc.Selection;
-        console.log('[DEBUG] Selection:', !!selection, 'Find:', !!selection?.Find);
         if (selection?.Find) {
           find = selection.Find;
           searchRange = selection;
-          console.log('[DEBUG] 使用 Selection.Find');
         }
 
         // 方式2: Content.Find (有些版本支持)
         if (!find && doc.Content?.Find) {
           find = doc.Content.Find;
           searchRange = doc.Content;
-          console.log('[DEBUG] 使用 Content.Find');
         }
 
         // 方式3: 尝试 GoTo + Find 组合
@@ -2456,7 +2438,6 @@ export default {
               if (newSelection?.Find) {
                 find = newSelection.Find;
                 searchRange = newSelection;
-                console.log('[DEBUG] 使用 Content.Select + Selection.Find');
               }
             }
           } catch (e) {
@@ -2472,20 +2453,16 @@ export default {
             if (doc.Content?.Start !== undefined && doc.Content?.End !== undefined) {
               const start = doc.Content.Start;
               const end = doc.Content.End;
-              console.log('[DEBUG] 文档范围:', start, '-', end);
               
               // 创建整个文档范围的Range
               const fullRange = doc.Range(start, end);
               if (fullRange) {
                 const fullText = fullRange.Text || '';
                 if (fullText.includes(text)) {
-                  console.log('[DEBUG] Range遍历找到文本在文档中');
                   // 选中整个文档以便后续操作
                   fullRange.Select();
                   return fullRange;
                 } else {
-                  console.log('[DEBUG] 文本不在文档中，当前查找:', text.substring(0, 30));
-                  console.log('[DEBUG] 文档内容片段:', fullText.substring(0, 200));
                 }
               }
             }
@@ -2495,7 +2472,6 @@ export default {
           return null;
         }
 
-        console.log('[DEBUG] 执行 Find.Execute');
         // Execute find - this searches for the text and selects it if found
         // WPS WebOffice 可能需要不同的参数格式
         let found = false;
@@ -2514,7 +2490,6 @@ export default {
             }
           }
         }
-        console.log('[DEBUG] Find.Execute result:', found);
         if (found) {
           // Text was found and selected - return the Range object
           return searchRange?.Range || selection?.Range;
@@ -2523,12 +2498,10 @@ export default {
         // Try with normalized text
         const normalized = text.replace(/[""]/g, '"').replace(/['']/g, "'").replace(/\s+/g, '');
         if (normalized !== text && normalized.length >= 4) {
-          console.log('[DEBUG] 尝试 normalized:', normalized.substring(0, 50));
           // Try fuzzy find by searching just the first 30 chars
           const shortText = text.slice(0, Math.min(30, text.length));
           const foundShort = await find.Execute({ Text: shortText });
           if (foundShort) {
-            console.log('[DEBUG] shortText found');
             return selection.Range;
           }
 
@@ -2537,7 +2510,6 @@ export default {
           if (firstSentence && firstSentence.length >= 4) {
             const foundSentence = await find.Execute({ Text: firstSentence.trim() });
             if (foundSentence) {
-              console.log('[DEBUG] firstSentence found');
               return selection.Range;
             }
           }
@@ -3420,7 +3392,6 @@ export default {
     // 无法在文档中精确定位并插入批注。改用数据库存储批注，定位功能使用段落导航。
     const autoInsertAnnotations = async () => {
         const pdfCheck = isPdfContract.value;
-        console.log('[DEBUG] autoInsertAnnotations called, isPdfContract:', pdfCheck, 'suggestions:', reviewData.modification_suggestions?.length);
         
         // PDF 或没有建议时直接返回
         if (pdfCheck || !reviewData.modification_suggestions?.length) {

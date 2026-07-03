@@ -4,6 +4,10 @@ const db = require('../database');
 const router = express.Router();
 
 const getRequestUserId = (req) => {
+    if (req.user && req.user.id) {
+        const id = Number(req.user.id);
+        if (Number.isInteger(id) && id > 0) return id;
+    }
     const raw = req.header('X-User-ID') || req.body?.userId || req.query?.userId;
     const id = Number(raw);
     return Number.isInteger(id) && id > 0 ? id : null;
@@ -12,7 +16,7 @@ const getRequestUserId = (req) => {
 const requireRequestUserId = (req, res) => {
     const userId = getRequestUserId(req);
     if (!userId) {
-        res.status(401).json({ error: 'User ID is required for access.' });
+        res.status(401).json({ error: '需要登录后才能访问，请重新登录。' });
         return null;
     }
     return userId;

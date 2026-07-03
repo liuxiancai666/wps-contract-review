@@ -26,8 +26,5 @@ async function main() {
 
 main();
 
-window.ResizeObserver = class _NewResizeObserver extends ResizeObserver {
-  constructor(callback) {
-    super(() => window.requestAnimationFrame(() => callback.apply(this, arguments)));
-  }
-};
+// 注意：全局覆盖 ResizeObserver 会影响所有第三方库，已移除。
+// 如需防抖，请在具体组件内使用 ResizeObserver + requestAnimationFrame。

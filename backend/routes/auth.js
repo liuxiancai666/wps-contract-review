@@ -4,8 +4,13 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const db = require('../database');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'wps-contract-review-jwt-secret-2026';
+const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES = '7d';
+
+// 启动时强制校验 JWT_SECRET
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+    throw new Error('环境变量 JWT_SECRET 必须设置且长度不少于 32 个字符。请检查 .env 文件。');
+}
 
 // 角色枚举
 const ROLES = { ADMIN: 'admin', USER: 'user' };

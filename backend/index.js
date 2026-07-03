@@ -24,8 +24,18 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
+    origin: function(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (process.env.NODE_ENV !== 'production') {
+        if (origin && (origin.includes('localhost') || origin.includes('127.0.0.1'))) {
+          return callback(null, true);
+        }
+      }
+      callback(new Error('Not allowed by CORS'));
+    },
+    methods: ["GET", "POST"],
+    credentials: true,
   }
 });
 const port = process.env.PORT || 3000;
@@ -114,25 +124,19 @@ app.set('io', io);
 // 注入 io 实例到 contracts 路由，供后台异步分析任务推送进度
 contractRoutes.setIoInstance(io);
 
-// API Routes
-app.use('/api/contracts', contractRoutes);
-app.use('/api/qa', qaRoutes);
-app.use('/api/users', userRoutes);
+// API Routes — 所有业务路由强制 JWT 认证
+app.use('/api/contracts', authRoutes.authMiddleware, contractRoutes);
+app.use('/api/qa', authRoutes.authMiddleware, qaRoutes);
+app.use('/api/users', authRoutes.authMiddleware, userRoutes);
 app.use('/api/knowledge', authRoutes.authMiddleware, authRoutes.adminMiddleware, knowledgeRoutes);
-app.use('/api/templates', templateRoutes);
-app.use('/api/rules', rulesRoutes);
+app.use('/api/templates', authRoutes.authMiddleware, templateRoutes);
+app.use('/api/rules', authRoutes.authMiddleware, rulesRoutes);
 
-// Auth 路由（登录/注册/用户管理）
+// Auth 路由（登录/注册不需要认证，用户管理需要）
 app.use('/api/auth', authRoutes);
 
 // WPS WebOffice SDK auth 代理（必须在静态文件之前）
 app.use('/office/v5/ai', wpsAuthRoutes);
-
-// DEBUG: 临时测试端点 - 在 wpsAuthRoutes 之后验证路由
-app.post('/office/v5/ai/test', (req, res) => {
-    console.log('[DEBUG] /office/v5/ai/test endpoint HIT - wpsAuthRoutes works!');
-    res.json({ ok: true, msg: 'wpsAuthRoutes is working' });
-});
 
 // WPS WebOffice v3 回调路由（必须是公网可达）
 app.use(wpsCallbackRoutes);
@@ -141,19 +145,30 @@ app.get('/', (req, res) => {
   res.send('ContractGE Backend is running!');
 });
 
-// Multer 错误处理中间件：文件大小超限、格式不支持等返回 JSON
+// 全局错误处理中间件
 app.use((err, req, res, next) => {
-  if (err) {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ error: '文件大小超过 50MB 限制，请压缩或拆分后上传。', code: 'FILE_TOO_LARGE' });
-    }
-    if (err.message && err.message.startsWith('UNSUPPORTED_FILE_TYPE')) {
-      return res.status(400).json({ error: '仅支持 .docx、.doc 和 .pdf 格式的文件。', code: 'UNSUPPORTED_FILE_TYPE' });
-    }
-    console.error('[ERROR] Unhandled middleware error:', err);
-    return res.status(500).json({ error: '服务器处理请求时发生错误。' });
+  if (!err) return next();
+
+  // Multer 错误
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ error: '文件大小超过 50MB 限制，请压缩或拆分后上传。', code: 'FILE_TOO_LARGE' });
   }
-  next();
+  if (err.message && err.message.startsWith('UNSUPPORTED_FILE_TYPE')) {
+    return res.status(400).json({ error: '仅支持 .docx、.doc 和 .pdf 格式的文件。', code: 'UNSUPPORTED_FILE_TYPE' });
+  }
+
+  // JWT 认证错误
+  if (err.name === 'UnauthorizedError' || err.status === 401) {
+    return res.status(401).json({ error: '未授权，请重新登录。' });
+  }
+
+  // 统一错误日志（生产环境不暴露详细错误）
+  console.error('[ERROR]', req.method, req.path, err.message);
+  const isDev = process.env.NODE_ENV !== 'production';
+  res.status(err.status || 500).json({
+    error: isDev ? err.message : '服务器处理请求时发生错误。',
+    ...(isDev && err.stack ? { stack: err.stack } : {}),
+  });
 });
 
 // ========== 进程级异常处理（防止未捕获异常导致静默崩溃） ==========

@@ -21,7 +21,13 @@ const WPS_APP_SECRET = process.env.WPS_APP_SECRET || '';
 // 回调外网基础 URL（WPS 服务器可达），从环境变量读取，或自动推断
 const WPS_CALLBACK_BASE = process.env.WPS_CALLBACK_BASE || '';
 // JWT 签名密钥（与 services/wpsEditor.js 保持一致）
-const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET || 'change-me';
+const WPS_TOKEN_SECRET = process.env.WPS_TOKEN_SECRET || process.env.ONLYOFFICE_JWT_SECRET;
+
+// 启动时强制校验 WPS_TOKEN_SECRET
+if (!WPS_TOKEN_SECRET || WPS_TOKEN_SECRET.length < 32) {
+    throw new Error('环境变量 WPS_TOKEN_SECRET 必须设置且长度不少于 32 个字符。请检查 .env 文件。');
+}
+
 // 文件上传目录
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
 
@@ -31,39 +37,50 @@ if (!fs.existsSync(UPLOAD_TEMP_DIR)) {
   fs.mkdirSync(UPLOAD_TEMP_DIR, { recursive: true });
 }
 
-// ========== WPS-2 签名验证中间件（非严格模式） ==========
+// ========== WPS-2 签名验证中间件（严格模式） ==========
 const verifyWpsSignature = (req, res, next) => {
   // 签名算法：SHA1(AppSecret + Content-Md5 + Content-Type + Date)
   // 请求头格式：Authorization: WPS-2:AppId:SHA1值
-  // 注意：当前以非严格模式运行——签名失败时只记录警告不拒绝请求
-  //       待确认 WPS v3 回调的精确签名行为后改为严格模式
+  // 严格模式：签名不匹配时直接拒绝请求
   try {
     const auth = req.headers['authorization'] || '';
-    if (auth.startsWith('WPS-2:')) {
-      const parts = auth.split(':');
-      if (parts.length >= 3) {
-        const appId = parts[1];
-        const signature = parts.slice(2).join(':');
-        if (appId !== WPS_APP_ID) {
-          console.warn('[WPS-CALLBACK] WPS-2 AppId mismatch, continuing in non-strict mode');
-          return next();
-        }
-
-        const contentMd5 = req.headers['content-md5'] || '';
-        const contentType = req.headers['content-type'] || '';
-        const date = req.headers['date'] || '';
-        const payload = WPS_APP_SECRET + contentMd5 + contentType + date;
-        const expectedSig = crypto.createHash('sha1').update(payload).digest('hex').toLowerCase();
-
-        if (signature.toLowerCase() !== expectedSig) {
-          console.warn('[WPS-CALLBACK] WPS-2 signature mismatch, continuing in non-strict mode');
-        }
-      }
+    if (!auth.startsWith('WPS-2:')) {
+      return res.status(401).json({ code: 1, message: '缺少 WPS-2 签名认证' });
     }
+
+    const parts = auth.split(':');
+    if (parts.length < 3) {
+      return res.status(401).json({ code: 1, message: 'WPS-2 签名格式无效' });
+    }
+
+    const appId = parts[1];
+    const signature = parts.slice(2).join(':');
+
+    if (appId !== WPS_APP_ID) {
+      console.warn('[WPS-CALLBACK] WPS-2 AppId mismatch:', appId);
+      return res.status(401).json({ code: 1, message: 'AppId 不匹配' });
+    }
+
+    if (!WPS_APP_SECRET) {
+      console.error('[WPS-CALLBACK] WPS_APP_SECRET 未配置，无法验证签名');
+      return res.status(500).json({ code: 1, message: '服务器配置错误' });
+    }
+
+    const contentMd5 = req.headers['content-md5'] || '';
+    const contentType = req.headers['content-type'] || '';
+    const date = req.headers['date'] || '';
+    const payload = WPS_APP_SECRET + contentMd5 + contentType + date;
+    const expectedSig = crypto.createHash('sha1').update(payload).digest('hex').toLowerCase();
+
+    if (signature.toLowerCase() !== expectedSig) {
+      console.warn('[WPS-CALLBACK] WPS-2 signature mismatch');
+      return res.status(401).json({ code: 1, message: '签名验证失败' });
+    }
+
     next();
   } catch (error) {
-    console.error('[WPS-CALLBACK] Signature verification error (non-fatal):', error.message);
-    next();
+    console.error('[WPS-CALLBACK] Signature verification error:', error.message);
+    return res.status(500).json({ code: 1, message: '签名验证异常' });
   }
 };
 
@@ -259,13 +276,11 @@ router.get('/v3/3rd/files/:file_id/permission', verifyWpsSignature, async (req, 
     // 默认可编辑：非PDF且edit_enabled未明确设置为false
     const editEnabled = !isPdf && contract.edit_enabled !== false;
 
-    // 调试：记录 WPS 回调的所有 header
+    // 调试：记录 WPS 回调的关键信息（不记录 token）
     console.log('[WPS-CALLBACK] Permission request:',
       'file_id:', req.params.file_id,
       'X-App-ID:', req.get('X-App-ID'),
-      'X-WebOffice-Token:', (req.get('X-WebOffice-Token') || '').slice(0, 20) + '...',
-      'X-Request-ID:', req.get('X-Request-ID'),
-      'query:', JSON.stringify(req.query).slice(0, 100)
+      'X-Request-ID:', req.get('X-Request-ID')
     );
 
     // 【重要】update=1 时 WPS 服务器要求在企业控制台登记 Provider 回调地址
